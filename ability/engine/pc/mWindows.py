@@ -1,5 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
+import os
+
 try:
     from pywinauto.application import Application
     from pywinauto.desktop import Desktop
@@ -11,19 +13,25 @@ from ability.core.engine import BaseEngine
 
 TAG = 'WindowsEngine'
 
+
 class WindowsEngine(BaseEngine):
+    package_path = None
 
     def init_driver(self, test_subject=None):
         SLog.i(TAG, "Init Windows Engine")
         self.driver = Application(backend="uia")
 
     def start_app(self, package_name=None):
-        self.driver.start(package_name)
+        self.driver.start(r"{}".format(package_name))
+        self.package_path = package_name
         return True
 
     def stop_app(self, package_name=None):
         try:
             self.driver.kill()
+            if package_name is not None:
+                file_name = os.path.basename(self.package_path)
+                os.system("taskkill /F /IM {}".format(file_name))
         except:
             pass
         return True
@@ -38,10 +46,14 @@ class WindowsEngine(BaseEngine):
                 if key in ['index', 'not']: continue
                 if value:
                     # --- 参数映射 ---
-                    if key == 'id': locator_params['auto_id'] = value
-                    elif key == 'text': locator_params['title'] = value
-                    elif key == 'type': locator_params['control_type'] = value
-                    else: locator_params[key] = value
+                    if key == 'id':
+                        locator_params['auto_id'] = value
+                    elif key == 'text':
+                        locator_params['title'] = value
+                    elif key == 'type':
+                        locator_params['control_type'] = value
+                    else:
+                        locator_params[key] = value
 
             index = condition.get('index', None)
             if index is not None and isinstance(index, int):
@@ -56,11 +68,7 @@ class WindowsEngine(BaseEngine):
         return current
 
     def end(self):
-        try:
-            self.driver.kill()
-        except:
-            pass
-        return True
+        self.stop_app()
 
     # --- 统一动作接口 ---
 
@@ -121,10 +129,3 @@ class WindowsEngine(BaseEngine):
                 win.close()
         except Exception as e:
             SLog.e(TAG, f"Close window failed: {e}")
-            
-            
-if __name__ == '__main__':
-    driver = WindowsEngine()
-    driver.init_driver()
-    driver.start_app(r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
-    driver.start_app(r'D:\software\game\perfectworldarena\完美世界竞技平台.exe')

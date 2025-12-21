@@ -8,6 +8,7 @@ from ability.component.router import BaseRouter
 
 TAG = "CLICK"
 
+
 @BaseRouter.route('public/click')
 class Click(Template):
     """
@@ -73,7 +74,26 @@ class Click(Template):
                         "name": "type",
                         "type": "str",
                         "desc": "控件类型 (Class/ControlType/Role)",
-                        "placeholder": "Button/TextView/XCUIElementTypeButton"
+                        "placeholder": "Button/TextView/XCUIElementTypeButton",
+                        "show_if": ["web"]
+                    },
+                    {
+                        "name": "type",
+                        "type": "select",
+                        "desc": "控件类型 (Class/ControlType/Role)",
+                        "placeholder": "Button/TextView/XCUIElementTypeButton",
+                        "options": [
+                            {"value": "Button", "text": "Button"},
+                            {"value": "Edit", "text": "Edit"},
+                            {"value": "CheckBox", "text": "CheckBox(复选框)"},
+                            {"value": "RadioButton", "text": "RadioButton(单选按钮)"},
+                            {"value": "ComboBox", "text": "ComboBox(下拉选择框)"},
+                            {"value": "Hyperlink", "text": "Hyperlink(超链接)"},
+                            {"value": "Text", "text": "Text(静态文本标签通常用于显示说明文字，不可编辑)"},
+                            {"value": "Image", "text": "Image(图片或图标)"},
+                            {"value": "ToolTip", "text": "ToolTip(鼠标悬停时显示的提示气泡)"},
+                        ],
+                        "show_if": ["windows"]
                     },
                     {
                         "name": "desc",
@@ -122,7 +142,7 @@ class Click(Template):
         self.get_engine()
         sub_type = self.get_param_value("sub_type")
         mLocatorChain = self.get_param_value("locator_chain")
-        
+
         # 使用统一的 find_element 接口
         element = self.engine.find_element(mLocatorChain)
         SLog.i(TAG, element)
