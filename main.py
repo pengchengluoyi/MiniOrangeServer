@@ -67,7 +67,7 @@ if __name__ == "__main__":
     run_config = {
         "app": app,
         "host": "127.0.0.1",
-        "port": 8001,
+        "port": 8000,
         "reload": False,
         "access_log": True,
         "log_level": "info",

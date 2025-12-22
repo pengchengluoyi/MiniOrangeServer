@@ -30,7 +30,7 @@ class Screenshot(Template):
                     {"value": "mac", "text": "macOS"},
                     {"value": "web", "text": "Web"}
                 ],
-                "defaultValue": "android"
+                "defaultValue": ""
             },
             {
                 "name": "filename_prefix",

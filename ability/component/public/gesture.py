@@ -25,7 +25,7 @@ class Gesture(Template):
                     {"value": "mac", "text": "macOS"},
                     {"value": "web", "text": "Web"}
                 ],
-                "defaultValue": "android"
+                "defaultValue": ""
             },
             {
                 "name": "sub_type",

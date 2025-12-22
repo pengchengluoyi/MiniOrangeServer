@@ -77,7 +77,7 @@ MAP = {
                 "icon": "if",
                 "address": "cfs/mIf"
             },
-            "start": {
+            "sleep": {
                 "type": 200,  # 前端根据这个来渲染特殊的条件构造器UI
                 "name": "等待",
                 "icon": "bed",  # 对应前端 iconMap 里的图标
@@ -92,7 +92,7 @@ MAP = {
             "color": "#ff1486"  # 谷歌红
         },
         "details": {
-            "upload": {
+            "upload_file": {
                 "address": "web/upload_file"
             },
         }
@@ -104,7 +104,9 @@ MAP = {
             "color": "#04dcd8"  # 天蓝色
         },
         "details": {
-            "dump_dom": {
+            "dump_hierarchy": {
+                "type": 200,
+                "name": "获取DOM树",
                 "address": "mobile/dump_hierarchy"
             }
         }

@@ -27,7 +27,7 @@ class Click(Template):
                     {"value": "mac", "text": "macOS"},
                     {"value": "web", "text": "Web"}
                 ],
-                "defaultValue": "android"
+                "defaultValue": ""
             },
             {
                 "name": "sub_type",
@@ -143,11 +143,17 @@ class Click(Template):
         sub_type = self.get_param_value("sub_type")
         mLocatorChain = self.get_param_value("locator_chain")
 
+        # 过滤掉定位链中的空值，防止引擎尝试匹配空字符串导致查找失败
+        if mLocatorChain and isinstance(mLocatorChain, list):
+            mLocatorChain = [
+                {k: v for k, v in node.items() if v is not None and v != ""}
+                for node in mLocatorChain
+            ]
+
         # 使用统一的 find_element 接口
         element = self.engine.find_element(mLocatorChain)
-        SLog.i(TAG, element)
 
-        if element:
+        if element is not None:
             if sub_type == 'double':
                 self.engine.double_click(element)
             elif sub_type == 'right-click' or sub_type == 'long_press':
