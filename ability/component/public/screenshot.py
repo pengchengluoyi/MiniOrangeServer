@@ -1,6 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
+import os
 import time
 import random
 
@@ -46,7 +47,8 @@ class Screenshot(Template):
             "locator_chain": []
         },
         "outputVars": [
-            {"key": "path", "type": "str", "desc": "截图保存路径"}
+            {"key": "path", "type": "str", "desc": "截图保存路径"},
+            {"key": "url", "type": "str", "desc": "图片Web路径"}
         ]
     }
 
@@ -61,6 +63,13 @@ class Screenshot(Template):
         timestamp = int(time.time())
         random_num = random.randint(1000, 9999)
         filename = f"{prefix}_{timestamp}_{random_num}.png"
+        
+        # 解决 PermissionError: 使用绝对路径保存到 uploads 目录
+        save_dir = os.path.join(os.getcwd(), "uploads")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        full_path = os.path.join(save_dir, filename)
+        web_path = f"/static/{filename}"
 
         # 如果指定了元素，尝试进行元素截图（需引擎支持）
         # 目前各引擎实现不一，这里作为预留接口，若找不到元素或不支持则回退到全屏
@@ -69,14 +78,18 @@ class Screenshot(Template):
             element = self.engine.find_element(locator_chain)
             if element and hasattr(element, 'screenshot'):
                 try:
-                    path = element.screenshot(filename)
+                    path = element.screenshot(full_path)
                     captured = True
                 except:
                     pass
 
         if not captured:
-            path = self.engine.screenshot(filename)
+            path = self.engine.screenshot(full_path)
             SLog.i("Screenshot", f"Saved at: {path}")
+
+        # 将路径和URL写入运行内存，供后续节点或前端使用
+        self.memory.set(self.info, "path", full_path)
+        self.memory.set(self.info, "url", web_path)
 
         self.result.success()
         return self.result

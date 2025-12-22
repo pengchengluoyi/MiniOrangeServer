@@ -5,6 +5,7 @@ import os
 try:
     from pywinauto.application import Application
     from pywinauto.desktop import Desktop
+    from PIL import ImageGrab
 except ImportError:
     pass
 
@@ -98,9 +99,37 @@ class WindowsEngine(BaseEngine):
     def hover(self, element):
         element.move_mouse_input()
 
+    def dump_hierarchy(self, compressed=False, pretty=False, max_depth=None):
+        """
+        Dumps the UI hierarchy of the current window.
+        Falls back to the active desktop window if the app window is not available.
+        """
+        try:
+            # pywinauto's print_control_identifiers returns a list of strings
+            hierarchy_list = self.driver.top_window().print_control_identifiers(depth=max_depth)
+            return "\n".join(hierarchy_list)
+        except Exception as e:
+            SLog.w(TAG, f"Dump hierarchy for app window failed: {e}, fallback to active desktop window.")
+            try:
+                desktop = Desktop(backend="uia")
+                active_window = desktop.active()
+                if active_window:
+                    hierarchy_list = active_window.print_control_identifiers(depth=max_depth)
+                    return "\n".join(hierarchy_list)
+                else:
+                    SLog.w(TAG, "No active window found on desktop.")
+                    return ""
+            except Exception as e2:
+                SLog.e(TAG, f"Fallback to dump active window hierarchy also failed: {e2}")
+                return ""
+
     def screenshot(self, path):
         # 截取当前操作的窗口
-        self.driver.top_window().capture_as_image().save(path)
+        try:
+            self.driver.top_window().capture_as_image().save(path)
+        except Exception as e:
+            SLog.w(TAG, f"Capture app window failed: {e}, fallback to fullscreen.")
+            ImageGrab.grab().save(path)
         return path
 
     def switch_window(self, target):

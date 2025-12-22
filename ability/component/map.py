@@ -55,6 +55,12 @@ MAP = {
                 "icon": "wallpaper",
                 "address": "public/input",
             },
+            "dump_dom": {
+                "type": 200,
+                "name": "获取布局",
+                "icon": "target",
+                "address": "public/dump_dom",
+            },
         }
     },
     "cfs": {
