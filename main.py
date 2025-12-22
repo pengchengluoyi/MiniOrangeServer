@@ -52,7 +52,7 @@ app.include_router(websocket_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "1.0.1", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "1.0.2", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():

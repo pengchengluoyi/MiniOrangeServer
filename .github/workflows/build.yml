@@ -1,4 +1,4 @@
-name: Build Autobots Application
+name: Build MiniOrange Application
 
 # 触发条件：推送到 main 分支，或者手动触发
 on:
@@ -44,15 +44,15 @@ jobs:
     - name: Zip Build (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        powershell Compress-Archive -Path dist/main.exe -DestinationPath autobots-win-amd64.zip
+        powershell Compress-Archive -Path dist/main.exe -DestinationPath miniorange-win-amd64.zip
 
     # 6. 压缩打包结果 (macOS)
-    # 将 dist/main (二进制文件) 压缩为 autobots-macos-arm64.zip
+    # 将 dist/main (二进制文件) 压缩为 miniorange-macos-arm64.zip
     - name: Zip Build (macOS)
       if: matrix.os == 'macos-latest'
       run: |
         cd dist
-        zip ../autobots-macos-arm64.zip main
+        zip ../miniorange-macos-arm64.zip main
         cd ..
 
     # 7. 上传 Artifact (供 Release 任务使用)
@@ -60,7 +60,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: build-artifacts-${{ matrix.os }}
-        path: autobots-*.zip
+        path: miniorange-*.zip
         retention-days: 1
 
   release:
@@ -84,7 +84,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/autobots-win-amd64.zip
-            artifacts/autobots-macos-arm64.zip
+            artifacts/miniorange-win-amd64.zip
+            artifacts/miniorange-macos-arm64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
