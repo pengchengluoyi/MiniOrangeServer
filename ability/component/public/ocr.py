@@ -27,7 +27,6 @@ class FastOCR(Template):
     """
         This component will
     """
-
     META = {
         "inputs": [
             {
@@ -51,7 +50,8 @@ class FastOCR(Template):
         ...
 
     def execute(self):
-        self.get_engine()
+        # OCR 组件通常不需要获取自动化 Engine (self.get_engine())，除非需要截图
+        # 这里直接处理文件路径
         image_path = self.get_param_value("path")
 
         try:
@@ -59,15 +59,14 @@ class FastOCR(Template):
             self.memory.set(self.info, "ocr_result", results)
 
             if results:
-                write_path = self.visualize(img_path, results)
+                # 修复变量名错误: img_path -> image_path
+                write_path = self.visualize(image_path, results)
                 self.memory.set(self.info, "ocr_image_path", write_path)
 
         except Exception as e:
             SLog.e(TAG, f"程序运行出错: {e}")
             import traceback
             traceback.print_exc()
-
-        SLog.d(TAG, f"总用时: {time.time() - start_time:.4f}s")
 
     def analyze(self, image_path):
         # 1. 读取图片
@@ -83,7 +82,9 @@ class FastOCR(Template):
             img = cv2.resize(img, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
         # 3. 运行识别
-        result, elapse = self.engine(img)
+        # 修复: self.engine 是自动化驱动，不是 OCR 引擎。需要实例化 RapidOCR
+        ocr_engine = RapidOCR()
+        result, elapse = ocr_engine(img)
 
         output_data = []
 
@@ -149,4 +150,3 @@ class FastOCR(Template):
         write_path = add_suffix_before_ext(image_path, "_ocr_result")
         cv2.imwrite(write_path, img)
         return write_path
-
