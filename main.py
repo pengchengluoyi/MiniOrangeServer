@@ -1,3 +1,6 @@
+import time
+# ⏱️ [Perf] 记录启动开始时间
+BOOT_START_TIME = time.time()
 import sys
 import os
 import multiprocessing
@@ -15,10 +18,15 @@ from server.routers import rFile as file_router
 from server.routers import rAppGraph as app_graph_router
 from server.routers import rWebsocket as websocket_router
 
+# ⏱️ [Perf] 打印导入耗时
+print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
+
 # 🔥 路径策略：永远相对于 main.py 所在目录
 # 这样无论是在 IDE 跑，还是打包后，都存在当前运行目录下
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+# ⬆️ 修改策略：将 uploads 放到上一级目录 (例如 dist/uploads 而不是 dist/main/uploads)
+# 这样更新 exe 时，uploads 文件夹不会被覆盖或误删
+UPLOAD_DIR = os.path.join(os.path.dirname(BASE_DIR), "uploads")
 
 print(f"--- [Config] Server Root: {BASE_DIR} ---")
 print(f"--- [Config] Upload Dir:  {UPLOAD_DIR} ---")
@@ -28,8 +36,14 @@ if not os.path.exists(UPLOAD_DIR):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    LogBase.metadata.create_all(bind=log_engine)
+    # ⏱️ [Perf] 数据库初始化
+    t0 = time.time()
+    try:
+        Base.metadata.create_all(bind=engine)
+        LogBase.metadata.create_all(bind=log_engine)
+        print(f"--- [Perf] Database initialized in: {time.time() - t0:.3f}s ---")
+    except Exception as e:
+        print(f"--- [Error] Database init failed: {e} ---")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -73,6 +87,7 @@ if __name__ == "__main__":
         "log_level": "info",
         "workers": 1
     }
+    # 💡 提示：如果打包后启动依然慢，请检查是否使用了 PyInstaller 的 --onefile 模式（建议改为 --onedir）
 
     if not is_frozen:
         run_config.update({
@@ -80,5 +95,5 @@ if __name__ == "__main__":
             "app": "main:app"
         })
 
-    print(f"--- [Server] Starting Uvicorn (Frozen: {is_frozen}) ---")
+    print(f"--- [Server] Starting Uvicorn (Frozen: {is_frozen}) | Total Boot Time: {time.time() - BOOT_START_TIME:.3f}s ---")
     uvicorn.run(**run_config)

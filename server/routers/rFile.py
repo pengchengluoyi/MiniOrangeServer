@@ -3,6 +3,7 @@ import os
 import uuid
 import shutil
 from fastapi import APIRouter, UploadFile, File
+from fastapi.responses import FileResponse
 
 router = APIRouter(prefix="/file", tags=["File Upload"])
 
@@ -30,7 +31,9 @@ def get_upload_dir():
         root = os.path.dirname(os.path.abspath(__main__.__file__))
     else:
         root = os.getcwd()
-    path = os.path.join(root, "uploads")
+    
+    # ⬆️ 修改策略：与 main.py 保持一致，使用上一级目录
+    path = os.path.join(os.path.dirname(root), "uploads")
     if not os.path.exists(path):
         os.makedirs(path)
     return path
@@ -56,3 +59,11 @@ async def upload_file(file: UploadFile = File(...)):
         }
     except Exception as e:
         return {"code": 500, "msg": str(e)}
+
+# ✅ 新增：访问/下载文件的接口
+@router.get("/{filename}")
+async def get_file(filename: str):
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    return {"code": 404, "msg": "File not found"}

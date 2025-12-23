@@ -64,8 +64,13 @@ class Screenshot(Template):
         random_num = random.randint(1000, 9999)
         filename = f"{prefix}_{timestamp}_{random_num}.png"
         
-        # 解决 PermissionError: 使用绝对路径保存到 uploads 目录
-        save_dir = os.path.join(os.getcwd(), "uploads")
+        # ⬆️ 路径修复：不再依赖 os.getcwd()，而是基于当前文件位置回溯
+        # 当前文件: ability/component/public/screenshot.py
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 回退 3 级找到项目根目录 (MiniOrangeServer)，再回退 1 级找到 uploads
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+        save_dir = os.path.join(os.path.dirname(project_root), "uploads")
+
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         full_path = os.path.join(save_dir, filename)
