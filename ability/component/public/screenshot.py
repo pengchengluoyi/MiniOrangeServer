@@ -2,6 +2,7 @@
 # -*-coding:utf-8 -*-
 
 import os
+import sys
 import time
 import random
 
@@ -66,11 +67,15 @@ class Screenshot(Template):
         
         # ⬆️ 路径修复：不再依赖 os.getcwd()，而是基于当前文件位置回溯
         # 当前文件: ability/component/public/screenshot.py
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # 回退 3 级找到项目根目录 (MiniOrangeServer)，再回退 1 级找到 uploads
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-        # 修正：直接拼接 project_root，确保在项目内的 uploads 目录，而不是项目外
-        save_dir = os.path.join(project_root, "uploads")
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # 回退 3 级找到项目根目录 (MiniOrangeServer)
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+        
+        # 修正：直接拼接 base_dir，确保在项目内的 uploads 目录
+        save_dir = os.path.join(base_dir, "uploads")
 
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)

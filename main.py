@@ -43,8 +43,12 @@ print(f"--- [Perf] rWebsocket loaded: {time.time() - t_start:.3f}s ---")
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
 
 # 🔥 路径策略：永远相对于 main.py 所在目录
-# 这样无论是在 IDE 跑，还是打包后，都存在当前运行目录下
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 修正：打包后使用 exe 所在目录，确保数据持久化，而不是存到临时目录
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 
 print(f"--- [Config] Server Root: {BASE_DIR} ---")
@@ -79,7 +83,7 @@ app.include_router(websocket_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.3", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.4", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():

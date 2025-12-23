@@ -1,5 +1,6 @@
 # server/routers/rFile.py
 import os
+import sys
 import uuid
 import shutil
 from fastapi import APIRouter, UploadFile, File
@@ -27,10 +28,14 @@ router = APIRouter(prefix="/file", tags=["File Upload"])
 def get_upload_dir():
     # 方案：基于当前文件位置定位项目根目录，确保与 main.py 的 uploads 目录一致
     # 当前文件: server/routers/rFile.py -> 根目录: MiniOrangeServer
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(current_dir))
-    path = os.path.join(project_root, "uploads")
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 回退 server/routers/ 找到根目录
+        base_dir = os.path.dirname(os.path.dirname(current_dir))
 
+    path = os.path.join(base_dir, "uploads")
     if not os.path.exists(path):
         os.makedirs(path)
     return path

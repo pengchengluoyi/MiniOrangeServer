@@ -20,7 +20,8 @@ router = APIRouter(prefix="/app_graph", tags=["App Graph Engine"])
 # 🔥 统一路径逻辑
 def get_project_root():
     if getattr(sys, 'frozen', False):
-        return sys._MEIPASS
+        # 修正：使用 exe 所在目录，而不是临时解压目录
+        return os.path.dirname(sys.executable)
     else:
         # services/main/routers/rAppGraph.py -> 往上回退3层到根目录
         return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
