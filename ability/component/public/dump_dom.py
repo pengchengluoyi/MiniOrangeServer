@@ -62,7 +62,10 @@ class PublicDumpHierarchy(Template):
                     # 2. Hotfix: 修复 Desktop.active() 不存在导致的 Fallback 失败 (解决 wrapper method 'active' not found)
                     # 引擎尝试调用 .active()，但 pywinauto 原生不支持，这里手动打补丁模拟该方法
                     if not hasattr(Desktop, 'active'):
-                        setattr(Desktop, 'active', lambda self: self.window(active_only=True))
+                        # 修正：原先使用 active_only=True 如果找不到活动窗口会报错 ElementNotFoundError
+                        # 改为：直接返回 self (Desktop对象本身)，即获取整个桌面的布局
+                        # 这样即使没有"活动窗口"，也能 Dump 出整个屏幕的结构，避免崩溃
+                        setattr(Desktop, 'active', lambda self: self)
                 except Exception:
                     pass
 

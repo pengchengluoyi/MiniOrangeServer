@@ -3,18 +3,14 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from server.core.database import APP_DATA_DIR
 
-# 1. 获取当前文件绝对路径
-CURRENT_FILE_PATH = os.path.abspath(__file__)
-
-# 2. 反向推导目录 (同你之前的逻辑)
-SERVER_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_PATH))
-DATA_DIR = os.path.join(SERVER_DIR, "data")
-
+# 1. 使用统一的用户数据目录，确保日志在更新后不丢失
+DATA_DIR = os.path.join(APP_DATA_DIR, "data")
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# 3. 【关键修改】这里改成 logs.db，与 autobots.db 物理隔离
+# 2. 数据库文件路径
 DB_PATH = os.path.join(DATA_DIR, "logs.db")
 
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"

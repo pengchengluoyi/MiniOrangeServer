@@ -13,29 +13,11 @@ MAP = {
                 "address": "public/trigger",
                 "hide": True
             },
-            "start": {
+            "window": {
                 "type": 200,
-                "name": "启动/打开",
-                "icon": "rocket",
-                "address": "public/start",
-            },
-            "stop": {
-                "type": 200,
-                "name": "关闭/杀死",
-                "icon": "shield-x",  # 对应前端 iconMap 里的图标
-                "address": "public/stop",
-            },
-            "click": {
-                "type": 200,
-                "name": "点击",
-                "icon": "mouse-pointer",
-                "address": "public/click",
-            },
-            "screenshot": {
-                "type": 200,
-                "name": "截图/截屏",
+                "name": "窗口",
                 "icon": "wallpaper",
-                "address": "public/screenshot",
+                "address": "public/window",
             },
             "gesture": {
                 "type": 200,
@@ -43,17 +25,17 @@ MAP = {
                 "icon": "wallpaper",
                 "address": "public/gesture",
             },
-            "window": {
-                "type": 200,
-                "name": "窗口",
-                "icon": "wallpaper",
-                "address": "public/window",
-            },
             "input": {
                 "type": 200,
                 "name": "输入",
                 "icon": "wallpaper",
                 "address": "public/input",
+            },
+            "screenshot": {
+                "type": 200,
+                "name": "截图/截屏",
+                "icon": "wallpaper",
+                "address": "public/screenshot",
             },
             "dump_dom": {
                 "type": 200,
@@ -103,20 +85,20 @@ MAP = {
             },
         }
     },
-    "mobile": {
-        "desc": {
-            "category": "移动端",  # 如果不写，默认就是文件夹名 "web"
-            "icon": "Smartphone",  # 该文件夹下所有组件默认图标
-            "color": "#04dcd8"  # 天蓝色
-        },
-        "details": {
-            "dump_hierarchy": {
-                "type": 200,
-                "name": "获取DOM树",
-                "address": "mobile/dump_hierarchy"
-            }
-        }
-    },
+    # "mobile": {
+    #     "desc": {
+    #         "category": "移动端",  # 如果不写，默认就是文件夹名 "web"
+    #         "icon": "Smartphone",  # 该文件夹下所有组件默认图标
+    #         "color": "#04dcd8"  # 天蓝色
+    #     },
+    #     "details": {
+    #         "dump_hierarchy": {
+    #             "type": 200,
+    #             "name": "获取DOM树",
+    #             "address": "mobile/dump_hierarchy"
+    #         }
+    #     }
+    # },
     "api": {
         "desc": {
             "category": "接口",  # 如果不写，默认就是文件夹名 "web"

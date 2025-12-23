@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from server.core.database import get_db
+from server.core.database import get_db, APP_DATA_DIR
 # 请确保你的模型路径正确
 from server.models.AppGraph.app_structure import AppGraph, AppNode, AppEdge
 from server.models.AppGraph.app_component import AppComponent
@@ -17,18 +17,9 @@ from server.models.AppGraph.app_types import NodeType
 router = APIRouter(prefix="/app_graph", tags=["App Graph Engine"])
 
 
-# 🔥 统一路径逻辑
-def get_project_root():
-    if getattr(sys, 'frozen', False):
-        # 修正：使用 exe 所在目录，而不是临时解压目录
-        return os.path.dirname(sys.executable)
-    else:
-        # services/main/routers/rAppGraph.py -> 往上回退3层到根目录
-        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-BASE_DIR = get_project_root()
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+# 🔥 统一路径逻辑：使用用户数据目录
+BASE_DIR = APP_DATA_DIR
+UPLOAD_DIR = os.path.join(APP_DATA_DIR, "uploads")
 
 
 # --- Pydantic Models (🔥 核心修复：宽容模式) ---

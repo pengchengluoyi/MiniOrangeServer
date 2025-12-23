@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 # ⏱️ [Perf] 细粒度耗时分析
 t_start = time.time()
-from server.core.database import engine, Base
+from server.core.database import engine, Base, APP_DATA_DIR
 from server.core.log_database import log_engine, LogBase
 print(f"--- [Perf] Database Modules loaded: {time.time() - t_start:.3f}s ---")
 
@@ -42,14 +42,9 @@ print(f"--- [Perf] rWebsocket loaded: {time.time() - t_start:.3f}s ---")
 # ⏱️ [Perf] 打印导入总耗时
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
 
-# 🔥 路径策略：永远相对于 main.py 所在目录
-# 修正：打包后使用 exe 所在目录，确保数据持久化，而不是存到临时目录
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+# 🔥 路径策略：使用用户数据目录 (持久化存储)
+BASE_DIR = APP_DATA_DIR
+UPLOAD_DIR = os.path.join(APP_DATA_DIR, "uploads")
 
 print(f"--- [Config] Server Root: {BASE_DIR} ---")
 print(f"--- [Config] Upload Dir:  {UPLOAD_DIR} ---")
