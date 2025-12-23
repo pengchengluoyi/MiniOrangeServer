@@ -11,7 +11,6 @@ import numpy as np
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
-from server.core.database import APP_DATA_DIR
 
 TAG = "OCR"
 

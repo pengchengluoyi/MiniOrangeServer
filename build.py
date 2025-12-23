@@ -90,7 +90,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # 🔥 优化：排除不必要的重型库，减少文件数量，加快 Electron 签名速度
+    # 如果你的项目没用到 PyTorch，排除它可以减少几百 MB 体积和数千个文件
+    excludes=['torch', 'torchvision', 'torchaudio'], 
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
