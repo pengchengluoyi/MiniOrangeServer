@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import sys
+import re
 
 def clean(targets):
     """清理指定的文件或目录"""
@@ -17,8 +18,23 @@ def clean(targets):
             except Exception as e:
                 print(f"Error removing {target}: {e}")
 
+def get_version():
+    """从 main.py 中提取版本号"""
+    try:
+        with open("main.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        # 匹配 "version": "1.0.2"
+        match = re.search(r'"version":\s*"([^"]+)"', content)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return "1.0.0"
+
 def build():
-    print("--- 1. Cleaning up old builds ---")
+    version = get_version()
+    dist_name = f"MiniOrangeServer_v{version}"
+    print(f"--- 1. Cleaning up old builds (Target: {dist_name}) ---")
     clean(['build', 'dist', 'main.spec'])
 
     print("--- 2. Generating main.spec ---")
@@ -84,7 +100,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='main',
+    name='MiniOrangeServer',
     debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
     console=True, disable_windowed_traceback=False, argv_emulation=False,
 )
@@ -96,7 +112,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='main',
+    name='""" + dist_name + r"""',
 )
 """
 

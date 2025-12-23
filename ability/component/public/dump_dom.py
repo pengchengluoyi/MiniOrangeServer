@@ -1,6 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
+import sys
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
@@ -46,6 +47,16 @@ class PublicDumpHierarchy(Template):
         try:
             # 1. Windows (Engine 封装方法)
             if hasattr(self.engine, 'dump_hierarchy'):
+                # Hotfix: 修复 Windows Engine 中可能缺失 Desktop 引用导致的 NameError
+                # 报错提示: name 'Desktop' is not defined，说明引擎模块缺少 from pywinauto import Desktop
+                try:
+                    engine_mod = sys.modules[self.engine.__module__]
+                    if not hasattr(engine_mod, 'Desktop'):
+                        from pywinauto import Desktop
+                        setattr(engine_mod, 'Desktop', Desktop)
+                except Exception:
+                    pass
+
                 content = self.engine.dump_hierarchy(max_depth=50)
 
             # 2. Web / Mac / Appium (Driver 属性: page_source)

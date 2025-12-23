@@ -69,12 +69,14 @@ class Screenshot(Template):
         current_dir = os.path.dirname(os.path.abspath(__file__))
         # 回退 3 级找到项目根目录 (MiniOrangeServer)，再回退 1 级找到 uploads
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-        save_dir = os.path.join(os.path.dirname(project_root), "uploads")
+        # 修正：直接拼接 project_root，确保在项目内的 uploads 目录，而不是项目外
+        save_dir = os.path.join(project_root, "uploads")
 
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         full_path = os.path.join(save_dir, filename)
-        web_path = f"/static/{filename}"
+        # 统一使用 /file/ 接口，与 rFile.py 保持一致
+        web_path = f"/file/{filename}"
 
         # 如果指定了元素，尝试进行元素截图（需引擎支持）
         # 目前各引擎实现不一，这里作为预留接口，若找不到元素或不支持则回退到全屏

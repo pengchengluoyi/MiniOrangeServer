@@ -6,8 +6,34 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+# 🔥 必须添加写权限，否则无法创建 Release 和 Tag
+permissions:
+  contents: write
+
 jobs:
+  # 1. 新增任务：提取版本号 (类似前端读取 package.json)
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract Version from main.py
+        id: get_version
+        shell: python
+        run: |
+          import re, os
+          with open("main.py", "r", encoding="utf-8") as f:
+              content = f.read()
+          # 正则匹配 "version": "x.x.x"
+          match = re.search(r'"version":\s*"([^"]+)"', content)
+          version = match.group(1) if match else "0.0.0"
+          print(f"Detected version: {version}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              print(f"version={version}", file=fh)
+
   build:
+    needs: check-version
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -44,15 +70,15 @@ jobs:
     - name: Zip Build (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        powershell Compress-Archive -Path dist/main.exe -DestinationPath miniorange-win-amd64.zip
+        powershell Compress-Archive -Path dist/MiniOrangeServer_v* -DestinationPath miniorange-win-amd64.zip
 
     # 6. 压缩打包结果 (macOS)
-    # 将 dist/main (二进制文件) 压缩为 miniorange-macos-arm64.zip
+    # 将 dist/MiniOrangeServer_v* (文件夹) 压缩为 miniorange-macos-arm64.zip
     - name: Zip Build (macOS)
       if: matrix.os == 'macos-latest'
       run: |
         cd dist
-        zip ../miniorange-macos-arm64.zip main
+        zip -r ../miniorange-macos-arm64.zip MiniOrangeServer_v*
         cd ..
 
     # 7. 上传 Artifact (供 Release 任务使用)
@@ -64,7 +90,7 @@ jobs:
         retention-days: 1
 
   release:
-    needs: build
+    needs: [build, check-version]
     runs-on: ubuntu-latest
     # 仅当推送到 main 分支时才发布，避免开发分支频繁发布
     if: github.ref == 'refs/heads/main'
@@ -78,11 +104,12 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          # 使用 "latest" 标签，或者你可以根据日期生成标签
-          tag_name: latest
-          name: Latest Build
+          # 🔥 使用 check-version 任务提取到的版本号
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: Release v${{ needs.check-version.outputs.version }}
           draft: false
           prerelease: false
+          make_latest: true
           files: |
             artifacts/miniorange-win-amd64.zip
             artifacts/miniorange-macos-arm64.zip

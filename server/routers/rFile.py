@@ -25,15 +25,12 @@ router = APIRouter(prefix="/file", tags=["File Upload"])
 # 我们用一种稍微笨但绝对稳的方法：
 # 向上找，直到找到 uploads 目录，或者就在 main.py 旁创建
 def get_upload_dir():
-    # 方案：相对于 main.py (入口脚本)
-    import __main__
-    if hasattr(__main__, '__file__'):
-        root = os.path.dirname(os.path.abspath(__main__.__file__))
-    else:
-        root = os.getcwd()
-    
-    # ⬆️ 修改策略：与 main.py 保持一致，使用上一级目录
-    path = os.path.join(os.path.dirname(root), "uploads")
+    # 方案：基于当前文件位置定位项目根目录，确保与 main.py 的 uploads 目录一致
+    # 当前文件: server/routers/rFile.py -> 根目录: MiniOrangeServer
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(current_dir))
+    path = os.path.join(project_root, "uploads")
+
     if not os.path.exists(path):
         os.makedirs(path)
     return path
@@ -55,7 +52,7 @@ async def upload_file(file: UploadFile = File(...)):
         return {
             "code": 200,
             "msg": "success",
-            "url": f"/static/{unique_name}"  # 前端拼接 host
+            "url": f"/file/{unique_name}"  # 修改为 /file/ 接口，直接通过 get_file 查看
         }
     except Exception as e:
         return {"code": 500, "msg": str(e)}
