@@ -51,9 +51,18 @@ class PublicDumpHierarchy(Template):
                 # 报错提示: name 'Desktop' is not defined，说明引擎模块缺少 from pywinauto import Desktop
                 try:
                     engine_mod = sys.modules[self.engine.__module__]
-                    if not hasattr(engine_mod, 'Desktop'):
+                    
+                    # 1. 确保 Desktop 类存在 (解决 NameError)
+                    if hasattr(engine_mod, 'Desktop'):
+                        Desktop = getattr(engine_mod, 'Desktop')
+                    else:
                         from pywinauto import Desktop
                         setattr(engine_mod, 'Desktop', Desktop)
+
+                    # 2. Hotfix: 修复 Desktop.active() 不存在导致的 Fallback 失败 (解决 wrapper method 'active' not found)
+                    # 引擎尝试调用 .active()，但 pywinauto 原生不支持，这里手动打补丁模拟该方法
+                    if not hasattr(Desktop, 'active'):
+                        setattr(Desktop, 'active', lambda self: self.window(active_only=True))
                 except Exception:
                     pass
 

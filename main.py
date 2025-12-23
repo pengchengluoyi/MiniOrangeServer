@@ -83,7 +83,7 @@ app.include_router(websocket_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.4", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.5", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
