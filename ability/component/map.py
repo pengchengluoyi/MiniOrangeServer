@@ -37,6 +37,12 @@ MAP = {
                 "icon": "wallpaper",
                 "address": "public/screenshot",
             },
+            "ocr": {
+                "type": 200,
+                "name": "OCR",
+                "icon": "wallpaper",
+                "address": "public/ocr",
+            },
             "dump_dom": {
                 "type": 200,
                 "name": "获取布局",

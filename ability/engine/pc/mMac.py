@@ -92,7 +92,7 @@ class MacEngine(BaseEngine):
         return MacElement(current)
 
     def end(self):
-        return True
+        self.stop_app()
 
     # --- 统一动作接口 ---
 

@@ -7,7 +7,7 @@ ANDROID = "android"
 IOS = "ios"
 
 WINDOWS = "windows"
-MACOS = "macos"
+MACOS = "mac"
 
 CHROME = "chrome"
 EDGE = "edge"
