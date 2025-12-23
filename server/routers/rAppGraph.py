@@ -7,8 +7,6 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from PIL import Image
-from io import BytesIO
 
 from server.core.database import get_db
 # 请确保你的模型路径正确
@@ -265,6 +263,9 @@ def get_component_image(comp_uid: str, db: Session = Depends(get_db)):
     if not os.path.exists(image_path): return Response(status_code=404)
 
     try:
+        # 🚀 [Perf] 懒加载：只有在需要处理图片时才导入 PIL，启动速度提升 ~3s
+        from PIL import Image
+        from io import BytesIO
         with Image.open(image_path) as img:
             crop_area = (int(comp.x), int(comp.y), int(comp.x + comp.width), int(comp.y + comp.height))
             cropped = img.crop(crop_area)
