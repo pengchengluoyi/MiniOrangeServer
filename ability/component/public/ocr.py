@@ -5,36 +5,24 @@ import os
 import sys
 import time
 from pathlib import Path
-import cv2
-from rapidocr_onnxruntime import RapidOCR
-import numpy as np
 
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
+from server.core.database import APP_DATA_DIR
 
 TAG = "OCR"
 
-# 1. 🔥 核心修复：使用系统用户数据目录 (User Data Directory)
-# 解决软件更新后数据丢失的问题。数据将存储在:
-# Windows: %APPDATA%\MiniOrangeServer (例如 C:\Users\xxx\AppData\Roaming\MiniOrangeServer)
-# macOS: ~/Library/Application Support/MiniOrangeServer
-def get_app_data_dir(app_name="MiniOrangeServer"):
-    if sys.platform == 'win32':
-        # 优先使用 APPDATA (Roaming)，其次 LOCALAPPDATA
-        base = os.environ.get('APPDATA') or os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
-        path = os.path.join(base, app_name)
-    elif sys.platform == 'darwin':
-        path = os.path.expanduser(f"~/Library/Application Support/{app_name}")
-    else:
-        path = os.path.expanduser(f"~/.local/share/{app_name}")
-
-    if not os.path.exists(path):
-        os.makedirs(path)
-    return path
-
-APP_DATA_DIR = get_app_data_dir()
-BASE_DIR = APP_DATA_DIR  # 兼容旧代码引用
+# 🛡️ 容错处理：防止因缺少 OCR 依赖库导致整个模块加载失败 (Module not found)
+try:
+    import cv2
+    from rapidocr_onnxruntime import RapidOCR
+    import numpy as np
+except ImportError as e:
+    SLog.e(TAG, f"OCR 依赖库缺失: {e}")
+    cv2 = None
+    RapidOCR = None
+    np = None
 
 # 2. 拼接 data 目录路径
 DATA_DIR = os.path.join(APP_DATA_DIR, "data")
@@ -88,6 +76,12 @@ class FastOCR(Template):
     def execute(self):
         # OCR 组件通常不需要获取自动化 Engine (self.get_engine())，除非需要截图
         # 这里直接处理文件路径
+        if cv2 is None or RapidOCR is None:
+            error_msg = "OCR 依赖库缺失 (opencv-python, rapidocr_onnxruntime)，请先安装依赖。"
+            SLog.e(TAG, error_msg)
+            self.result.fail(error_msg)
+            return self.result
+
         pre_image_path = self.get_param_value("path")
         image_path = get_final_path(pre_image_path)
 
