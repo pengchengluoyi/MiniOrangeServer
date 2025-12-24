@@ -51,6 +51,12 @@ datas = tmp_ret[0]
 binaries = tmp_ret[1]
 hiddenimports = tmp_ret[2]
 
+# --- A2. 收集 rapidocr_onnxruntime 资源 (修复 config.yaml 丢失) ---
+tmp_ret_ocr = collect_all('rapidocr_onnxruntime')
+datas += tmp_ret_ocr[0]
+binaries += tmp_ret_ocr[1]
+hiddenimports += tmp_ret_ocr[2]
+
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
 def find_local_modules(root_dir):

@@ -4,6 +4,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 import cv2
 from rapidocr_onnxruntime import RapidOCR
 import numpy as np
@@ -14,12 +15,47 @@ from ability.component.router import BaseRouter
 
 TAG = "OCR"
 
+# 1. 🔥 核心修复：使用系统用户数据目录 (User Data Directory)
+# 解决软件更新后数据丢失的问题。数据将存储在:
+# Windows: %APPDATA%\MiniOrangeServer (例如 C:\Users\xxx\AppData\Roaming\MiniOrangeServer)
+# macOS: ~/Library/Application Support/MiniOrangeServer
+def get_app_data_dir(app_name="MiniOrangeServer"):
+    if sys.platform == 'win32':
+        # 优先使用 APPDATA (Roaming)，其次 LOCALAPPDATA
+        base = os.environ.get('APPDATA') or os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        path = os.path.join(base, app_name)
+    elif sys.platform == 'darwin':
+        path = os.path.expanduser(f"~/Library/Application Support/{app_name}")
+    else:
+        path = os.path.expanduser(f"~/.local/share/{app_name}")
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+    return path
+
+APP_DATA_DIR = get_app_data_dir()
+BASE_DIR = APP_DATA_DIR  # 兼容旧代码引用
+
+# 2. 拼接 data 目录路径
+DATA_DIR = os.path.join(APP_DATA_DIR, "data")
+
 def add_suffix_before_ext(filepath, suffix):
     """
     在文件扩展名之前添加后缀
     """
     base, ext = os.path.splitext(filepath)
     return base + suffix + ext
+
+def get_final_path(input_str):
+    base_path = DATA_DIR
+    input_path = Path(input_str)
+
+    # 检查输入是否为绝对路径
+    if input_path.is_absolute():
+        return str(input_path)
+    else:
+        # 如果是文件名或相对路径，则进行拼接
+        return str(base_path / input_path)
 
 
 @BaseRouter.route('public/ocr')
@@ -31,14 +67,14 @@ class FastOCR(Template):
         "inputs": [
             {
                 "name": "path",
-                "type": "str",
+                "type": "file",
                 "desc": "文件路径",
                 "defaultValue": "screenshot",
                 "placeholder": "screenshot"
             },
         ],
         "defaultData": {
-            "path": "",
+            "path": False,
         },
         "outputVars": [
             {"key": "ocr_result", "type": "json", "desc": "图片识别结果"},
@@ -52,7 +88,8 @@ class FastOCR(Template):
     def execute(self):
         # OCR 组件通常不需要获取自动化 Engine (self.get_engine())，除非需要截图
         # 这里直接处理文件路径
-        image_path = self.get_param_value("path")
+        pre_image_path = self.get_param_value("path")
+        image_path = get_final_path(pre_image_path)
 
         try:
             results = self.analyze(image_path)
