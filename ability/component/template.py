@@ -1,6 +1,8 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 import re
+
+from driver.agent.actuator import process_runner_wrapper
 from script.log import SLog
 from ability.core.memory import Memory
 from ability.core.step_result import StepResult
@@ -47,6 +49,9 @@ class Template:
 
         if param_name in self.info.data:
             SLog.d(TAG, "Getting value of parameter '{}', and Parameter value is '{}'".format(param_name, self.info.data[param_name]))
+
+            if re.match(pattern, self.info.data[param_name]):
+                return self.memory.get(self.info.data[param_name])
             return self.info.data[param_name]
         else:
             SLog.w(TAG, "Parameter '{}' is not defined".format(param_name))
@@ -57,3 +62,10 @@ class Template:
 
     def build_chain(self, locator_chain):
         return self.engine.build_chain(locator_chain)
+
+if __name__ == '__main__':
+    sttt = "{{public-screenshot-1766553312798.path}}"
+
+    pattern = r'\{\{([^{}]+)\}\}'
+    if re.match(pattern, sttt):
+        print()
