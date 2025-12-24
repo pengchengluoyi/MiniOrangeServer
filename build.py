@@ -57,6 +57,27 @@ datas += tmp_ret_ocr[0]
 binaries += tmp_ret_ocr[1]
 hiddenimports += tmp_ret_ocr[2]
 
+# --- A3. 强制收集 cv2 (OpenCV) ---
+# 解决 No module named 'cv2'，确保即使在 try-except 中也能被打包
+try:
+    tmp_ret_cv2 = collect_all('cv2')
+    datas += tmp_ret_cv2[0]
+    binaries += tmp_ret_cv2[1]
+    hiddenimports += tmp_ret_cv2[2]
+except Exception:
+    pass
+
+# --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow) ---
+# 这些库可能在插件或 try-except 块中被引用，显式收集以防遗漏
+for lib in ['numpy', 'onnxruntime', 'PIL']:
+    try:
+        tmp_ret_lib = collect_all(lib)
+        datas += tmp_ret_lib[0]
+        binaries += tmp_ret_lib[1]
+        hiddenimports += tmp_ret_lib[2]
+    except Exception:
+        pass
+
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
 def find_local_modules(root_dir):

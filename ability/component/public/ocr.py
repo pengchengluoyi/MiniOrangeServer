@@ -20,12 +20,15 @@ try:
     import numpy as np
 except ImportError as e:
     SLog.e(TAG, f"OCR 依赖库缺失: {e}")
+    # 打印当前 Python 解释器路径，方便排查是否运行在错误的环境中
+    SLog.e(TAG, f"Current Python Executable: {sys.executable}")
     cv2 = None
     RapidOCR = None
     np = None
 
-# 2. 拼接 data 目录路径
-DATA_DIR = os.path.join(APP_DATA_DIR, "data")
+# 2. 拼接 uploads 目录路径 (修正：上传的文件在 uploads 而不是 data)
+# 保持与 main.py 中的 UPLOAD_DIR 一致
+UPLOAD_DIR = os.path.join(APP_DATA_DIR, "uploads")
 
 def add_suffix_before_ext(filepath, suffix):
     """
@@ -35,7 +38,7 @@ def add_suffix_before_ext(filepath, suffix):
     return base + suffix + ext
 
 def get_final_path(input_str):
-    base_path = DATA_DIR
+    base_path = UPLOAD_DIR
     input_path = Path(input_str)
 
     # 检查输入是否为绝对路径
@@ -76,10 +79,10 @@ class FastOCR(Template):
     def execute(self):
         # OCR 组件通常不需要获取自动化 Engine (self.get_engine())，除非需要截图
         # 这里直接处理文件路径
-        if cv2 is None or RapidOCR is None:
-            error_msg = "OCR 依赖库缺失 (opencv-python, rapidocr_onnxruntime)，请先安装依赖。"
+        if cv2 is None or RapidOCR is None or np is None:
+            error_msg = f"OCR 依赖库缺失，请在 {sys.executable} 中安装依赖: pip install opencv-python rapidocr-onnxruntime"
             SLog.e(TAG, error_msg)
-            self.result.fail(error_msg)
+            self.result.fail()
             return self.result
 
         pre_image_path = self.get_param_value("path")
@@ -100,8 +103,15 @@ class FastOCR(Template):
             traceback.print_exc()
 
     def analyze(self, image_path):
-        # 1. 读取图片
-        img = cv2.imread(image_path)
+        # 0. 检查文件是否存在
+        if not os.path.exists(image_path):
+            SLog.e(TAG, f"❌ 文件不存在: {image_path}")
+            return []
+
+        # 1. 读取图片 (使用 imdecode 兼容中文路径和特殊字符)
+        # img = cv2.imread(image_path)
+        # np.fromfile 读取二进制数据，cv2.imdecode 解码，比直接 imread 更健壮
+        img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             SLog.e(TAG, "❌ 无法读取图片")
             return []
@@ -171,7 +181,8 @@ class FastOCR(Template):
         return output_data
 
     def visualize(self, image_path, results):
-        img = cv2.imread(image_path)
+        # img = cv2.imread(image_path)
+        img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None: return
 
         for item in results:
@@ -179,5 +190,9 @@ class FastOCR(Template):
             box_np = np.array(box).astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(img, [box_np], True, (0, 0, 255), 2)
         write_path = add_suffix_before_ext(image_path, "_ocr_result")
-        cv2.imwrite(write_path, img)
+        
+        # cv2.imwrite(write_path, img)
+        # 使用 imencode 保存，兼容中文路径
+        ext = os.path.splitext(write_path)[1]
+        cv2.imencode(ext, img)[1].tofile(write_path)
         return write_path
