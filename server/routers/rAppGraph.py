@@ -72,7 +72,6 @@ def get_list(app_id: Optional[str] = None, db: Session = Depends(get_db)):
 @router.post("/create")
 def create_app(item: AppGraphCreate, db: Session = Depends(get_db)):
     app = AppGraph(
-        id=str(uuid.uuid4()),
         name=item.name,
         desc=item.desc,
         app_id=item.app_id

@@ -1,5 +1,7 @@
 # server/models/AppGraph/app_structure.py
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float
+from sqlalchemy import Column, String, Text, ForeignKey, DateTime, Integer, Float, Boolean, JSON
+from sqlalchemy.orm import relationship
+import uuid
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from server.core.database import Base
@@ -8,12 +10,15 @@ from server.models.AppGraph.app_types import NodeType, TriggerType
 
 class AppGraph(Base):
     __tablename__ = "app_graph"
-    id = Column(Integer, primary_key=True, index=True)
+    # 修正：改回 Integer 类型以匹配现有数据，启用自增
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 新增：业务唯一标识 (UUID)，用于导出和防冲突
+    uid = Column(String, default=lambda: str(uuid.uuid4()), unique=True)
     name = Column(String, index=True)
     desc = Column(String, nullable=True)
     app_id = Column(String, ForeignKey("apps.id"), index=True)
+    # 补充报错日志中出现的字段，防止丢失数据或再次报错
     icon = Column(String, default="📱")
-    status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 

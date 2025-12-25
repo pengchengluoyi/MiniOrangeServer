@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from server.core.migration import run_auto_migration
 
 # ⏱️ [Perf] 细粒度耗时分析
 t_start = time.time()
@@ -62,6 +63,9 @@ if not os.path.exists(UPLOAD_DIR):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 自动迁移数据库
+    run_auto_migration()
+    # 初始化数据库
     Base.metadata.create_all(bind=engine)
     LogBase.metadata.create_all(bind=log_engine)
     yield
@@ -88,7 +92,7 @@ app.include_router(task_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.14", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.15", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
