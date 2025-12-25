@@ -92,7 +92,7 @@ app.include_router(task_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.16", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.17", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     run_config = {
         "app": app,
         "host": "127.0.0.1",
-        "port": 8000,
+        "port": 10104,
         "reload": False,
         "access_log": True,
         "log_level": "info",

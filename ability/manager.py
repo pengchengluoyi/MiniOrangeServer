@@ -6,6 +6,11 @@ from ability.component.router import BaseRouter
 from script.singleton_meta import SingletonMeta
 
 
+class TaskInfo:
+    def __init__(self, **kwargs):
+        self.platform = None
+        self.nodeCode = None
+        self.__dict__.update(kwargs)
 
 class Manager(metaclass=SingletonMeta):
     def __init__(self):
@@ -23,6 +28,13 @@ class Manager(metaclass=SingletonMeta):
         if self.MobileEngine:
             self.MobileEngine.start()
 
+    def execute_interface(self, data: dict):
+        """
+        API 统一调用入口，将字典转换为内部 Info 对象并执行
+        """
+        info = TaskInfo(**data)
+        self.online(info)
+        return self.register_router(info)
 
     def register_router(self, info):
         return self.router.handle_request(info.nodeCode, info)

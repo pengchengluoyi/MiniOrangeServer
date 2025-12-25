@@ -243,12 +243,23 @@ def sync_layout(item: GraphLayoutSave, db: Session = Depends(get_db)):
         print(f"Sync Error: {e}")
         return Response(status_code=500, content=str(e))
 
+# server/routers/rAppGraph.py
 
+# 1. 定义模型
+class EmptyNodeCreate(BaseModel):
+    graph_id: int
+    node_id: str
+    x: float
+    y: float
+
+# 2. 修改接口使用模型接收 Body
 @router.post("/add_empty_node")
-def add_empty_node(graph_id: int, node_id: str, x: float, y: float, db: Session = Depends(get_db)):
-    db.add(AppNode(graph_id=graph_id, node_id=node_id, x=x, y=y, label="新节点"))
+def add_empty_node(item: EmptyNodeCreate, db: Session = Depends(get_db)):
+    # 注意这里使用 item.graph_id 等
+    db.add(AppNode(graph_id=item.graph_id, node_id=item.node_id, x=item.x, y=item.y, label="新节点"))
     db.commit()
     return {"code": 200, "msg": "ok"}
+
 
 
 @router.get("/component/{comp_uid}/image")
