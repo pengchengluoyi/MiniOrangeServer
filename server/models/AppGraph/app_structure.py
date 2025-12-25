@@ -11,6 +11,7 @@ class AppGraph(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     desc = Column(String, nullable=True)
+    app_id = Column(String, ForeignKey("apps.id"), index=True)
     icon = Column(String, default="📱")
     status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.now)

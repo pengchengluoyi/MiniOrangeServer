@@ -43,16 +43,17 @@ class Template:
 
     def get_param_value(self, param_name):
         pattern = r'\{\{([^{}]+)\}\}'
-        if re.match(pattern, param_name):
+        if isinstance(param_name, str) and re.match(pattern, param_name):
             return self.memory.get(param_name)
 
 
         if param_name in self.info.data:
-            SLog.d(TAG, "Getting value of parameter '{}', and Parameter value is '{}'".format(param_name, self.info.data[param_name]))
+            val = self.info.data[param_name]
+            SLog.d(TAG, "Getting value of parameter '{}', and Parameter value is '{}'".format(param_name, val))
 
-            if re.match(pattern, self.info.data[param_name]):
-                return self.memory.get(self.info.data[param_name])
-            return self.info.data[param_name]
+            if isinstance(val, str) and re.match(pattern, val):
+                return self.memory.get(val)
+            return val
         else:
             SLog.w(TAG, "Parameter '{}' is not defined".format(param_name))
             return False

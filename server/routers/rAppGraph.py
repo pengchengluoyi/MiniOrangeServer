@@ -16,7 +16,6 @@ from server.models.AppGraph.app_types import NodeType
 
 router = APIRouter(prefix="/app_graph", tags=["App Graph Engine"])
 
-
 # 🔥 统一路径逻辑：使用用户数据目录
 BASE_DIR = APP_DATA_DIR
 UPLOAD_DIR = os.path.join(APP_DATA_DIR, "uploads")
@@ -53,21 +52,31 @@ class GraphLayoutSave(BaseModel):
     edges: List[Dict]
 
 
-class AppCreate(BaseModel):
+class AppGraphCreate(BaseModel):
     name: str
-    desc: str = ""
+    desc: Optional[str] = None
+    app_id: str
 
 
 # --- Routes ---
 
+
 @router.get("/list")
-def get_list(db: Session = Depends(get_db)):
-    return {"code": 200, "data": db.query(AppGraph).order_by(AppGraph.created_at.desc()).all()}
+def get_list(app_id: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(AppGraph)
+    if app_id:
+        query = query.filter(AppGraph.app_id == app_id)
+    return {"code": 200, "data": query.order_by(AppGraph.created_at.desc()).all()}
 
 
 @router.post("/create")
-def create_app(item: AppCreate, db: Session = Depends(get_db)):
-    app = AppGraph(name=item.name, desc=item.desc)
+def create_app(item: AppGraphCreate, db: Session = Depends(get_db)):
+    app = AppGraph(
+        id=str(uuid.uuid4()),
+        name=item.name,
+        desc=item.desc,
+        app_id=item.app_id
+    )
     db.add(app)
     db.commit()
     db.refresh(app)
@@ -234,6 +243,7 @@ def sync_layout(item: GraphLayoutSave, db: Session = Depends(get_db)):
         db.rollback()
         print(f"Sync Error: {e}")
         return Response(status_code=500, content=str(e))
+
 
 @router.post("/add_empty_node")
 def add_empty_node(graph_id: int, node_id: str, x: float, y: float, db: Session = Depends(get_db)):

@@ -39,6 +39,14 @@ t_start = time.time()
 from server.routers import rWebsocket as websocket_router
 print(f"--- [Perf] rWebsocket loaded: {time.time() - t_start:.3f}s ---")
 
+t_start = time.time()
+from server.routers import rProject as project_router
+print(f"--- [Perf] rProject loaded: {time.time() - t_start:.3f}s ---")
+
+t_start = time.time()
+from server.routers import rTask as task_router
+print(f"--- [Perf] rTask loaded: {time.time() - t_start:.3f}s ---")
+
 # ⏱️ [Perf] 打印导入总耗时
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
 
@@ -75,10 +83,12 @@ app.include_router(log_router.router)
 app.include_router(file_router.router)
 app.include_router(app_graph_router.router)
 app.include_router(websocket_router.router)
+app.include_router(project_router.router)
+app.include_router(task_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.13", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.14", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
