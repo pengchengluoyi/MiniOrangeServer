@@ -1,6 +1,8 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 import time
+import io
+from PIL import Image
 
 from requests import options
 from selenium import webdriver
@@ -122,14 +124,23 @@ class ChromeEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element):
-        element.click()
+    def click(self, element, position=None):
+        if position:
+            ActionChains(self.driver).move_to_location(position[0], position[1]).click().perform()
+        else:
+            element.click()
 
-    def double_click(self, element):
-        ActionChains(self.driver).double_click(element).perform()
+    def double_click(self, element, position=None):
+        if position:
+            ActionChains(self.driver).move_to_location(position[0], position[1]).double_click().perform()
+        else:
+            ActionChains(self.driver).double_click(element).perform()
 
-    def context_click(self, element):
-        ActionChains(self.driver).context_click(element).perform()
+    def context_click(self, element, position=None):
+        if position:
+            ActionChains(self.driver).move_to_location(position[0], position[1]).context_click().perform()
+        else:
+            ActionChains(self.driver).context_click(element).perform()
 
     def send_keys(self, element, text):
         element.send_keys(text)
@@ -143,9 +154,12 @@ class ChromeEngine(BaseEngine):
     def hover(self, element):
         ActionChains(self.driver).move_to_element(element).perform()
 
-    def screenshot(self, path):
-        self.driver.save_screenshot(path)
-        return path
+    def screenshot(self, path=None):
+        if path:
+            self.driver.save_screenshot(path)
+            return path
+        png_data = self.driver.get_screenshot_as_png()
+        return Image.open(io.BytesIO(png_data))
 
     def execute_script(self, script):
         return self.driver.execute_script(script)

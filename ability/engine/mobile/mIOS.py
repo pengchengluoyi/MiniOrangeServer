@@ -64,14 +64,23 @@ class IOSEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element):
-        element.click()
+    def click(self, element, position=None):
+        if position:
+            (self.session or self.driver).click(position[0], position[1])
+        else:
+            element.click()
 
-    def double_click(self, element):
-        element.double_tap()
+    def double_click(self, element, position=None):
+        if position:
+            (self.session or self.driver).double_tap(position[0], position[1])
+        else:
+            element.double_tap()
 
-    def context_click(self, element):
-        element.hold(duration=1.0)
+    def context_click(self, element, position=None):
+        if position:
+            (self.session or self.driver).tap_hold(position[0], position[1], 1.0)
+        else:
+            element.hold(duration=1.0)
 
     def send_keys(self, element, text):
         element.set_text(text)
@@ -87,6 +96,8 @@ class IOSEngine(BaseEngine):
     def hover(self, element):
         SLog.w(TAG, "Hover not supported on iOS")
 
-    def screenshot(self, path):
-        self.driver.screenshot(path)
-        return path
+    def screenshot(self, path=None):
+        if path:
+            self.driver.screenshot(path)
+            return path
+        return self.driver.screenshot()

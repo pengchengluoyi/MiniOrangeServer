@@ -5,6 +5,7 @@ import os
 try:
     import Cocoa
     import Quartz
+    from PIL import ImageGrab
 except ImportError:
     pass
 
@@ -96,19 +97,30 @@ class MacEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element):
-        element.click()
+    def click(self, element, position=None):
+        if position:
+            self._click_coordinates(position[0], position[1])
+        else:
+            element.click()
 
-    def double_click(self, element):
-        # Mac AX API 没有双击，通常需要模拟鼠标事件
-        # 这里简化为两次点击
-        element.click()
-        time.sleep(0.1)
-        element.click()
+    def double_click(self, element, position=None):
+        if position:
+            self._click_coordinates(position[0], position[1])
+            time.sleep(0.1)
+            self._click_coordinates(position[0], position[1])
+        else:
+            # Mac AX API 没有双击，通常需要模拟鼠标事件
+            # 这里简化为两次点击
+            element.click()
+            time.sleep(0.1)
+            element.click()
 
-    def context_click(self, element):
-        # 暂不支持
-        pass
+    def context_click(self, element, position=None):
+        if position:
+            self._click_coordinates(position[0], position[1], button='right')
+        else:
+            # 暂不支持元素对象的右键，仅支持坐标右键
+            pass
 
     def send_keys(self, element, text):
         element.type_keys(text)
@@ -122,10 +134,35 @@ class MacEngine(BaseEngine):
     def hover(self, element):
         pass
 
-    def screenshot(self, path):
-        # 使用系统命令截图
-        os.system(f"screencapture -x {path}")
-        return path
+    def screenshot(self, path=None):
+        if path:
+            # 使用系统命令截图 (保存到文件)
+            os.system(f"screencapture -x {path}")
+            return path
+        # 返回内存图片对象
+        return ImageGrab.grab()
+
+    def _click_coordinates(self, x, y, button='left'):
+        """辅助方法：使用 Quartz 模拟坐标点击"""
+        if 'Quartz' not in globals():
+            SLog.e(TAG, "Quartz module not found, cannot click coordinates")
+            return
+
+        pos = (x, y)
+        if button == 'left':
+            down = Quartz.kCGEventLeftMouseDown
+            up = Quartz.kCGEventLeftMouseUp
+            btn = Quartz.kCGMouseButtonLeft
+        else:
+            down = Quartz.kCGEventRightMouseDown
+            up = Quartz.kCGEventRightMouseUp
+            btn = Quartz.kCGMouseButtonRight
+
+        e_down = Quartz.CGEventCreateMouseEvent(None, down, pos, btn)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_down)
+        
+        e_up = Quartz.CGEventCreateMouseEvent(None, up, pos, btn)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, e_up)
 
     def switch_window(self, target):
         """

@@ -5,6 +5,7 @@ import os
 try:
     from pywinauto.application import Application
     from pywinauto.desktop import Desktop
+    from pywinauto import mouse
     from PIL import ImageGrab
 except ImportError:
     pass
@@ -73,15 +74,24 @@ class WindowsEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element):
+    def click(self, element, position=None):
         # click_input 模拟鼠标点击，比 click() 消息更可靠
-        element.click_input()
+        if position:
+            mouse.click(coords=(position[0], position[1]))
+        else:
+            element.click_input()
 
-    def double_click(self, element):
-        element.double_click_input()
+    def double_click(self, element, position=None):
+        if position:
+            mouse.double_click(coords=(position[0], position[1]))
+        else:
+            element.double_click_input()
 
-    def context_click(self, element):
-        element.right_click_input()
+    def context_click(self, element, position=None):
+        if position:
+            mouse.right_click(coords=(position[0], position[1]))
+        else:
+            element.right_click_input()
 
     def send_keys(self, element, text):
         element.type_keys(text, with_spaces=True)

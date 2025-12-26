@@ -67,17 +67,26 @@ class AndroidEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element):
-        element.click()
+    def click(self, element, position=None):
+        if position:
+            self.driver.click(position[0], position[1])
+        else:
+            element.click()
 
-    def double_click(self, element):
-        # u2 没有直接的双击方法，通过坐标模拟
-        x, y = element.center()
-        self.driver.double_click(x, y)
+    def double_click(self, element, position=None):
+        if position:
+            self.driver.double_click(position[0], position[1])
+        else:
+            # u2 没有直接的双击方法，通过坐标模拟
+            x, y = element.center()
+            self.driver.double_click(x, y)
 
-    def context_click(self, element):
-        # 移动端对应长按
-        element.long_click()
+    def context_click(self, element, position=None):
+        # 移动端对应长按 (Long Press)
+        if position:
+            self.driver.long_click(position[0], position[1])
+        else:
+            element.long_click()
 
     def send_keys(self, element, text):
         element.set_text(text)
@@ -93,9 +102,11 @@ class AndroidEngine(BaseEngine):
     def hover(self, element):
         SLog.w(TAG, "Hover not supported on Android")
 
-    def screenshot(self, path):
-        self.driver.screenshot(path)
-        return path
+    def screenshot(self, path=None):
+        if path:
+            self.driver.screenshot(path)
+            return path
+        return self.driver.screenshot()
 
     def switch_window(self, target):
         """

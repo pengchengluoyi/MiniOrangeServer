@@ -44,7 +44,7 @@ class Memory(metaclass=SingletonMeta):
             }
             # 发送 HTTP 请求给主进程 (假设运行在本地 8000 端口)
             # timeout 设置短一点(0.2s)，避免因为网络问题阻塞脚本执行
-            requests.post("http://127.0.0.1:8000/ws/internal/broadcast", json=data, timeout=0.2)
+            # requests.post("http://127.0.0.1:8000/ws/internal/broadcast", json=data, timeout=0.2)
         except Exception as e:
             # 广播失败属于非关键错误，记录警告即可，不要抛出异常中断流程
             SLog.w(TAG, f"WebSocket broadcast warning: {e}")

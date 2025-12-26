@@ -103,9 +103,7 @@ class FastOCR(Template):
             traceback.print_exc()
 
 def analyze(image_path, img=None):
-    if img:
-        ...
-    else:
+    if not img:
         # 0. 检查文件是否存在
         if not os.path.exists(image_path):
             SLog.e(TAG, f"❌ 文件不存在: {image_path}")
@@ -118,6 +116,13 @@ def analyze(image_path, img=None):
         if img is None:
             SLog.e(TAG, "❌ 无法读取图片")
             return []
+
+    # 兼容 PIL Image 对象 (从内存传入时，如 gesture.py 的调用)
+    if not isinstance(img, np.ndarray):
+        img = np.array(img)
+        # PIL 是 RGB，OpenCV 默认是 BGR，为了保持一致性进行转换
+        if len(img.shape) == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     # 2. 图片放大处理 (提高精度)
     h, w = img.shape[:2]
