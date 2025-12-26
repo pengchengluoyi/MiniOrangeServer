@@ -101,13 +101,19 @@ class WindowsEngine(BaseEngine):
         element.type_keys("^a{DELETE}")
 
     def drag_and_drop(self, source, target):
-        element = source
+        # WindowSpecification 需要先获取 wrapper_object
+        src_wrapper = source.wrapper_object() if hasattr(source, "wrapper_object") else source
+        tgt_wrapper = target.wrapper_object() if hasattr(target, "wrapper_object") else target
+        
         # 需要获取目标坐标
-        dst_rect = target.rectangle()
-        element.drag_mouse_input(dst=(dst_rect.mid_point().x, dst_rect.mid_point().y))
+        dst_rect = tgt_wrapper.rectangle()
+        src_wrapper.drag_mouse_input(dst=(dst_rect.mid_point().x, dst_rect.mid_point().y))
 
     def hover(self, element):
-        element.move_mouse_input()
+        if hasattr(element, "wrapper_object"):
+            element.wrapper_object().move_mouse_input()
+        else:
+            element.move_mouse_input()
 
     def dump_hierarchy(self, compressed=False, pretty=False, max_depth=None):
         """

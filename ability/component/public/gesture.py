@@ -184,9 +184,18 @@ class Gesture(Template):
                     return self.result
                 
                 self.engine.drag_and_drop(source, target)
-            else:
-                # 默认悬停
+            elif sub_type == 'click':
+                self.engine.click(source)
+            elif sub_type == 'double':
+                self.engine.double_click(source)
+            elif sub_type == 'right-click':
+                self.engine.context_click(source)
+            elif sub_type == 'long_press':
+                self.engine.context_click(source)
+            elif sub_type == 'hover':
                 self.engine.hover(source)
+            else:
+                self.engine.click(source)
             
             self.result.success()
         except Exception as e:
