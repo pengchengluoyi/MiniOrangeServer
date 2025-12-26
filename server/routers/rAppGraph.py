@@ -39,7 +39,7 @@ class NodeSaveDetail(BaseModel):
     node_id: str
     type: str = NodeType.PAGE
     parent_node_id: Optional[str] = None
-    label: str
+    label: str = "新节点"
     screenshot: Optional[str] = None
     # 允许 dom_tree 为 None
     dom_tree: Optional[Any] = None
@@ -140,7 +140,7 @@ def save_node_detail(item: NodeSaveDetail, db: Session = Depends(get_db)):
                 graph_id=item.graph_id,
                 node_id=item.node_id,
                 type=item.type,
-                parent_node_id=item.parent_node_id
+                parent_node_id=item.parentNode
             )
             db.add(node)
             db.flush()  # 获取 ID
@@ -249,6 +249,7 @@ def sync_layout(item: GraphLayoutSave, db: Session = Depends(get_db)):
 class EmptyNodeCreate(BaseModel):
     graph_id: int
     node_id: str
+    type: str
     x: float
     y: float
 
