@@ -31,8 +31,13 @@ class Gesture(Template):
                 "name": "sub_type",
                 "type": "select",
                 "desc": "动作类型",
-                "defaultValue": "hover",
+                "defaultValue": "click",
                 "options": [
+
+                    {"value": "click", "text": "单击"},
+                    {"value": "double", "text": "双击"},
+                    {"value": "right-click", "text": "右键", "show_if": ["web", "windows", "mac"]},
+                    {"value": "long_press", "text": "长按"},
                     {"value": "hover", "text": "悬停 (Hover)", "show_if": ["windows", "mac", "web"]},
                     {"value": "drag", "text": "拖拽/滑动 (Drag/Swipe)"}
                 ]
@@ -109,7 +114,7 @@ class Gesture(Template):
         ],
         "defaultData": {
             "platform": "",
-            "sub_type": "hover",
+            "sub_type": "click",
             "locator_chain": [],
             "target_locator_chain": []
         },
@@ -126,7 +131,11 @@ class Gesture(Template):
         
         source = self.engine.find_element(locator_chain)
         if not source:
-            SLog.e(TAG, "Source element not found")
+            SLog.d(TAG, "Source element not found. Switching to OCR now")
+            from ability.component.public.ocr import analyze
+            img = self.engine.screenshot()
+            ocr_result = analyze(None, img)
+            self.memory.set(self.info, "ocr_result", ocr_result)
             self.result.fail()
             return self.result
 

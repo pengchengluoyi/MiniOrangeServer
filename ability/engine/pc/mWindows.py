@@ -123,14 +123,19 @@ class WindowsEngine(BaseEngine):
                 SLog.e(TAG, f"Fallback to dump active window hierarchy also failed: {e2}")
                 return ""
 
-    def screenshot(self, path):
+    def screenshot(self, path=None):
         # 截取当前操作的窗口
+        img = None
         try:
-            self.driver.top_window().capture_as_image().save(path)
+            img = self.driver.top_window().capture_as_image()
         except Exception as e:
             SLog.w(TAG, f"Capture app window failed: {e}, fallback to fullscreen.")
-            ImageGrab.grab().save(path)
-        return path
+            img = ImageGrab.grab()
+
+        if path:
+            img.save(path)
+            return path
+        return img
 
     def switch_window(self, target):
         """

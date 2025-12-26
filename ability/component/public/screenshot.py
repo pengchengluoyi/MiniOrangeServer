@@ -59,6 +59,7 @@ class Screenshot(Template):
 
     def execute(self):
         self.get_engine()
+
         prefix = self.get_param_value("filename_prefix")
         # 修复: locator_chain 是列表类型，直接从 data 获取，避免 get_param_value 中的正则匹配导致 TypeError
         locator_chain = self.info.data.get("locator_chain", [])
