@@ -256,7 +256,7 @@ class EmptyNodeCreate(BaseModel):
 @router.post("/add_empty_node")
 def add_empty_node(item: EmptyNodeCreate, db: Session = Depends(get_db)):
     # 注意这里使用 item.graph_id 等
-    db.add(AppNode(graph_id=item.graph_id, node_id=item.node_id, x=item.x, y=item.y, label="新节点"))
+    db.add(AppNode(graph_id=item.graph_id, type=item.type, node_id=item.node_id, x=item.x, y=item.y, label="新节点"))
     db.commit()
     return {"code": 200, "msg": "ok"}
 

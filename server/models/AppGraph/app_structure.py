@@ -47,7 +47,6 @@ class AppNode(Base):
     dom_tree = Column(Text, nullable=True)  # 完整 DOM 结构
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-    # 🔥🔥 修复点在这里：之前是 "Appgraph"，改为 "AppGraph" (大写G)
     graph = relationship("AppGraph", back_populates="nodes")
     components = relationship("AppComponent", back_populates="node", cascade="all, delete-orphan")
 
