@@ -9,7 +9,7 @@ import uuid
 from server.core.database import get_db
 from server.models.workflow import Workflow
 from server.models.workflow_run import WorkflowRun
-from server.schemas.workflow import WorkflowCreate, WorkflowItem, WorkflowDetail, WorkflowSave
+from server.schemas.workflow import WorkflowCreate, WorkflowItem, WorkflowDetail, WorkflowSave, WorkflowSaveSimple
 
 # 引入你的包装器
 from driver.agent.actuator import process_runner_wrapper
@@ -42,6 +42,20 @@ def save_workflow(item: WorkflowSave, db: Session = Depends(get_db)):
         db.refresh(new_wf)
         return {"code": 200, "msg": "创建成功", "id": new_wf.id}
 
+@router.post("/save_simple", response_model=dict)
+def save_workflow_simple(item: WorkflowSaveSimple, db: Session = Depends(get_db)):
+    existing = db.query(Workflow).filter(Workflow.id == item.id).first()
+    if existing:
+        existing.name = item.name
+        existing.desc = item.desc
+        db.commit()
+        return {"code": 200, "msg": "更新成功", "id": existing.id}
+    else:
+        new_wf = Workflow(name=item.name, desc=item.desc)
+        db.add(new_wf)
+        db.commit()
+        db.refresh(new_wf)
+        return {"code": 200, "msg": "创建成功", "id": new_wf.id}
 
 @router.get("/list", response_model=dict)
 def get_list(db: Session = Depends(get_db)):
@@ -58,6 +72,28 @@ def get_list(db: Session = Depends(get_db)):
     data = [WorkflowItem.model_validate(w).model_dump() for w in wfs]
     return {"code": 200, "data": data}
 
+
+@router.get("/detail_simple/{workflow_id}")
+def get_workflow_detail_simple(workflow_id: int, db: Session = Depends(get_db)):
+    """
+    根据 ID 获取工作流详情，包括 nodes
+    """
+    # 1. 查询数据库
+    wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+
+    # 2. 如果找不到，抛出 404 错误
+    if not wf:
+        raise HTTPException(status_code=404, detail="工作流不存在")
+
+    # 4. 返回标准格式
+    return {
+        "code": 200,
+        "data": {
+            "id": wf.id,
+            "name": wf.name,
+            "updated_at": wf.updated_at
+        }
+    }
 
 @router.get("/detail/{workflow_id}")
 def get_workflow_detail(workflow_id: int, db: Session = Depends(get_db)):

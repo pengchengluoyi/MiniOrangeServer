@@ -40,6 +40,7 @@ class NodeSaveDetail(BaseModel):
     type: str = NodeType.PAGE
     parent_node_id: Optional[str] = None
     label: str = "新节点"
+    workflow_id: Optional[str] = None
     screenshot: Optional[str] = None
     # 允许 dom_tree 为 None
     dom_tree: Optional[Any] = None
@@ -110,6 +111,7 @@ def get_graph_detail(graph_id: int, db: Session = Depends(get_db)):
             "position": {"x": n.x, "y": n.y},
             "data": {
                 "label": n.label,
+                "workflow_id": n.workflow_id,
                 "screenshot": n.screenshot,
                 "domTree": json.loads(n.dom_tree) if n.dom_tree else None,
                 "interactions": comp_map.get(n.id, [])
@@ -147,6 +149,7 @@ def save_node_detail(item: NodeSaveDetail, db: Session = Depends(get_db)):
 
         # 2. 更新属性
         node.label = item.label
+        node.workflow_id = item.workflow_id
         node.screenshot = item.screenshot
 
         # 处理 dom_tree

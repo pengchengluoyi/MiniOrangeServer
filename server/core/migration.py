@@ -41,6 +41,9 @@ def _check_and_migrate(db_path):
                 ('created_at', 'DATETIME', None),
                 ('uid', 'TEXT', None)
             ],
+            'app_nodes': [
+                ('workflow_id', 'TEXT', None)
+            ],
             # 兼容旧表名 (防止表名修改导致旧数据无法迁移)
             'projects': [
                 ('uid', 'TEXT', None)

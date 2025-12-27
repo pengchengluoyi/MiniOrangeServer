@@ -18,6 +18,13 @@ class WorkflowSave(BaseModel):
     nodes: Dict[str, Any]
 
 
+# 前端传过来的保存参数
+class WorkflowSaveSimple(BaseModel):
+    id: int
+    name: str
+    desc: str
+
+
 # 返回给前端的列表项
 class WorkflowItem(BaseModel):
     id: int

@@ -33,7 +33,6 @@ class Gesture(Template):
                 "desc": "动作类型",
                 "defaultValue": "click",
                 "options": [
-
                     {"value": "click", "text": "单击"},
                     {"value": "double", "text": "双击"},
                     {"value": "right-click", "text": "右键", "show_if": ["web", "windows", "mac"]},
@@ -70,8 +69,7 @@ class Gesture(Template):
                         "name": "desc",
                         "type": "str",
                         "desc": "描述 (ContentDesc/Help)",
-                        "placeholder": "无障碍描述",
-                        "show_if": ["android", "ios"]
+                        "placeholder": "无障碍描述"
                     },
                     {
                         "name": "xpath",
@@ -105,7 +103,7 @@ class Gesture(Template):
                     {"name": "id", "type": "str", "desc": "唯一标识", "placeholder": "ResourceID/AutoID/Name"},
                     {"name": "text", "type": "str", "desc": "文本/标题", "placeholder": "Text/Label/Title"},
                     {"name": "type", "type": "str", "desc": "控件类型", "placeholder": "Class/ControlType"},
-                    {"name": "desc", "type": "str", "desc": "描述", "placeholder": "ContentDesc", "show_if": ["android", "ios"]},
+                    {"name": "desc", "type": "str", "desc": "描述", "placeholder": "ContentDesc"},
                     {"name": "xpath", "type": "str", "desc": "XPath", "placeholder": "//...", "show_if": ["web", "android", "ios"]},
                     {"name": "css", "type": "str", "desc": "CSS", "placeholder": ".class #id", "show_if": ["web"]},
                     {"name": "index", "type": "int", "desc": "Index", "placeholder": "0"}

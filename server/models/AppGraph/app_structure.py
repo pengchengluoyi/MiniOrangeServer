@@ -37,6 +37,7 @@ class AppNode(Base):
     parent_node_id = Column(String, nullable=True)  # 归属关系
 
     label = Column(String)
+    workflow_id = Column(String, nullable=True)
     screenshot = Column(String, nullable=True)  # 大图 URL
 
     x = Column(Float, default=0.0)
