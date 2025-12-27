@@ -137,6 +137,15 @@ class TaskResult:
 
     # =================== 输出方法 ===================
     def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self._success,
+            "code": self._code,
+            "message": self._message,
+            "data": self._data,
+            "timestamp": self.timestamp
+        }
+
+    def to_dict_(self) -> Dict[str, Any]:
         """
         转换为字典，移除私有属性的下划线前缀
 
@@ -183,16 +192,7 @@ class TaskResult:
         if not include_none:
             # 过滤掉值为None的字段
             result = {k: v for k, v in result.items() if v is not None}
-
         return result
-
-    def __str__(self) -> str:
-        """字符串表示"""
-        return f"TaskResult(success={self._success}, code={self._code})"
-
-    def __repr__(self) -> str:
-        """调试表示"""
-        return f"TaskResult(success={self._success}, code={self._code}, data={type(self._data).__name__})"
 
     # =================== 辅助方法 ===================
     def is_success(self) -> bool:

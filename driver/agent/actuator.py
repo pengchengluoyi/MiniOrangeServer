@@ -4,6 +4,9 @@ from script.log import SLog, current_run_id, current_flow_id
 from server.core.log_database import LogSessionLocal
 from server.models.log import WorkflowLog
 from driver.core.manager import Manager
+from server.services import run_service
+from script.mTask import report
+
 
 
 # 1. 定义写入数据库的具体逻辑
@@ -47,15 +50,19 @@ def process_runner_wrapper(run_data, run_id, flow_id):
         SLog.i("System", f"任务进程启动 PID:{os.getpid()}")
         SLog.i("System", f"输入数据{run_data}")
 
+        run_service.create_run()
         # --- C. 执行真正的业务脚本 ---
         runner = Manager(run_data)
         runner.run()
+
+        run_service.finish_run("success", report)
     except Exception as e:
+        run_service.finish_run("failed", report)
         error_msg = traceback.format_exc()
         SLog.e("System", f"任务异常崩溃: {error_msg}")
         SLog.i("System", "error")
     finally:
         # 清理上下文
-        SLog.i("System", "end")
         current_run_id.reset(token_run)
         current_flow_id.reset(token_flow)
+        SLog.i("System", "end")

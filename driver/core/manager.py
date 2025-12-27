@@ -5,6 +5,7 @@ from script.sleep import mSleep
 
 from driver.core.executer import Executer
 from driver.core.memory.checklist import Checklist
+from script.mTask import report
 
 TAG = "Manager"
 
@@ -41,6 +42,7 @@ class  Manager:
                         self_check_result = employee.self_check()
                         if self_check_result:
                             employee.completed()
+                report[current_node.id] = employee.taskResult.to_dict()
                 mSleep(0.3)
         else:
             SLog.i(TAG, "run end")

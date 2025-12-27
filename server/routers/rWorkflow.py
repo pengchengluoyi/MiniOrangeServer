@@ -147,9 +147,6 @@ def run_workflow(workflow_id: str, db: Session = Depends(get_db)):
     # 1. 生成本次运行的唯一 ID
     run_id = str(uuid.uuid4())
 
-    # 2. 准备参数
-    # 假设你的 main_task_entry 需要一些参数，可以在这里准备
-
     # 1. 查询数据库
     wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
 

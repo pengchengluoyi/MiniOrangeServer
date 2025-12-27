@@ -13,7 +13,7 @@ class Executer:
         self.task = None
 
     def online(self):
-        self.center.online()
+        ...
 
     def accept_order(self, order_info):
         self.taskResult.accept_order(order_info)
