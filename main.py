@@ -37,7 +37,8 @@ from server.routers import rAppGraph as app_graph_router
 print(f"--- [Perf] rAppGraph loaded: {time.time() - t_start:.3f}s ---")
 
 t_start = time.time()
-from server.routers import rWebsocket as websocket_router
+from server.websocket import rWebsocket as websocket_router
+
 print(f"--- [Perf] rWebsocket loaded: {time.time() - t_start:.3f}s ---")
 
 t_start = time.time()
@@ -92,7 +93,7 @@ app.include_router(task_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.22", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.24", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
