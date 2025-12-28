@@ -39,13 +39,13 @@ def get_workflow_run_detail_simple(run_uuid: str, db: Session = Depends(get_db))
         }
     }
 
-@router.get("/detail/{run_id}")
-def get_workflow_run_detail(run_id: int, db: Session = Depends(get_db)):
+@router.get("/detail/{run_uuid}")
+def get_workflow_run_detail(run_uuid: str, db: Session = Depends(get_db)):
     """
     根据 ID 获取工作流详情，包括 nodes
     """
     # 1. 查询数据库
-    wf = db.query(WorkflowRun).filter(WorkflowRun.run_uuid == run_id).first()
+    wf = db.query(WorkflowRun).filter(WorkflowRun.run_uuid == run_uuid).first()
 
     # 2. 如果找不到，抛出 404 错误
     if not wf:
@@ -55,7 +55,7 @@ def get_workflow_run_detail(run_id: int, db: Session = Depends(get_db)):
     return {
         "code": 200,
         "data": {
-            "success": wf.success,
+            "success": wf.status,
             "trigger_type": wf.trigger_type,
             "start_time": wf.start_time,
             "end_time": wf.end_time,
