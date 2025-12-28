@@ -99,7 +99,7 @@ app.include_router(workflowRun_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.27", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.28", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():

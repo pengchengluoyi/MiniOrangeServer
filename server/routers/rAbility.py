@@ -22,9 +22,9 @@ def execute_ability(data: dict = Body(...)):
 
 # (可选) 动态注册所有已知的组件路由
 # 这样可以提供更直观的接口，例如 POST /ability/public/ocr
-# 注意：这依赖于 BaseRouter.registry 已经加载了所有组件
-if hasattr(BaseRouter, 'registry') and isinstance(BaseRouter.registry, dict):
-    for node_code in BaseRouter.registry.keys():
+# 注意：这依赖于 BaseRouter.routes 已经加载了所有组件
+if hasattr(BaseRouter, 'routes') and isinstance(BaseRouter.routes, dict):
+    for node_code in BaseRouter.routes.keys():
         # 将 nodeCode 转换为 URL 路径
         # 例如: public/ocr -> /public/ocr
         safe_path = "/" + node_code.strip("/")

@@ -102,6 +102,7 @@ class FastOCR(Template):
             import traceback
             traceback.print_exc()
 
+
 def analyze(image_path, img=None):
     if not img:
         # 0. 检查文件是否存在

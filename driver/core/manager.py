@@ -6,6 +6,7 @@ from script.sleep import mSleep
 from driver.core.executer import Executer
 from driver.core.memory.checklist import Checklist
 from script.mTask import report
+from ability.component.router import BaseRouter
 
 TAG = "Manager"
 
@@ -47,4 +48,9 @@ class  Manager:
         else:
             SLog.i(TAG, "run end")
 
-
+    def execute_interface(self, data: dict):
+        uri = data.get("nodeCode")
+        if not uri:
+            return {"code": 400, "msg": "nodeCode is required"}
+        
+        return BaseRouter.handle_request(uri, data)
