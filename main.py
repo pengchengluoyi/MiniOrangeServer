@@ -49,6 +49,11 @@ t_start = time.time()
 from server.routers import rTask as task_router
 print(f"--- [Perf] rTask loaded: {time.time() - t_start:.3f}s ---")
 
+t_start = time.time()
+from server.routers import rWorkflowRun as workflowRun_router
+print(f"--- [Perf] rTask loaded: {time.time() - t_start:.3f}s ---")
+
+
 # ⏱️ [Perf] 打印导入总耗时
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
 
@@ -90,6 +95,7 @@ app.include_router(app_graph_router.router)
 app.include_router(websocket_router.router)
 app.include_router(project_router.router)
 app.include_router(task_router.router)
+app.include_router(workflowRun_router.router)
 
 @app.get("/")
 def health_check():

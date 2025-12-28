@@ -1,5 +1,5 @@
 # server/schemas/run.py
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict # 导入 ConfigDict
 from typing import Dict, Any, Optional
 
 
@@ -12,3 +12,12 @@ class RunResponse(BaseModel):
     run_id: str
     status: str
     message: str
+
+class RunList(BaseModel):
+    workflow_id: int
+    run_uuid: str
+    status: str
+    result_summary: Optional[Dict[str, Any]] = None # 建议设为 Optional，防止数据库里是空
+
+    # --- 关键修复：允许从 ORM 对象（SQLAlchemy）读取数据 ---
+    model_config = ConfigDict(from_attributes=True)

@@ -52,7 +52,8 @@ def _check_and_migrate(db_path):
                 ('uid', 'TEXT', None)
             ],
             'tasks': [
-                ('uid', 'TEXT', None)
+                ('uid', 'TEXT', None),
+                ('result_summary', 'JSON', None)
             ]
         }
 

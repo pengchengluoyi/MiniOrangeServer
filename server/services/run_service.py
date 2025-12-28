@@ -17,8 +17,8 @@ def create_run(trigger="manual", db: Session = None):
         close_session = True
     try:
         new_run = WorkflowRun(
-            workflow_id=current_flow_id,
-            run_uuid=current_run_id,
+            workflow_id=current_flow_id.get(),
+            run_uuid=current_run_id.get(),
             status="pending",
             trigger_type=trigger,
             start_time=datetime.now()
@@ -46,7 +46,7 @@ def finish_run(status: str, summary: str = None, db: Session = None):
         db = SessionLocal()
         close_session = True
     try:
-        run = db.query(WorkflowRun).filter(WorkflowRun.run_uuid == current_run_id).first()
+        run = db.query(WorkflowRun).filter(WorkflowRun.run_uuid == current_run_id.get()).first()
         if run:
             run.end_time = datetime.now()
             run.status = status  # 'success' or 'failed'

@@ -1,5 +1,5 @@
 # models/workflow_run.py
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float,JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from server.core.database import Base
@@ -26,7 +26,7 @@ class WorkflowRun(Base):
     duration = Column(Float, default=0.0)  # 耗时(秒)
 
     # 执行结果摘要 (不是详细日志，只是简短的报错信息或成功消息)
-    result_summary = Column(Text, nullable=True)
+    result_summary = Column(JSON, nullable=True)
 
     # 建立反向关系
     workflow = relationship("Workflow", back_populates="runs")
