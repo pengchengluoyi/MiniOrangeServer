@@ -93,7 +93,7 @@ app.include_router(task_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.24", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.25", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
