@@ -78,14 +78,30 @@ for lib in ['numpy', 'onnxruntime', 'PIL']:
     except Exception:
         pass
 
-# --- A5. 确保 pywinauto 完整收集 ---
+# --- A5. 确保 pywinauto 完整收集 (增强版) ---
 try:
+    # 1. 自动收集基础资源
     tmp_ret_pwa = collect_all('pywinauto')
     datas += tmp_ret_pwa[0]
     binaries += tmp_ret_pwa[1]
     hiddenimports += tmp_ret_pwa[2]
-except Exception:
-    pass
+    
+    # 2. 核心修复：显式添加容易丢失的子模块
+    # pywinauto 的 desktop 和 backend 经常在打包时被识别为外部引用而丢失
+    pwa_hidden = [
+        'pywinauto.desktop',
+        'pywinauto.application',
+        'pywinauto.backend',
+        'pywinauto.controls',
+        'pywinauto.controls.uia_controls',
+        'pywinauto.controls.uiawrapper',
+        'pywinauto.controls.win32_controls',
+        'comtypes', # uia 后端依赖于 comtypes
+    ]
+    hiddenimports += pwa_hidden
+    
+except Exception as e:
+    print(f"Warning: Failed to collect pywinauto dependencies: {e}")
 
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
