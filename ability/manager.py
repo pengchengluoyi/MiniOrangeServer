@@ -46,15 +46,14 @@ class Manager(metaclass=SingletonMeta):
         return result
 
     def apply_engine(self, info):
-        SLog.d('apply_engine', f"{info}")
-
         if info.platform in platform_code.MMOBILE:
             if info.platform == platform_code.IOS:
                 from ability.engine.mobile.mIOS import IOSEngine
                 self.MobileEngine = IOSEngine()
             else:
-                from ability.engine.mobile.mAndroid import AndroidEngine
-                self.MobileEngine = AndroidEngine()
+                # from ability.engine.mobile.mAndroid import AndroidEngine
+                from ability.engine.mobile.mAndroidADB import AndroidADBEngine
+                self.MobileEngine = AndroidADBEngine()
         if info.platform in platform_code.MWEB:
             from ability.engine.web.mChrome import ChromeEngine
             self.WebEngine = ChromeEngine()

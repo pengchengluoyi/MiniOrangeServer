@@ -122,6 +122,12 @@ hiddenimports += [
     'pkg_resources.extern', # 解决日志中的 pkg_resources 警告
 ]
 
+# --- A7. 递归收集整个 resource 目录 ---
+if os.path.exists('resource'):
+    # 第一个 'resource' 是你电脑上的文件夹名
+    # 第二个 'resource' 是打包后在程序根目录生成的文件夹名
+    datas.append(('resource', 'resource'))
+
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
 def find_local_modules(root_dir):

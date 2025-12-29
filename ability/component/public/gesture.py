@@ -193,7 +193,6 @@ class Gesture(Template):
                 self.engine.hover(source)
             else:
                 self.engine.click(source)
-            
             self.result.success()
         except Exception as e:
             SLog.e(TAG, f"Gesture action failed: {e}")
