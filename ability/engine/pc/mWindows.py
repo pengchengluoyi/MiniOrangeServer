@@ -1,14 +1,20 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-import os
+import os, sys, io
 
 try:
     from pywinauto.application import Application
     from pywinauto.desktop import Desktop
     from pywinauto import mouse
+except ImportError:
+    Application = None
+    Desktop = None
+    mouse = None
+
+try:
     from PIL import ImageGrab
 except ImportError:
-    pass
+    ImageGrab = None
 
 from script.log import SLog
 from ability.core.engine import BaseEngine
@@ -21,44 +27,71 @@ class WindowsEngine(BaseEngine):
 
     def init_driver(self, test_subject=None):
         SLog.i(TAG, "Init Windows Engine")
-        self.driver = Application(backend="uia")
+        if Application:
+            # 仅初始化对象，不绑定进程
+            self.driver = Application(backend="uia")
+        else:
+            SLog.e(TAG, "pywinauto not installed or failed to load.")
+            self.driver = None
 
     def start_app(self, package_name=None):
-        self.driver.start(r"{}".format(package_name))
-        self.package_path = package_name
-        return True
+        if not package_name or not self.driver:
+            return False
+        try:
+            self.driver.start(r"{}".format(package_name))
+            self.package_path = package_name
+            return True
+        except Exception as e:
+            SLog.e(TAG, f"Start app failed: {e}")
+            return False
 
     def stop_app(self, package_name=None):
+        """
+        修复逻辑：优先关闭当前 driver 绑定的进程，
+        如果指定了 package_name 或有缓存路径，则执行强制杀进程。
+        """
         try:
-            self.driver.kill()
-            if package_name is not None:
-                file_name = os.path.basename(self.package_path)
-                os.system("taskkill /F /IM {}".format(file_name))
-        except:
-            pass
+            # 1. 尝试正常关闭
+            if self.driver and hasattr(self.driver, 'kill'):
+                try:
+                    self.driver.kill()
+                except:
+                    pass
+
+            # 2. 强制杀进程（处理残留）
+            # 修复：优先使用传入的 package_name，否则使用缓存的 self.package_path
+            target = package_name or self.package_path
+            if target:
+                file_name = os.path.basename(target)
+                if file_name:
+                    os.system("taskkill /F /IM {} /T".format(file_name))
+        except Exception as e:
+            SLog.w(TAG, f"Stop app warning: {e}")
         return True
 
-    def find_element(self, locator_chain=[]):
-        current = self.driver
-        is_root = True
+    def find_element(self, locator_chain=None):
+        # 修复：如果 driver 尚未连接到窗口，尝试从 Desktop 开始找
+        try:
+            current = self.driver.top_window()
+        except:
+            if Desktop:
+                current = Desktop(backend="uia")
+            else:
+                SLog.e(TAG, "No driver or Desktop available for find_element")
+                return None
 
+        is_root = True
         for condition in locator_chain:
             locator_params = {}
             for key, value in condition.items():
-                if key in ['index', 'not']: continue
-                if value:
-                    # --- 参数映射 ---
-                    if key == 'id':
-                        locator_params['auto_id'] = value
-                    elif key == 'text':
-                        locator_params['title'] = value
-                    elif key == 'type':
-                        locator_params['control_type'] = value
-                    else:
-                        locator_params[key] = value
+                if key in ['index', 'not'] or value is None:
+                    continue
+                # 参数映射
+                mapping = {'id': 'auto_id', 'text': 'title', 'type': 'control_type'}
+                locator_params[mapping.get(key, key)] = value
 
             index = condition.get('index', None)
-            if index is not None and isinstance(index, int):
+            if isinstance(index, int):
                 locator_params['found_index'] = index
 
             if is_root:
@@ -66,7 +99,6 @@ class WindowsEngine(BaseEngine):
                 is_root = False
             else:
                 current = current.child_window(**locator_params)
-
         return current
 
     def end(self):
@@ -77,19 +109,28 @@ class WindowsEngine(BaseEngine):
     def click(self, element, position=None):
         # click_input 模拟鼠标点击，比 click() 消息更可靠
         if position:
-            mouse.click(coords=(position[0], position[1]))
+            if mouse:
+                mouse.click(coords=(position[0], position[1]))
+            else:
+                SLog.e(TAG, "Mouse module not available for click")
         else:
             element.click_input()
 
     def double_click(self, element, position=None):
         if position:
-            mouse.double_click(coords=(position[0], position[1]))
+            if mouse:
+                mouse.double_click(coords=(position[0], position[1]))
+            else:
+                SLog.e(TAG, "Mouse module not available for double_click")
         else:
             element.double_click_input()
 
     def context_click(self, element, position=None):
         if position:
-            mouse.right_click(coords=(position[0], position[1]))
+            if mouse:
+                mouse.right_click(coords=(position[0], position[1]))
+            else:
+                SLog.e(TAG, "Mouse module not available for context_click")
         else:
             element.right_click_input()
 
@@ -117,27 +158,32 @@ class WindowsEngine(BaseEngine):
 
     def dump_hierarchy(self, compressed=False, pretty=False, max_depth=None):
         """
-        Dumps the UI hierarchy of the current window.
-        Falls back to the active desktop window if the app window is not available.
+        修复：pywinauto 的 print_control_identifiers 会直接打印到 stdout，返回值为 None。
+        必须通过重定向 stdout 来捕获字符串。
         """
+        if not Desktop:
+            return "Desktop module not available"
+
+        output = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = output
         try:
-            # pywinauto's print_control_identifiers returns a list of strings
-            hierarchy_list = self.driver.top_window().print_control_identifiers(depth=max_depth)
-            return "\n".join(hierarchy_list)
-        except Exception as e:
-            SLog.w(TAG, f"Dump hierarchy for app window failed: {e}, fallback to active desktop window.")
+            target = None
             try:
-                desktop = Desktop(backend="uia")
-                active_window = desktop.active()
-                if active_window:
-                    hierarchy_list = active_window.print_control_identifiers(depth=max_depth)
-                    return "\n".join(hierarchy_list)
-                else:
-                    SLog.w(TAG, "No active window found on desktop.")
-                    return ""
-            except Exception as e2:
-                SLog.e(TAG, f"Fallback to dump active window hierarchy also failed: {e2}")
-                return ""
+                target = self.driver.top_window()
+            except:
+                target = Desktop(backend="uia").active()
+
+            if target:
+                target.print_control_identifiers(depth=max_depth)
+        except Exception as e:
+            print(f"Dump failed: {e}")
+        finally:
+            sys.stdout = old_stdout
+
+        result = output.getvalue()
+        output.close()
+        return result
 
     def screenshot(self, path=None):
         # 截取当前操作的窗口
@@ -146,9 +192,12 @@ class WindowsEngine(BaseEngine):
             img = self.driver.top_window().capture_as_image()
         except Exception as e:
             SLog.w(TAG, f"Capture app window failed: {e}, fallback to fullscreen.")
-            img = ImageGrab.grab()
+            if ImageGrab:
+                img = ImageGrab.grab()
+            else:
+                SLog.e(TAG, "ImageGrab not available for screenshot")
 
-        if path:
+        if path and img:
             img.save(path)
             return path
         return img
