@@ -96,11 +96,14 @@ class FastOCR(Template):
                 # 修复变量名错误: img_path -> image_path
                 write_path = visualize(image_path, results)
                 self.memory.set(self.info, "ocr_image_path", write_path)
+            self.result.result_data({"ocr_result": results})
+            return self.result.to_dict()
 
         except Exception as e:
             SLog.e(TAG, f"程序运行出错: {e}")
             import traceback
             traceback.print_exc()
+            return self.result.to_dict()
 
 
 def analyze(image_path, img=None):

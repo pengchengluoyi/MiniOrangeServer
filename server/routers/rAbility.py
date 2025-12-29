@@ -18,7 +18,7 @@ def execute_ability(data: dict = Body(...)):
         "platform": "web"
     }
     """
-    return Manager().execute_interface(data)
+    return Manager().execute_interface(data.get("data"))
 
 # (可选) 动态注册所有已知的组件路由
 # 这样可以提供更直观的接口，例如 POST /ability/public/ocr

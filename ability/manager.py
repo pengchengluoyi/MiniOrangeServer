@@ -4,6 +4,8 @@ from script.log import SLog
 import ability.common.platform as platform_code
 from ability.component.router import BaseRouter
 from script.singleton_meta import SingletonMeta
+from driver.common.task_details import TaskDetails
+
 
 
 class TaskInfo:
@@ -32,12 +34,14 @@ class Manager(metaclass=SingletonMeta):
         """
         API 统一调用入口，将字典转换为内部 Info 对象并执行
         """
-        info = TaskInfo(**data)
+        info = TaskDetails(case_info=data)
         self.online(info)
         return self.register_router(info)
 
     def register_router(self, info):
-        return self.router.handle_request(info.nodeCode, info)
+        execute_router = self.router.handle_request(info.nodeCode, info)
+        result = execute_router.execute()
+        return result
 
     def apply_engine(self, info):
         SLog.d('apply_engine', f"{info}")
