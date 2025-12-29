@@ -79,6 +79,11 @@ for lib in ['numpy', 'onnxruntime', 'PIL']:
         pass
 
 # --- A5. 确保 pywinauto 完整收集 (增强版) ---
+
+import pywinauto
+pwa_path = os.path.dirname(pywinauto.__file__)
+# 强制将整个库作为数据文件打入，绕过 PyInstaller 的分析错误
+datas.append((pwa_path, 'pywinauto')) 
 try:
     # 1. 自动收集基础资源
     tmp_ret_pwa = collect_all('pywinauto')
@@ -108,6 +113,14 @@ try:
     
 except Exception as e:
     print(f"Warning: Failed to collect pywinauto dependencies: {e}")
+
+# --- A6. 补充缺失的隐式依赖 ---
+hiddenimports += [
+    'onnx', 
+    'comtypes.gen',
+    'uiautomator2.core',
+    'pkg_resources.extern', # 解决日志中的 pkg_resources 警告
+]
 
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
