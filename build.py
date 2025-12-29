@@ -78,6 +78,15 @@ for lib in ['numpy', 'onnxruntime', 'PIL']:
     except Exception:
         pass
 
+# --- A5. 确保 pywinauto 完整收集 ---
+try:
+    tmp_ret_pwa = collect_all('pywinauto')
+    datas += tmp_ret_pwa[0]
+    binaries += tmp_ret_pwa[1]
+    hiddenimports += tmp_ret_pwa[2]
+except Exception:
+    pass
+
 # --- B. 辅助函数：递归收集本地源码模块 ---
 # 解决 importlib 动态导入无法被 PyInstaller 识别的问题
 def find_local_modules(root_dir):
