@@ -62,7 +62,7 @@ class Manager(metaclass=SingletonMeta):
                 from ability.engine.pc.mMac import MacEngine
                 self.PCEngine = MacEngine()
             elif info.platform == platform_code.WINDOWS:
-                from ability.engine.pc.mWindows import WindowsEngine
+                from ability.engine.pc.mWindowsPywinauto import WindowsEngine
                 self.PCEngine = WindowsEngine()
 
         return True

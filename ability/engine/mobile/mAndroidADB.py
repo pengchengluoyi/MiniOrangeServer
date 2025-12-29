@@ -59,6 +59,10 @@ class AndroidADBEngine(BaseEngine):
         self.shell(f"monkey -p {p_name} -c android.intent.category.LAUNCHER 1")
         return True
 
+    def stop_app(self, package_name=None):
+        if package_name: self.shell(f"am force-stop {package_name}")
+        return True
+
     def screenshot(self, path=None):
         try:
             # exec-out 是获取二进制流最快且最稳定的方式
@@ -109,6 +113,22 @@ class AndroidADBEngine(BaseEngine):
         target = position if position else element
         if target: self.shell(f"input tap {target[0]} {target[1]}")
 
-    def stop_app(self, package_name=None):
-        if package_name: self.shell(f"am force-stop {package_name}")
-        return True
+    def send_keys(self, element, text):
+        """
+        在指定位置输入文本
+        """
+        # 1. 先点击元素获取焦点
+        self.click(element)
+        time.sleep(0.5)
+        # 2. ADB 原生 text 不支持中文，空格需转义为 %s
+        safe_text = str(text).replace(" ", "%s")
+        self.shell(f"input text {safe_text}")
+
+    def drag_and_drop(self, source, target):
+        """
+        从起点滑动到终点。source 和 target 都是 (x, y) 坐标元组
+        """
+        if source and target:
+            # input swipe <x1> <y1> <x2> <y2> <duration_ms>
+            SLog.i(TAG, f"执行滑动: {source} -> {target}")
+            self.shell(f"input swipe {source[0]} {source[1]} {target[0]} {target[1]} 500")

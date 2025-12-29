@@ -4,6 +4,7 @@ import subprocess
 import sys
 import re
 
+
 def clean(targets):
     """清理指定的文件或目录"""
     for target in targets:
@@ -18,6 +19,7 @@ def clean(targets):
             except Exception as e:
                 print(f"Error removing {target}: {e}")
 
+
 def get_version():
     """从 main.py 中提取版本号"""
     try:
@@ -30,6 +32,7 @@ def get_version():
     except Exception:
         pass
     return "1.0.0"
+
 
 def build():
     version = get_version()
@@ -78,42 +81,23 @@ for lib in ['numpy', 'onnxruntime', 'PIL']:
     except Exception:
         pass
 
-# --- A5. 确保 pywinauto 完整收集 (增强版) ---
-
-import pywinauto
-pwa_path = os.path.dirname(pywinauto.__file__)
-# 强制将整个库作为数据文件打入，绕过 PyInstaller 的分析错误
-datas.append((pwa_path, 'pywinauto')) 
+# --- A5. 确保 uiautomation, comtypes 完整收集 (增强版) ---
 try:
-    # 1. 自动收集基础资源
-    tmp_ret_pwa = collect_all('pywinauto')
-    datas += tmp_ret_pwa[0]
-    binaries += tmp_ret_pwa[1]
-    hiddenimports += tmp_ret_pwa[2]
+    # 推荐对 uiautomation 也使用自动收集
+    tmp_ret_uia = collect_all('uiautomation')
+    datas += tmp_ret_uia[0]
+    binaries += tmp_ret_uia[1]
+    hiddenimports += tmp_ret_uia[2]
     
-    # 2. 核心修复：显式添加容易丢失的子模块
-    # pywinauto 的 desktop 和 backend 经常在打包时被识别为外部引用而丢失
-    pwa_hidden = [
-        'pywinauto.desktop',
-        'pywinauto.application',
-        'pywinauto.backend',
-        'pywinauto.controls',
-        'pywinauto.controls.uia_controls',
-        'pywinauto.controls.uiawrapper',
-        'pywinauto.controls.win32_controls',
-        'comtypes', # uia 后端依赖于 comtypes
+    # 显式补强 comtypes 依赖
+    hiddenimports += [
+        'comtypes',
+        'comtypes.gen',
         'comtypes.stream',
-        'pywinauto.mouse',
-        'pywinauto.keyboard',
-        'pywinauto.timings',
-        'pywinauto.win32_hooks',
-        'pywinauto.fuzzydict',
     ]
-    hiddenimports += pwa_hidden
-    
 except Exception as e:
-    print(f"Warning: Failed to collect pywinauto dependencies: {e}")
-
+    print(f"Warning: Failed to collect uiautomation dependencies: {e}")
+    
 # --- A6. 补充缺失的隐式依赖 ---
 hiddenimports += [
     'onnx', 
@@ -205,6 +189,7 @@ coll = COLLECT(
     print("--- 4. Cleaning temp files ---")
     clean(['build', 'main.spec'])
     print("--- Build Complete! ---")
+
 
 if __name__ == "__main__":
     build()
