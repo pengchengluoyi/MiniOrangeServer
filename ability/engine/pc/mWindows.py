@@ -189,7 +189,10 @@ class WindowsEngine(BaseEngine):
         # 截取当前操作的窗口
         img = None
         try:
-            img = self.driver.top_window().capture_as_image()
+            if self.driver:
+                img = self.driver.top_window().capture_as_image()
+            else:
+                raise Exception("Driver is None")
         except Exception as e:
             SLog.w(TAG, f"Capture app window failed: {e}, fallback to fullscreen.")
             if ImageGrab:
@@ -207,6 +210,10 @@ class WindowsEngine(BaseEngine):
         Windows: 切换到指定标题的窗口
         target: 窗口标题 (支持正则)
         """
+        if not Desktop:
+            SLog.e(TAG, "Desktop module not available for switch_window")
+            return
+
         try:
             # 使用 Desktop 可以查找所有运行中程序的窗口
             win = Desktop(backend="uia").window(title_re=target)
@@ -222,6 +229,10 @@ class WindowsEngine(BaseEngine):
             SLog.e(TAG, f"Switch window failed: {e}")
 
     def close_window(self, target):
+        if not Desktop:
+            SLog.e(TAG, "Desktop module not available for close_window")
+            return
+
         try:
             win = Desktop(backend="uia").window(title_re=target)
             if win.exists():

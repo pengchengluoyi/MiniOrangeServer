@@ -97,6 +97,12 @@ try:
         'pywinauto.controls.uiawrapper',
         'pywinauto.controls.win32_controls',
         'comtypes', # uia 后端依赖于 comtypes
+        'comtypes.stream',
+        'pywinauto.mouse',
+        'pywinauto.keyboard',
+        'pywinauto.timings',
+        'pywinauto.win32_hooks',
+        'pywinauto.fuzzydict',
     ]
     hiddenimports += pwa_hidden
     
