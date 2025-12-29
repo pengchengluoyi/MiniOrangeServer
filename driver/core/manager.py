@@ -52,5 +52,4 @@ class  Manager:
         uri = data.get("nodeCode")
         if not uri:
             return {"code": 400, "msg": "nodeCode is required"}
-        
         return BaseRouter.handle_request(uri, data)

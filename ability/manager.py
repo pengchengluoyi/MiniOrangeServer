@@ -36,9 +36,11 @@ class Manager(metaclass=SingletonMeta):
         """
         info = TaskDetails(case_info=data)
         self.online(info)
-        return self.register_router(info)
+        return self.register_router(info, True)
 
-    def register_router(self, info):
+    def register_router(self, info, channel=None):
+        if not channel:
+            return self.router.handle_request(info.nodeCode, info)
         execute_router = self.router.handle_request(info.nodeCode, info)
         result = execute_router.execute()
         return result
