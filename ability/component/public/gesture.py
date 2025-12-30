@@ -155,9 +155,14 @@ class Gesture(Template):
         db_ref_pos = None
 
         if interaction_id:
+
+            SLog.i(TAG, "interaction_id")
+            SLog.i(TAG, f"({interaction_id})")
             db = SessionLocal()
             try:
                 comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
+                SLog.i(TAG, str(comp.label))
+                SLog.i(TAG, str(comp.label))
                 if comp:
                     target_label = comp.label
                     # 数据库存的是原始截图下的中心点

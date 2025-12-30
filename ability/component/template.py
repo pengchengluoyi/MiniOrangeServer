@@ -11,6 +11,21 @@ import ability.common.platform as platform_code
 
 TAG = "Template"
 
+# 编译清洗规则，匹配各种零宽字符
+_INVISIBLE_CHARS_PATTERN = re.compile(r'[\u200b-\u200d\ufeff]')
+
+def clean_invisible_chars(data):
+    """递归清洗字符串中的不可见字符"""
+    if isinstance(data, str):
+        return _INVISIBLE_CHARS_PATTERN.sub('', data)
+    elif isinstance(data, list):
+        # 如果是列表（如 locator_chain），对内部每个元素进行处理
+        return [clean_invisible_chars(item) for item in data]
+    elif isinstance(data, dict):
+        # 如果是字典（如 locator 节点），清洗所有的值
+        return {k: clean_invisible_chars(v) for k, v in data.items()}
+    return data
+
 
 class Template:
 
@@ -42,13 +57,14 @@ class Template:
             self.engine = Manager().PCEngine
 
     def get_param_value(self, param_name):
+        param_name = clean_invisible_chars(param_name)
         pattern = r'\{\{([^{}]+)\}\}'
         if isinstance(param_name, str) and re.match(pattern, param_name):
             return self.memory.get(param_name)
 
 
         if param_name in self.info.data:
-            val = self.info.data[param_name]
+            val = clean_invisible_chars(self.info.data[param_name])
             SLog.d(TAG, "Getting value of parameter '{}', and Parameter value is '{}'".format(param_name, val))
 
             if isinstance(val, str) and re.match(pattern, val):
@@ -64,9 +80,3 @@ class Template:
     def build_chain(self, locator_chain):
         return self.engine.build_chain(locator_chain)
 
-if __name__ == '__main__':
-    sttt = "{{public-screenshot-1766553312798.path}}"
-
-    pattern = r'\{\{([^{}]+)\}\}'
-    if re.match(pattern, sttt):
-        print()

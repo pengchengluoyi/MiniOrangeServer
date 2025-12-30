@@ -54,7 +54,8 @@ class AndroidADBEngine(BaseEngine):
         return True
 
     def stop_app(self, package_name=None):
-        if package_name: self.shell(f"am force-stop {package_name}")
+        if package_name:
+            self.shell(f"am force-stop {package_name}")
         return True
 
     def screenshot(self, path=None):
