@@ -1,36 +1,42 @@
 import os
 import sys
-import logging
+import platform
 
-# 🛡️ 方案：安全初始化 comtypes.gen
-try:
-    import comtypes
-
-    # 确保 comtypes 有一个存放生成文件的目录
+# 🛡️ 只有在 Windows 平台上才执行 comtypes 的初始化逻辑
+if platform.system() == "Windows":
     try:
-        import comtypes.gen
-    except ImportError:
-        # 如果不存在，手动创建一个空的模块对象
-        import types
+        import comtypes
+        import comtypes.client
 
-        gen = types.ModuleType("comtypes.gen")
-        sys.modules["comtypes.gen"] = gen
-        comtypes.gen = gen
+        # 尝试导入或动态创建 comtypes.gen
+        try:
+            import comtypes.gen
+        except ImportError:
+            import types
 
-    # 获取或创建物理路径
-    # 在打包环境下，我们通常希望它指向一个可写的临时目录
-    gen_path = os.path.join(os.path.abspath('.'), "comtypes_cache")
-    if not os.path.exists(gen_path):
-        os.makedirs(gen_path)
+            gen = types.ModuleType("comtypes.gen")
+            sys.modules["comtypes.gen"] = gen
+            comtypes.gen = gen
 
-    # 强制将 comtypes 的生成路径指向这里
-    comtypes.client._generate_cache = gen_path
-    comtypes.gen.__path__ = [gen_path]
+        # 设置缓存路径 (打包后 sys._MEIPASS 会很有用)
+        if getattr(sys, 'frozen', False):
+            gen_path = os.path.join(sys._MEIPASS, "comtypes_cache")
+        else:
+            gen_path = os.path.join(os.path.abspath('.'), "comtypes_cache")
 
-    print(f"--- [System] comtypes cache initialized at: {gen_path} ---")
+        if not os.path.exists(gen_path):
+            os.makedirs(gen_path)
 
-except Exception as e:
-    print(f"--- [Warning] comtypes initialization skipped: {e} ---")
+        comtypes.client._generate_cache = gen_path
+        comtypes.gen.__path__ = [gen_path]
+        print(f"--- [System] Windows COM cache initialized at: {gen_path} ---")
+
+    except Exception as e:
+        print(f"--- [Warning] Windows COM initialization failed: {e} ---")
+else:
+    # macOS 或 Linux 环境下直接跳过
+    print(f"--- [System] Current Platform: {platform.system()} | Skipping Windows COM init ---")
+
 import sys
 # 🚀 [Fix] 尽早强制 stdout 使用行缓冲，确保 import 阶段的日志也能被 Electron 捕获
 # 解决第一次启动看不到 [Perf] 日志的问题
@@ -136,7 +142,7 @@ app.include_router(ability_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.36", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.37", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
