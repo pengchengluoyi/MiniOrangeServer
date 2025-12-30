@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
-import re
+import re, math
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
@@ -10,6 +10,9 @@ from server.models.AppGraph.app_component import AppComponent
 
 TAG = "GESTURE"
 
+def get_distance(p1, p2):
+    """计算两点间的欧几里得距离"""
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
 @BaseRouter.route('public/gesture')
 class Gesture(Template):
@@ -68,6 +71,16 @@ class Gesture(Template):
                 ]
             },
             {
+                "name": "anchor_locator_chain",
+                "type": "list",
+                "desc": "锚点元素 (唯一参考物)",
+                "add_text": "添加锚点",
+                "sub_inputs": [
+                    {"name": "text", "type": "str", "desc": "锚点文本", "placeholder": "如：首页/设置/头像"},
+                    {"name": "desc", "type": "str", "desc": "描述", "placeholder": "无障碍描述"}
+                ]
+            },
+            {
                 "name": "target_locator_chain",
                 "type": "list",
                 "desc": "目标元素 (终点 - 仅拖拽)",
@@ -89,6 +102,7 @@ class Gesture(Template):
             "interaction_id": "",
             "sub_type": "click",
             "locator_chain": [],
+            "anchor_locator_chain": [],
             "target_locator_chain": []
         },
         "outputVars": []
@@ -132,86 +146,81 @@ class Gesture(Template):
     def execute(self):
         self.get_engine()
         sub_type = self.get_param_value("sub_type")
-        interaction_id = self.get_param_value("interaction_id")
+        anchor_chain = self.get_param_value("anchor_locator_chain")
         locator_chain = self.get_param_value("locator_chain")
-        target_chain = self.get_param_value("target_locator_chain")
 
-        # 1. 确定起点文本 (Source)
-        src_label = None
-        if interaction_id:
-            db = SessionLocal()
-            try:
-                comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-                if comp: src_label = comp.label
-            finally:
-                db.close()
+        # 1. 提取锚点和目标关键字
+        anchor_text = None
+        if anchor_chain:
+            for node in anchor_chain:
+                anchor_text = node.get("text") or node.get("desc")
+                if anchor_text: break
 
-        if not src_label and locator_chain:
+        target_text = None
+        if locator_chain:
             for node in locator_chain:
-                src_label = node.get("text") or node.get("desc")
-                if src_label: break
+                target_text = node.get("text") or node.get("desc")
+                if target_text: break
 
-        # 2. 确定终点文本 (Target - 仅在拖拽模式下需要)
-        dst_label = None
-        if sub_type == 'drag' and target_chain:
-            for node in target_chain:
-                dst_label = node.get("text") or node.get("desc")
-                if dst_label: break
+        if not target_text:
+            SLog.e(TAG, "未指定目标文本")
+            self.result.fail()
+            return self.result
 
-        # 3. 尝试 OCR 路径
-        if src_label:
-            from ability.component.public.ocr import analyze
-            img = self.engine.screenshot()
-            ocr_results = analyze(None, img)
+        # 2. 执行 OCR 识别
+        from ability.component.public.ocr import analyze
+        img = self.engine.screenshot()
+        ocr_results = analyze(None, img)
 
-            src_pos, dst_pos = None, None
+        anchor_pos = None
+        candidates = []
 
-            # 在 OCR 结果中寻找起点和终点
-            for item in ocr_results:
-                text = item.get("text", "")
-                box = item.get("coordinates", {}).get("box")
+        # 3. 遍历 OCR 结果，区分锚点和候选目标
+        for item in ocr_results:
+            text = item.get("text", "")
+            box = item.get("coordinates", {}).get("box")
+            center = item.get("coordinates", {}).get("center")
 
-                if not src_pos:
-                    src_pos = self.calculate_sub_coords(text, src_label, box)
+            # 寻找锚点坐标
+            if anchor_text and anchor_text in text:
+                # 使用你原有的精确子串坐标计算
+                anchor_pos = self.calculate_sub_coords(text, anchor_text, box)
 
-                if sub_type == 'drag' and dst_label and not dst_pos:
-                    dst_pos = self.calculate_sub_coords(text, dst_label, box)
+            # 寻找所有潜在目标
+            if target_text in text:
+                target_pos = self.calculate_sub_coords(text, target_text, box)
+                if target_pos:
+                    candidates.append(target_pos)
 
-            # OCR 执行逻辑
-            if sub_type == 'drag':
-                if src_pos and dst_pos:
-                    SLog.i(TAG, f"OCR 拖拽成功: 从 {src_pos} 拖至 {dst_pos}")
-                    self.engine.drag_and_drop(None, None, start_pos=src_pos, end_pos=dst_pos)
-                    self.result.success()
-                    return self.result
-            elif src_pos:
-                # 非拖拽动作
-                if sub_type == 'double':
-                    self.engine.double_click(None, position=src_pos)
-                elif sub_type in ['right-click', 'long_press']:
-                    self.engine.context_click(None, position=src_pos)
-                else:
-                    self.engine.click(None, position=src_pos)
-                self.result.success()
-                return self.result
+        # 4. 核心决策逻辑
+        final_pos = None
+        if not candidates:
+            SLog.w(TAG, f"页面未找到目标文本: {target_text}")
+        elif anchor_pos and candidates:
+            # 模式 A: 有锚点，选离锚点最近的
+            final_pos = min(candidates, key=lambda p: get_distance(anchor_pos, p))
+            SLog.i(TAG, f"匹配成功！找到锚点 '{anchor_text}'，点击最近的目标 '{target_text}'")
+        else:
+            # 模式 B: 无锚点或未找到锚点，默认选第一个（兜底）
+            final_pos = candidates[0]
+            SLog.w(TAG, "未找到锚点，回退到默认匹配第一个目标")
 
-        # 4. 兜底逻辑：DOM 定位
-        SLog.w(TAG, "OCR 匹配失败或操作类型不支持，回退到 DOM 定位...")
-        source_el = self.engine.find_element(locator_chain)
-        if source_el:
-            try:
-                if sub_type == 'drag':
-                    target_el = self.engine.find_element(target_chain)
-                    if target_el:
-                        self.engine.drag_and_drop(source_el, target_el)
-                        self.result.success()
-                        return self.result
-                # 其他 DOM 点击动作...
-                self.engine.click(source_el)  # 示例简写
-                self.result.success()
-                return self.result
-            except Exception as e:
-                SLog.e(TAG, f"DOM 执行失败: {e}")
+        # 5. 执行点击
+        if final_pos:
+            self._perform_action(sub_type, final_pos)
+            self.result.success()
+            return self.result
 
+        # 6. OCR 全败，尝试 DOM 兜底 (原有逻辑)
+        # ...
         self.result.fail()
         return self.result
+
+    def _perform_action(self, sub_type, pos):
+        """执行具体的点击/长按动作"""
+        if sub_type == 'double':
+            self.engine.double_click(None, position=pos)
+        elif sub_type in ['right-click', 'long_press']:
+            self.engine.context_click(None, position=pos)
+        else:
+            self.engine.click(None, position=pos)

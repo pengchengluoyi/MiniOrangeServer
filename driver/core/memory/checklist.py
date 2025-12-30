@@ -31,6 +31,8 @@ class Checklist:
                 for key, value in self.checklist.items()
                 if key.startswith("public-trigger")
             ]
+            if len(trigger) == 0:
+                return None
             self.current_node = trigger[0]
         else:
             next_nodes = self.current_node.nextCodes
