@@ -134,77 +134,84 @@ class Gesture(Template):
         sub_type = self.get_param_value("sub_type")
         interaction_id = self.get_param_value("interaction_id")
         locator_chain = self.get_param_value("locator_chain")
+        target_chain = self.get_param_value("target_locator_chain")
 
-        # 1. 确定目标文本 (ID 优先)
-        target_label = None
+        # 1. 确定起点文本 (Source)
+        src_label = None
         if interaction_id:
             db = SessionLocal()
             try:
                 comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-                if comp:
-                    target_label = comp.label
-                    SLog.i(TAG, f"通过 ID {interaction_id} 获得锚点文本: {target_label}")
+                if comp: src_label = comp.label
             finally:
                 db.close()
 
-        # 如果没有 ID 对应的 Label，尝试从定位链获取
-        if not target_label and locator_chain:
+        if not src_label and locator_chain:
             for node in locator_chain:
-                target_label = node.get("text") or node.get("desc")
-                if target_label: break
+                src_label = node.get("text") or node.get("desc")
+                if src_label: break
 
-        # 2. 尝试 OCR 路径 (仅限非拖拽操作，拖拽通常需要两个元素，OCR 较难处理)
-        if target_label and sub_type != 'drag':
+        # 2. 确定终点文本 (Target - 仅在拖拽模式下需要)
+        dst_label = None
+        if sub_type == 'drag' and target_chain:
+            for node in target_chain:
+                dst_label = node.get("text") or node.get("desc")
+                if dst_label: break
+
+        # 3. 尝试 OCR 路径
+        if src_label:
             from ability.component.public.ocr import analyze
             img = self.engine.screenshot()
-            ocr_result = analyze(None, img)
+            ocr_results = analyze(None, img)
 
-            for item in ocr_result:
-                center = self.calculate_sub_coords(item.get("text", ""), target_label,
-                                                   item.get("coordinates", {}).get("box"))
-                if center:
-                    SLog.i(TAG, f"OCR 匹配成功: '{target_label}' -> '{item.get('text')}' 坐标: {center}")
-                    if sub_type == 'double':
-                        self.engine.double_click(None, position=center)
-                    elif sub_type in ['right-click', 'long_press']:
-                        self.engine.context_click(None, position=center)
-                    elif sub_type == 'hover':
-                        self.engine.hover(None, position=center)
-                    else:
-                        self.engine.click(None, position=center)
+            src_pos, dst_pos = None, None
 
+            # 在 OCR 结果中寻找起点和终点
+            for item in ocr_results:
+                text = item.get("text", "")
+                box = item.get("coordinates", {}).get("box")
+
+                if not src_pos:
+                    src_pos = self.calculate_sub_coords(text, src_label, box)
+
+                if sub_type == 'drag' and dst_label and not dst_pos:
+                    dst_pos = self.calculate_sub_coords(text, dst_label, box)
+
+            # OCR 执行逻辑
+            if sub_type == 'drag':
+                if src_pos and dst_pos:
+                    SLog.i(TAG, f"OCR 拖拽成功: 从 {src_pos} 拖至 {dst_pos}")
+                    self.engine.drag_and_drop(None, None, start_pos=src_pos, end_pos=dst_pos)
                     self.result.success()
                     return self.result
-            SLog.w(TAG, f"OCR 未在屏幕找到文本 '{target_label}'，尝试回退到 DOM 定位...")
+            elif src_pos:
+                # 非拖拽动作
+                if sub_type == 'double':
+                    self.engine.double_click(None, position=src_pos)
+                elif sub_type in ['right-click', 'long_press']:
+                    self.engine.context_click(None, position=src_pos)
+                else:
+                    self.engine.click(None, position=src_pos)
+                self.result.success()
+                return self.result
 
-        # 3. 兜底逻辑：传统的 DOM/UI 自动化
-        if locator_chain:
-            source = self.engine.find_element(locator_chain)
-            if source:
-                try:
-                    if sub_type == 'drag':
-                        target_chain = self.get_param_value("target_locator_chain")
-                        target = self.engine.find_element(target_chain)
-                        if target:
-                            self.engine.drag_and_drop(source, target)
-                            self.result.success()
-                            return self.result
-                    elif sub_type == 'double':
-                        self.engine.double_click(source)
-                    elif sub_type == 'hover':
-                        self.engine.hover(source)
-                    elif sub_type in ['right-click', 'long_press']:
-                        self.engine.context_click(source)
-                    else:
-                        self.engine.click(source)
+        # 4. 兜底逻辑：DOM 定位
+        SLog.w(TAG, "OCR 匹配失败或操作类型不支持，回退到 DOM 定位...")
+        source_el = self.engine.find_element(locator_chain)
+        if source_el:
+            try:
+                if sub_type == 'drag':
+                    target_el = self.engine.find_element(target_chain)
+                    if target_el:
+                        self.engine.drag_and_drop(source_el, target_el)
+                        self.result.success()
+                        return self.result
+                # 其他 DOM 点击动作...
+                self.engine.click(source_el)  # 示例简写
+                self.result.success()
+                return self.result
+            except Exception as e:
+                SLog.e(TAG, f"DOM 执行失败: {e}")
 
-                    self.result.success()
-                    return self.result
-                except Exception as e:
-                    SLog.e(TAG, f"DOM 操作执行失败: {e}")
-            else:
-                SLog.e(TAG, "DOM 定位器也未能找到目标元素")
-
-        # 4. 最终失败处理
         self.result.fail()
         return self.result

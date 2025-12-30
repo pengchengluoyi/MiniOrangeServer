@@ -183,3 +183,6 @@ class WindowsEngine(BaseEngine):
         #     SLog.e(TAG, f"Windows 控件解析出错: {e}")
         #
         # return None
+
+    def close_window(self, exe_name=None):
+        return self.stop_app(exe_name)
