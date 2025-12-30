@@ -36,7 +36,6 @@ class AndroidADBEngine(BaseEngine):
 
     def init_driver(self, test_subject=None):
         self.adb_exe_path = self.get_adb_path()
-        SLog.i(TAG, f"使用集成 ADB: {self.adb_exe_path}")
         self.adb_base = f"{self.adb_exe_path} -s {test_subject}" if test_subject else self.adb_exe_path
 
     def shell(self, cmd):
@@ -127,3 +126,6 @@ class AndroidADBEngine(BaseEngine):
             # input swipe <x1> <y1> <x2> <y2> <duration_ms>
             SLog.i(TAG, f"执行滑动: {source} -> {target}")
             self.shell(f"input swipe {source[0]} {source[1]} {target[0]} {target[1]} 500")
+
+    def close_window(self, target):
+        self.stop_app(target)
