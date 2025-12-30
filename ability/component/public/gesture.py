@@ -1,6 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-
+import re
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
@@ -122,6 +122,49 @@ class Gesture(Template):
     def on_check(self):
         pass
 
+    def get_match_and_coordinates(self, full_text, pattern, box):
+        """
+        核心函数：通过正则匹配子串，并计算该子串在 Box 中的精确比例坐标
+        """
+        # 1. 执行正则搜索
+        match = re.search(pattern, full_text)
+        if not match:
+            return None
+
+        # 获取匹配到的起始和结束字符索引
+        start_idx, end_idx = match.span()
+        target_text = match.group()
+
+        # 2. 计算权重（处理中英文宽度差异，中文计2，英文/数字计1）
+        def get_w(char):
+            return 2 if '\u4e00' <= char <= '\u9fff' else 1
+
+        weights = [get_w(c) for c in full_text]
+        total_weight = sum(weights)
+
+        # 3. 计算目标子串在整体中的权重区间
+        pre_weight = sum(weights[:start_idx])
+        target_weight = sum(weights[start_idx: end_idx])
+
+        # 4. 解析 Box 物理边界 (RapidOCR 返回 [[x1,y1], [x2,y2], [x3,y3], [x4,y4]])
+        x_min = min(p[0] for p in box)
+        x_max = max(p[0] for p in box)
+        y_min = min(p[1] for p in box)
+        y_max = max(p[1] for p in box)
+        full_width = x_max - x_min
+
+        # 5. 映射比例到像素坐标
+        relative_start = pre_weight / total_weight
+        relative_end = (pre_weight + target_weight) / total_weight
+
+        sub_x_start = x_min + (full_width * relative_start)
+        sub_x_end = x_min + (full_width * relative_end)
+
+        center_x = int((sub_x_start + sub_x_end) / 2)
+        center_y = int((y_min + y_max) / 2)
+
+        return (center_x, center_y), target_text
+
     def execute(self):
         self.get_engine()
         sub_type = self.get_param_value("sub_type")
@@ -134,30 +177,33 @@ class Gesture(Template):
         ocr_result = analyze(None, img)
         self.memory.set(self.info, "ocr_result", ocr_result)
 
-        # 2. 从定位链中提取目标文本
-        target_text = None
+        # 2. 获取目标文本或正则规则
+        target_pattern = None
         for node in locator_chain:
-            target_text = node.get("text") or node.get("desc")
-            if target_text:
+            # 这里用户既可以输入 "搜索"，也可以输入 "搜索\d+"
+            target_pattern = node.get("text") or node.get("desc")
+            if target_pattern:
                 break
 
-        # 3. 在 OCR 结果中查找文本并获取坐标
-        if target_text:
+        # 3. OCR 匹配逻辑
+        if target_pattern:
             for item in ocr_result:
-                if target_text in item.get("text", ""):
-                    # 提取中心点坐标，例如 (568, 265)
-                    center = item.get("coordinates", {}).get("center")
-                    SLog.i(TAG, f"OCR matched '{target_text}' at {center}. Performing {sub_type}.")
+                detected_text = item.get("text", "")
+                box = item.get("coordinates", {}).get("box")
 
-                    # 4. 使用坐标执行动作
+                # --- 🔑 正则匹配 + 比例计算点 ---
+                match_res = self.get_match_and_coordinates(detected_text, target_pattern, box)
+
+                if match_res:
+                    center, matched_text = match_res
+                    SLog.i(TAG,
+                           f"OCR Regex Matched! Pattern: '{target_pattern}' matched '{matched_text}' in '{detected_text}'. Position: {center}")
+
+                    # 4. 执行动作
                     if sub_type == 'double':
                         self.engine.double_click(None, position=center)
-                    elif sub_type == 'right-click' or sub_type == 'long_press':
+                    elif sub_type in ['right-click', 'long_press']:
                         self.engine.context_click(None, position=center)
-                    elif sub_type == 'drag':
-                        SLog.w(TAG, "Drag via OCR not supported yet")
-                        self.result.fail()
-                        return self.result
                     else:
                         self.engine.click(None, position=center)
 
@@ -166,7 +212,7 @@ class Gesture(Template):
 
         source = self.engine.find_element(locator_chain)
         if not source:
-            SLog.e(TAG, f"Element not found via Locator or OCR (Target Text: {target_text})")
+            SLog.e(TAG, f"Element not found via Locator or OCR (Target pattern: {target_pattern})")
             self.result.fail()
             return self.result
 
