@@ -145,82 +145,142 @@ class Gesture(Template):
 
     def execute(self):
         self.get_engine()
-        sub_type = self.get_param_value("sub_type")
-        anchor_chain = self.get_param_value("anchor_locator_chain")
+        interaction_id = self.get_param_value("interaction_id")
         locator_chain = self.get_param_value("locator_chain")
+        anchor_chain = self.get_param_value("anchor_locator_chain")
+        sub_type = self.get_param_value("sub_type")
 
-        # 1. 提取锚点和目标关键字
-        anchor_text = None
-        if anchor_chain:
-            for node in anchor_chain:
-                anchor_text = node.get("text") or node.get("desc")
-                if anchor_text: break
+        # 1. 获取目标文本 (优先级: 数据库 > 配置链)
+        target_label = None
+        db_ref_pos = None
 
-        target_text = None
-        if locator_chain:
+        if interaction_id:
+            db = SessionLocal()
+            try:
+                comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
+                if comp:
+                    target_label = comp.label
+                    # 数据库存的是原始截图下的中心点
+                    db_ref_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
+            finally:
+                db.close()
+
+        if not target_label and locator_chain:
             for node in locator_chain:
-                target_text = node.get("text") or node.get("desc")
-                if target_text: break
+                target_label = node.get("text") or node.get("desc")
+                if target_label: break
 
-        if not target_text:
-            SLog.e(TAG, "未指定目标文本")
+        if not target_label:
+            SLog.e(TAG, "未指定目标点击文本")
             self.result.fail()
             return self.result
 
-        # 2. 执行 OCR 识别
+        # 2. 执行 OCR 获取全屏结果
         from ability.component.public.ocr import analyze
         img = self.engine.screenshot()
         ocr_results = analyze(None, img)
 
-        anchor_pos = None
-        candidates = []
+        # 3. 确定“参考坐标” (Reference Point)
+        ref_pos = None
 
-        # 3. 遍历 OCR 结果，区分锚点和候选目标
+        # 优先级 A: 如果有 interaction_id，参考点是数据库坐标
+        if db_ref_pos:
+            ref_pos = db_ref_pos
+            SLog.i(TAG, f"使用数据库坐标作为参考点: {ref_pos}")
+
+        # 优先级 B: 如果提供了锚点元素，通过 OCR 找到锚点的位置作为参考点
+        elif anchor_chain:
+            anchor_text = None
+            for node in anchor_chain:
+                anchor_text = node.get("text") or node.get("desc")
+                if anchor_text: break
+
+            if anchor_text:
+                SLog.i(TAG, f"正在寻找锚点: {anchor_text}...")
+                for item in ocr_results:
+                    if anchor_text in item["text"]:
+                        # 找到锚点，将其坐标设为参考点
+                        ref_pos = self.calculate_sub_coords(item["text"], anchor_text, item["coordinates"]["box"])
+                        if ref_pos:
+                            SLog.i(TAG, f"锚点定位成功: {anchor_text} -> {ref_pos}")
+                            break
+
+        # 4. 寻找目标文本的候选坐标
+        candidates = []
         for item in ocr_results:
             text = item.get("text", "")
             box = item.get("coordinates", {}).get("box")
-            center = item.get("coordinates", {}).get("center")
+            if target_label in text:
+                pos = self.calculate_sub_coords(text, target_label, box)
+                if pos: candidates.append(pos)
 
-            # 寻找锚点坐标
-            if anchor_text and anchor_text in text:
-                # 使用你原有的精确子串坐标计算
-                anchor_pos = self.calculate_sub_coords(text, anchor_text, box)
-
-            # 寻找所有潜在目标
-            if target_text in text:
-                target_pos = self.calculate_sub_coords(text, target_text, box)
-                if target_pos:
-                    candidates.append(target_pos)
-
-        # 4. 核心决策逻辑
+        # 5. 决策与执行
         final_pos = None
-        if not candidates:
-            SLog.w(TAG, f"页面未找到目标文本: {target_text}")
-        elif anchor_pos and candidates:
-            # 模式 A: 有锚点，选离锚点最近的
-            final_pos = min(candidates, key=lambda p: get_distance(anchor_pos, p))
-            SLog.i(TAG, f"匹配成功！找到锚点 '{anchor_text}'，点击最近的目标 '{target_text}'")
-        else:
-            # 模式 B: 无锚点或未找到锚点，默认选第一个（兜底）
-            final_pos = candidates[0]
-            SLog.w(TAG, "未找到锚点，回退到默认匹配第一个目标")
+        if candidates:
+            if ref_pos:
+                # 关键：寻找离参考点（数据库坐标或锚点坐标）最近的那个目标
+                final_pos = min(candidates, key=lambda p: get_distance(ref_pos, p))
+                SLog.i(TAG, f"基于参考点匹配到最近目标: {target_label}")
+            else:
+                # 没有任何参考，默认选第一个
+                final_pos = candidates[0]
+                SLog.w(TAG, f"无参考点，默认点击第一个匹配项: {target_label}")
 
-        # 5. 执行点击
         if final_pos:
-            self._perform_action(sub_type, final_pos)
+            self._do_action(sub_type, final_pos)
             self.result.success()
             return self.result
 
-        # 6. OCR 全败，尝试 DOM 兜底 (原有逻辑)
-        # ...
+
+
+        # --- 优先级 3: 走传统的 locator_chain (DOM 定位) ---
+        SLog.w(TAG, "OCR 路径全部失败，尝试 DOM 路径兜底...")
+        source_el = self.engine.find_element(locator_chain)
+        if source_el:
+            try:
+                # 针对不同动作类型执行 DOM 操作
+                self.engine.click(source_el)  # 示例逻辑
+                self.result.success()
+                return self.result
+            except Exception as e:
+                SLog.e(TAG, f"DOM 执行失败: {e}")
+
         self.result.fail()
         return self.result
 
-    def _perform_action(self, sub_type, pos):
-        """执行具体的点击/长按动作"""
+    def _find_best_ocr_match(self, label, ref_pos=None):
+        """
+        在 OCR 结果中寻找匹配项。
+        如果有 ref_pos，则返回距离最近的；否则返回第一个匹配项。
+        """
+        from ability.component.public.ocr import analyze
+        img = self.engine.screenshot()
+        ocr_results = analyze(None, img)
+
+        candidates = []
+        for item in ocr_results:
+            text = item.get("text", "")
+            box = item.get("coordinates", {}).get("box")
+            if label in text:
+                pos = self.calculate_sub_coords(text, label, box)
+                if pos: candidates.append(pos)
+
+        if not candidates:
+            return None
+
+        if ref_pos:
+            # 返回离数据库坐标最近的候选者 [消除 Hardcoding 歧义的关键]
+            return min(candidates, key=lambda p: get_distance(ref_pos, p))
+
+        return candidates[0]
+
+    def _do_action(self, sub_type, pos):
+        """统一执行点击动作并返回结果"""
         if sub_type == 'double':
             self.engine.double_click(None, position=pos)
         elif sub_type in ['right-click', 'long_press']:
             self.engine.context_click(None, position=pos)
         else:
             self.engine.click(None, position=pos)
+        self.result.success()
+        return self.result

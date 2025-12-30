@@ -32,14 +32,17 @@ _OCR_ENGINE_INSTANCE = None
 
 
 def get_ocr_engine():
-    """获取 OCR 引擎单例，懒加载模式"""
     global _OCR_ENGINE_INSTANCE
     if _OCR_ENGINE_INSTANCE is None:
-        if RapidOCR is None:
-            return None
-        SLog.i(TAG, ">> 正在初始化 RapidOCR 模型 (单例模式)...")
-        # 调优 det_db_unclip_ratio=1.3 以缓解文字连在一起的问题
-        _OCR_ENGINE_INSTANCE = RapidOCR(det_db_unclip_ratio=1.3)
+        if RapidOCR is None: return None
+
+        try:
+            # 尝试正常初始化
+            _OCR_ENGINE_INSTANCE = RapidOCR(det_db_unclip_ratio=1.3)
+        except (KeyError, Exception) as e:
+            SLog.e("OCR", f"初始化失败，尝试不带参数启动: {e}")
+            # 绕过 config 更新 bug
+            _OCR_ENGINE_INSTANCE = RapidOCR()
     return _OCR_ENGINE_INSTANCE
 
 
