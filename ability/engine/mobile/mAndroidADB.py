@@ -20,15 +20,10 @@ class AndroidADBEngine(BaseEngine):
     def get_adb_path(self):
         """动态获取集成的 ADB 路径"""
         # 判断是否在 PyInstaller 打包后的环境中
-        if getattr(sys, 'frozen', False):
-            # 打包后的临时解压目录
-            base_path = sys._MEIPASS
-            adb_bin_dir = os.path.join(base_path, 'adb_bin')
-        else:
-            # 开发环境下的相对路径
-            base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-            sys_folder = "mac" if platform.system() == "Darwin" else "win"
-            adb_bin_dir = os.path.join(base_path, 'resource', 'platform-tools', sys_folder)
+        # 开发环境下的相对路径
+        base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        sys_folder = "mac" if platform.system() == "Darwin" else "win"
+        adb_bin_dir = os.path.join(base_path, 'resource', 'platform-tools', sys_folder)
 
         # 根据系统补全文件名
         adb_exe = "adb.exe" if platform.system() == "Windows" else "adb"
