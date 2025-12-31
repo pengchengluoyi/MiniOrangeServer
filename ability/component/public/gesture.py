@@ -6,6 +6,7 @@ from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
 from ability.engine.vision.mImageMatching import ImageVision
+from ability.engine.vision.mOcr import analyze
 from server.core.database import SessionLocal
 from server.models.AppGraph.app_component import AppComponent
 
@@ -150,7 +151,7 @@ class Gesture(Template):
         target_label, db_target_pos = None, None
         anchor_label, db_anchor_pos = None, None
 
-        # 1. 获取数据库信息
+        # --- 1. 数据库检索 ---
         db = SessionLocal()
         try:
             if interaction_id:
@@ -166,43 +167,37 @@ class Gesture(Template):
         finally:
             db.close()
 
-        # 2. 识别“纯图标”模式
-        # 增加对特殊字符的判定
+        # --- 2. 判定匹配模式 ---
         invalid_labels = {None, "", "new area", "icon"}
+        # 只要 label 命中无效词，就标记为纯图标模式
         is_pure_icon = str(target_label).strip().lower() in invalid_labels
 
         current_img = self.engine.screenshot()
         final_pos = None
 
-        # --- 优先级逻辑 ---
-        # 优先级 A: 如果是纯图标或无效文字，直接走图像比对
+        # 优先级 A: 无效 Label 或强制图标 -> 图像模板匹配
         if interaction_id and is_pure_icon:
-            SLog.i(TAG, f"Label 为 '{target_label}'，启动 ImageVision 模板匹配...")
+            SLog.i(TAG, f"Label 为 '{target_label}'，正在执行图像比对...")
             final_pos = ImageVision.get_template_match(interaction_id, current_img)
 
-        # 优先级 B: 走 OCR 逻辑
+        # 优先级 B: 正常 Label -> OCR + 锚点/坐标校准
         if not final_pos:
-            # 如果 interaction_id 没拿到 label，尝试从 locator_chain 拿
             if not target_label and locator_chain:
-                for node in locator_chain:
-                    target_label = node.get("text")
-                    if target_label: break
+                target_label = locator_chain[0].get("text") if locator_chain else None
 
             if target_label:
-                SLog.i(TAG, f"执行 OCR 匹配: {target_label}")
-                from ability.engine.vision.mOcr import analyze  #
-                ocr_results = analyze(None, current_img)
+                ocr_results = analyze(None, current_img)  #
 
-                # 寻找实时锚点
-                current_anchor_pos = None
+                # 寻找当前屏幕锚点
+                curr_anchor_pos = None
                 if anchor_label:
                     for item in ocr_results:
                         if anchor_label in item["text"]:
-                            current_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
-                                                                           item["coordinates"]["box"])
-                            if current_anchor_pos: break
+                            curr_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
+                                                                        item["coordinates"]["box"])
+                            if curr_anchor_pos: break
 
-                # 寻找目标候选
+                # 寻找候选目标
                 candidates = []
                 for item in ocr_results:
                     if target_label in item["text"]:
@@ -210,17 +205,18 @@ class Gesture(Template):
                         if pos: candidates.append(pos)
 
                 if candidates:
-                    if current_anchor_pos and db_anchor_pos and db_target_pos:
-                        # 偏移校准逻辑
+                    if curr_anchor_pos and db_anchor_pos and db_target_pos:
+                        # 锚点偏移校准
                         dx, dy = db_target_pos[0] - db_anchor_pos[0], db_target_pos[1] - db_anchor_pos[1]
-                        predicted_pos = (current_anchor_pos[0] + dx, current_anchor_pos[1] + dy)
-                        final_pos = min(candidates, key=lambda p: get_distance(predicted_pos, p))
+                        pred_pos = (curr_anchor_pos[0] + dx, curr_anchor_pos[1] + dy)
+                        final_pos = min(candidates, key=lambda p: get_distance(pred_pos, p))
                     elif db_target_pos:
+                        # 绝对坐标最近匹配
                         final_pos = min(candidates, key=lambda p: get_distance(db_target_pos, p))
                     else:
                         final_pos = candidates[0]
 
-        # 3. 执行动作
+        # --- 3. 执行动作 ---
         if final_pos:
             return self._do_action(sub_type, final_pos)
 
