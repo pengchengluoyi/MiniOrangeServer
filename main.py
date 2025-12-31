@@ -142,7 +142,7 @@ app.include_router(ability_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.47", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.49", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():

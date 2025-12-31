@@ -5,6 +5,7 @@ import re, math
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
+from ability.engine.vision.mImageMatching import ImageVision
 from server.core.database import SessionLocal
 from server.models.AppGraph.app_component import AppComponent
 
@@ -77,16 +78,6 @@ class Gesture(Template):
                 ]
             },
             {
-                "name": "anchor_locator_chain",
-                "type": "list",
-                "desc": "锚点元素 (唯一参考物)",
-                "add_text": "添加锚点",
-                "sub_inputs": [
-                    {"name": "text", "type": "str", "desc": "锚点文本", "placeholder": "如：首页/设置/头像"},
-                    {"name": "desc", "type": "str", "desc": "描述", "placeholder": "无障碍描述"}
-                ]
-            },
-            {
                 "name": "target_locator_chain",
                 "type": "list",
                 "desc": "目标元素 (终点 - 仅拖拽)",
@@ -109,7 +100,6 @@ class Gesture(Template):
             "anchor_interaction_id": "",
             "sub_type": "click",
             "locator_chain": [],
-            "anchor_locator_chain": [],
             "target_locator_chain": []
         },
         "outputVars": []
@@ -160,7 +150,7 @@ class Gesture(Template):
         target_label, db_target_pos = None, None
         anchor_label, db_anchor_pos = None, None
 
-        # --- 1. 优先级最高：从数据库提取目标和锚点信息 ---
+        # 1. 获取数据库信息
         db = SessionLocal()
         try:
             if interaction_id:
@@ -168,7 +158,6 @@ class Gesture(Template):
                 if comp:
                     target_label = comp.label
                     db_target_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
-
             if anchor_id:
                 a_comp = db.query(AppComponent).filter(AppComponent.uid == anchor_id).first()
                 if a_comp:
@@ -177,58 +166,61 @@ class Gesture(Template):
         finally:
             db.close()
 
-        # --- 2. 备选：从配置链提取文本 ---
-        if not target_label and locator_chain:
-            for node in locator_chain:
-                target_label = node.get("text")
-                if target_label: break
+        # 2. 识别“纯图标”模式
+        # 增加对特殊字符的判定
+        invalid_labels = {None, "", "new area", "icon"}
+        is_pure_icon = str(target_label).strip().lower() in invalid_labels
 
-        if not target_label:
-            SLog.e(TAG, "未指定任何点击目标")
-            return self.result.fail()
-
-        # --- 3. OCR 识别与定位决策 ---
-        img = self.engine.screenshot()
-        from ability.component.public.ocr import analyze
-        ocr_results = analyze(None, img)
-
-        # 寻找当前屏幕上的锚点实时坐标
-        current_anchor_pos = None
-        if anchor_label:
-            for item in ocr_results:
-                if anchor_label in item["text"]:
-                    current_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
-                                                                   item["coordinates"]["box"])
-                    if current_anchor_pos: break
-
-        # 寻找所有目标候选者
-        candidates = []
-        for item in ocr_results:
-            if target_label in item["text"]:
-                pos = self.calculate_sub_coords(item["text"], target_label, item["coordinates"]["box"])
-                if pos: candidates.append(pos)
-
-        # --- 4. 智能选择点击点 ---
+        current_img = self.engine.screenshot()
         final_pos = None
-        if candidates:
-            # 方案 A: 锚点偏移校准 (最强，抗缩放)
-            if current_anchor_pos and db_anchor_pos and db_target_pos:
-                # 基于数据库中的原始偏移量预测当前坐标
-                dx, dy = db_target_pos[0] - db_anchor_pos[0], db_target_pos[1] - db_anchor_pos[1]
-                predicted_pos = (current_anchor_pos[0] + dx, current_anchor_pos[1] + dy)
-                final_pos = min(candidates, key=lambda p: get_distance(predicted_pos, p))
-                SLog.i(TAG, f"通过热区锚点校准成功: {target_label}")
 
-            # 方案 B: 数据库绝对坐标参考 (次优)
-            elif db_target_pos:
-                final_pos = min(candidates, key=lambda p: get_distance(db_target_pos, p))
-                SLog.i(TAG, "无有效锚点，使用数据库原始坐标匹配最近项")
+        # --- 优先级逻辑 ---
+        # 优先级 A: 如果是纯图标或无效文字，直接走图像比对
+        if interaction_id and is_pure_icon:
+            SLog.i(TAG, f"Label 为 '{target_label}'，启动 ImageVision 模板匹配...")
+            final_pos = ImageVision.get_template_match(interaction_id, current_img)
 
-            # 方案 C: 默认首选
-            else:
-                final_pos = candidates[0]
+        # 优先级 B: 走 OCR 逻辑
+        if not final_pos:
+            # 如果 interaction_id 没拿到 label，尝试从 locator_chain 拿
+            if not target_label and locator_chain:
+                for node in locator_chain:
+                    target_label = node.get("text")
+                    if target_label: break
 
-        # --- 5. 执行与兜底 ---
+            if target_label:
+                SLog.i(TAG, f"执行 OCR 匹配: {target_label}")
+                from ability.engine.vision.mOcr import analyze  #
+                ocr_results = analyze(None, current_img)
+
+                # 寻找实时锚点
+                current_anchor_pos = None
+                if anchor_label:
+                    for item in ocr_results:
+                        if anchor_label in item["text"]:
+                            current_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
+                                                                           item["coordinates"]["box"])
+                            if current_anchor_pos: break
+
+                # 寻找目标候选
+                candidates = []
+                for item in ocr_results:
+                    if target_label in item["text"]:
+                        pos = self.calculate_sub_coords(item["text"], target_label, item["coordinates"]["box"])
+                        if pos: candidates.append(pos)
+
+                if candidates:
+                    if current_anchor_pos and db_anchor_pos and db_target_pos:
+                        # 偏移校准逻辑
+                        dx, dy = db_target_pos[0] - db_anchor_pos[0], db_target_pos[1] - db_anchor_pos[1]
+                        predicted_pos = (current_anchor_pos[0] + dx, current_anchor_pos[1] + dy)
+                        final_pos = min(candidates, key=lambda p: get_distance(predicted_pos, p))
+                    elif db_target_pos:
+                        final_pos = min(candidates, key=lambda p: get_distance(db_target_pos, p))
+                    else:
+                        final_pos = candidates[0]
+
+        # 3. 执行动作
         if final_pos:
             return self._do_action(sub_type, final_pos)
 
