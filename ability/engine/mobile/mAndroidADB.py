@@ -113,8 +113,9 @@ class AndroidADBEngine(BaseEngine):
         在指定位置输入文本
         """
         # 1. 先点击元素获取焦点
-        self.click(element)
-        time.sleep(0.5)
+        if element:
+            self.click(element)
+            time.sleep(0.5)
         # 2. ADB 原生 text 不支持中文，空格需转义为 %s
         safe_text = str(text).replace(" ", "%s")
         self.shell(f"input text {safe_text}")

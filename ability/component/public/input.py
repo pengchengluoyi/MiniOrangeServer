@@ -4,6 +4,9 @@
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
+from ability.engine.vision.mPositionCalculation import PositionManager
+from ability.engine.vision.mImageMatching import ImageVision
+from ability.engine.vision.mOcr import analyze
 
 TAG = "INPUT"
 
@@ -42,64 +45,24 @@ class Input(Template):
                 "falseText": "不清空"
             },
             {
-                "name": "locator_chain",
-                "type": "list",
-                "desc": "定位链",
-                "add_text": "添加节点",
-                "sub_inputs": [
-                    {
-                        "name": "id",
-                        "type": "str",
-                        "desc": "唯一标识 (ID/Name/AutoID)",
-                        "placeholder": "ResourceID/AutoID/Name"
-                    },
-                    {
-                        "name": "text",
-                        "type": "str",
-                        "desc": "文本/标题 (Text/Label/Title)",
-                        "placeholder": "显示文本/Window Title"
-                    },
-                    {
-                        "name": "type",
-                        "type": "str",
-                        "desc": "控件类型 (Class/ControlType/Role)",
-                        "placeholder": "Button/TextView/XCUIElementTypeButton"
-                    },
-                    {
-                        "name": "desc",
-                        "type": "str",
-                        "desc": "描述 (ContentDesc/Help)",
-                        "placeholder": "无障碍描述",
-                        "show_if": ["android", "ios"]
-                    },
-                    {
-                        "name": "xpath",
-                        "type": "str",
-                        "desc": "XPath (Web/Mobile)",
-                        "placeholder": "//...",
-                        "show_if": ["web", "android", "ios"]
-                    },
-                    {
-                        "name": "css",
-                        "type": "str",
-                        "desc": "CSS Selector (Web)",
-                        "placeholder": ".class #id",
-                        "show_if": ["web"]
-                    },
-                    {
-                        "name": "index",
-                        "type": "int",
-                        "desc": "常用语定位列表中的第几位",
-                        "placeholder": "0"
-                    }
-                ]
-            }
+                "name": "interaction_id",
+                "type": "interaction_select",
+                "desc": "关联热区锚点",
+                "placeholder": "从当前页面的热区列表中选择"
+            },
+            {
+                "name": "anchor_interaction_id",
+                "type": "interaction_select",
+                "desc": "关联热区锚点 -- 辅助定位",
+                "placeholder": "从当前页面的热区列表中选择"
+            },
         ],
         "defaultData": {
             "platform": "",
             "text": "",
             "clear": False,
-            "locator_chain": []
+            "interaction_id": "",
+            "anchor_interaction_id": ""
         },
         "outputVars": []
     }
@@ -111,20 +74,19 @@ class Input(Template):
         self.get_engine()
         text = self.get_param_value("text")
         clear = self.get_param_value("clear")
-        mLocatorChain = self.get_param_value("locator_chain")
+        interaction_id = self.get_param_value("interaction_id")
+        anchor_id = self.get_param_value("anchor_interaction_id")
 
-        element = self.engine.find_element(mLocatorChain)
-        
-        if element:
-            if clear:
-                self.engine.clear(element)
-            
-            if text is not None:
-                self.engine.send_keys(element, str(text))
-            
+        current_img = self.engine.screenshot()
+
+        # 🔥 视觉定位：不管它是文字还是图标
+        final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, None, current_img)
+
+        if final_pos:
+            self.engine.click(None, position=final_pos)  # 先聚焦
+            if clear: self.engine.clear(None)
+            self.engine.send_keys(None, str(text))
             self.result.success()
-        else:
-            SLog.e(TAG, "Element not found")
-            self.result.fail()
-            
+            return self.result
+        self.result.fail()
         return self.result

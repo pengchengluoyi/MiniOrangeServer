@@ -112,8 +112,9 @@ class WindowsEngine(BaseEngine):
         注意：使用 ctypes 模拟按键较复杂，这里推荐使用 Windows 自带的 clip 管道实现中文支持
         """
         if not text: return
-        self.click(element)  # 获取焦点
-        time.sleep(0.2)
+        if element:
+            self.click(element)  # 获取焦点
+            time.sleep(0.2)
 
         # 极简方案：通过 PowerShell 直接发送按键指令，支持中文且无需额外库
         powershell_cmd = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{text}')"

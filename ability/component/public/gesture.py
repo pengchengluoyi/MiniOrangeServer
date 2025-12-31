@@ -5,16 +5,10 @@ import re, math
 from script.log import SLog
 from ability.component.template import Template
 from ability.component.router import BaseRouter
-from ability.engine.vision.mImageMatching import ImageVision
-from ability.engine.vision.mOcr import analyze
-from server.core.database import SessionLocal
-from server.models.AppGraph.app_component import AppComponent
+from ability.engine.vision.mPositionCalculation import PositionManager
 
 TAG = "GESTURE"
 
-def get_distance(p1, p2):
-    """计算两点间的欧几里得距离"""
-    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
 @BaseRouter.route('public/gesture')
 class Gesture(Template):
@@ -106,38 +100,6 @@ class Gesture(Template):
         "outputVars": []
     }
 
-    def calculate_sub_coords(self, full_text, pattern, box):
-        """核心：通过正则匹配子串，并根据中英权重比例计算子区域中心坐标"""
-        try:
-            match = re.search(pattern, full_text)
-        except:
-            match = re.search(re.escape(pattern), full_text)
-
-        if not match: return None
-
-        start_idx, end_idx = match.span()
-
-        # 权重：中文2，其他1
-        def get_w(c): return 2 if '\u4e00' <= c <= '\u9fff' else 1
-
-        weights = [get_w(c) for c in full_text]
-        total_w = sum(weights)
-
-        pre_w = sum(weights[:start_idx])
-        target_w = sum(weights[start_idx:end_idx])
-
-        x_min = min(p[0] for p in box)
-        x_max = max(p[0] for p in box)
-        y_min = min(p[1] for p in box)
-        y_max = max(p[1] for p in box)
-        width = x_max - x_min
-
-        # 映射像素
-        sub_x_start = x_min + (width * (pre_w / total_w))
-        sub_x_end = x_min + (width * ((pre_w + target_w) / total_w))
-
-        return (int((sub_x_start + sub_x_end) / 2), int((y_min + y_max) / 2))
-
     def on_check(self):
         pass
 
@@ -148,75 +110,11 @@ class Gesture(Template):
         locator_chain = self.get_param_value("locator_chain")
         sub_type = self.get_param_value("sub_type")
 
-        target_label, db_target_pos = None, None
-        anchor_label, db_anchor_pos = None, None
-
-        # --- 1. 数据库检索 ---
-        db = SessionLocal()
-        try:
-            if interaction_id:
-                comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-                if comp:
-                    target_label = comp.label
-                    db_target_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
-            if anchor_id:
-                a_comp = db.query(AppComponent).filter(AppComponent.uid == anchor_id).first()
-                if a_comp:
-                    anchor_label = a_comp.label
-                    db_anchor_pos = (a_comp.x + a_comp.width / 2, a_comp.y + a_comp.height / 2)
-        finally:
-            db.close()
-
-        # --- 2. 判定匹配模式 ---
-        invalid_labels = {None, "", "new area", "icon"}
-        # 只要 label 命中无效词，就标记为纯图标模式
-        is_pure_icon = str(target_label).strip().lower() in invalid_labels
-
         current_img = self.engine.screenshot()
-        final_pos = None
 
-        # 优先级 A: 无效 Label 或强制图标 -> 图像模板匹配
-        if interaction_id and is_pure_icon:
-            SLog.i(TAG, f"Label 为 '{target_label}'，正在执行图像比对...")
-            final_pos = ImageVision.get_template_match(interaction_id, current_img)
+        # 🔥 调用统一的视觉调度接口
+        final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, locator_chain, current_img)
 
-        # 优先级 B: 正常 Label -> OCR + 锚点/坐标校准
-        if not final_pos:
-            if not target_label and locator_chain:
-                target_label = locator_chain[0].get("text") if locator_chain else None
-
-            if target_label:
-                ocr_results = analyze(None, current_img)  #
-
-                # 寻找当前屏幕锚点
-                curr_anchor_pos = None
-                if anchor_label:
-                    for item in ocr_results:
-                        if anchor_label in item["text"]:
-                            curr_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
-                                                                        item["coordinates"]["box"])
-                            if curr_anchor_pos: break
-
-                # 寻找候选目标
-                candidates = []
-                for item in ocr_results:
-                    if target_label in item["text"]:
-                        pos = self.calculate_sub_coords(item["text"], target_label, item["coordinates"]["box"])
-                        if pos: candidates.append(pos)
-
-                if candidates:
-                    if curr_anchor_pos and db_anchor_pos and db_target_pos:
-                        # 锚点偏移校准
-                        dx, dy = db_target_pos[0] - db_anchor_pos[0], db_target_pos[1] - db_anchor_pos[1]
-                        pred_pos = (curr_anchor_pos[0] + dx, curr_anchor_pos[1] + dy)
-                        final_pos = min(candidates, key=lambda p: get_distance(pred_pos, p))
-                    elif db_target_pos:
-                        # 绝对坐标最近匹配
-                        final_pos = min(candidates, key=lambda p: get_distance(db_target_pos, p))
-                    else:
-                        final_pos = candidates[0]
-
-        # --- 3. 执行动作 ---
         if final_pos:
             return self._do_action(sub_type, final_pos)
 
@@ -247,7 +145,7 @@ class Gesture(Template):
             text = item.get("text", "")
             box = item.get("coordinates", {}).get("box")
             if label in text:
-                pos = self.calculate_sub_coords(text, label, box)
+                pos = PositionCalculator.calculate_sub_coords(text, label, box)
                 if pos: candidates.append(pos)
 
         if not candidates:
@@ -255,7 +153,7 @@ class Gesture(Template):
 
         if ref_pos:
             # 返回离数据库坐标最近的候选者 [消除 Hardcoding 歧义的关键]
-            return min(candidates, key=lambda p: get_distance(ref_pos, p))
+            return min(candidates, key=lambda p: PositionCalculator.get_distance(ref_pos, p))
 
         return candidates[0]
 
