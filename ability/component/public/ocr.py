@@ -39,9 +39,7 @@ def get_ocr_engine():
         try:
             # 尝试正常初始化
             _OCR_ENGINE_INSTANCE = RapidOCR(det_db_unclip_ratio=1.3)
-        except (KeyError, Exception) as e:
-            SLog.e("OCR", f"初始化失败，尝试不带参数启动: {e}")
-            # 绕过 config 更新 bug
+        except (KeyError, Exception):
             _OCR_ENGINE_INSTANCE = RapidOCR()
     return _OCR_ENGINE_INSTANCE
 

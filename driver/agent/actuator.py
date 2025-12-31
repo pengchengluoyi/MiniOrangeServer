@@ -25,7 +25,7 @@ def _db_writer(run_id, flow_id, node_id, level, tag, message):
         db.add(log)
         db.commit()
     except Exception as e:
-        print(f"Log Write Error: {e}")
+        SLog.e("System", f"Log Write Error: {e}")
     finally:
         db.close()
 

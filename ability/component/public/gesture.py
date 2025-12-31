@@ -55,6 +55,12 @@ class Gesture(Template):
                 "placeholder": "从当前页面的热区列表中选择"
             },
             {
+                "name": "anchor_interaction_id",
+                "type": "interaction_select",
+                "desc": "关联热区锚点 -- 辅助定位",
+                "placeholder": "从当前页面的热区列表中选择"
+            },
+            {
                 "name": "locator_chain",
                 "type": "list",
                 "desc": "源元素 (起点)",
@@ -100,6 +106,7 @@ class Gesture(Template):
         "defaultData": {
             "platform": "",
             "interaction_id": "",
+            "anchor_interaction_id": "",
             "sub_type": "click",
             "locator_chain": [],
             "anchor_locator_chain": [],
@@ -146,100 +153,87 @@ class Gesture(Template):
     def execute(self):
         self.get_engine()
         interaction_id = self.get_param_value("interaction_id")
+        anchor_id = self.get_param_value("anchor_interaction_id")
         locator_chain = self.get_param_value("locator_chain")
-        anchor_chain = self.get_param_value("anchor_locator_chain")
         sub_type = self.get_param_value("sub_type")
 
-        # 1. 获取目标文本 (优先级: 数据库 > 配置链)
-        target_label = None
-        db_ref_pos = None
+        target_label, db_target_pos = None, None
+        anchor_label, db_anchor_pos = None, None
 
-        if interaction_id:
-
-            SLog.i(TAG, "interaction_id")
-            SLog.i(TAG, f"({interaction_id})")
-            db = SessionLocal()
-            try:
+        # --- 1. 优先级最高：从数据库提取目标和锚点信息 ---
+        db = SessionLocal()
+        try:
+            if interaction_id:
                 comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-                SLog.i(TAG, str(comp.label))
-                SLog.i(TAG, str(comp.label))
                 if comp:
                     target_label = comp.label
-                    # 数据库存的是原始截图下的中心点
-                    db_ref_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
-            finally:
-                db.close()
+                    db_target_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
 
+            if anchor_id:
+                a_comp = db.query(AppComponent).filter(AppComponent.uid == anchor_id).first()
+                if a_comp:
+                    anchor_label = a_comp.label
+                    db_anchor_pos = (a_comp.x + a_comp.width / 2, a_comp.y + a_comp.height / 2)
+        finally:
+            db.close()
+
+        # --- 2. 备选：从配置链提取文本 ---
         if not target_label and locator_chain:
             for node in locator_chain:
-                target_label = node.get("text") or node.get("desc")
+                target_label = node.get("text")
                 if target_label: break
 
         if not target_label:
-            SLog.e(TAG, "未指定目标点击文本")
-            self.result.fail()
-            return self.result
+            SLog.e(TAG, "未指定任何点击目标")
+            return self.result.fail()
 
-        # 2. 执行 OCR 获取全屏结果
-        from ability.component.public.ocr import analyze
+        # --- 3. OCR 识别与定位决策 ---
         img = self.engine.screenshot()
+        from ability.component.public.ocr import analyze
         ocr_results = analyze(None, img)
 
-        # 3. 确定“参考坐标” (Reference Point)
-        ref_pos = None
+        # 寻找当前屏幕上的锚点实时坐标
+        current_anchor_pos = None
+        if anchor_label:
+            for item in ocr_results:
+                if anchor_label in item["text"]:
+                    current_anchor_pos = self.calculate_sub_coords(item["text"], anchor_label,
+                                                                   item["coordinates"]["box"])
+                    if current_anchor_pos: break
 
-        # 优先级 A: 如果有 interaction_id，参考点是数据库坐标
-        if db_ref_pos:
-            ref_pos = db_ref_pos
-            SLog.i(TAG, f"使用数据库坐标作为参考点: {ref_pos}")
-
-        # 优先级 B: 如果提供了锚点元素，通过 OCR 找到锚点的位置作为参考点
-        elif anchor_chain:
-            anchor_text = None
-            for node in anchor_chain:
-                anchor_text = node.get("text") or node.get("desc")
-                if anchor_text: break
-
-            if anchor_text:
-                SLog.i(TAG, f"正在寻找锚点: {anchor_text}...")
-                for item in ocr_results:
-                    if anchor_text in item["text"]:
-                        # 找到锚点，将其坐标设为参考点
-                        ref_pos = self.calculate_sub_coords(item["text"], anchor_text, item["coordinates"]["box"])
-                        if ref_pos:
-                            SLog.i(TAG, f"锚点定位成功: {anchor_text} -> {ref_pos}")
-                            break
-
-        # 4. 寻找目标文本的候选坐标
+        # 寻找所有目标候选者
         candidates = []
         for item in ocr_results:
-            text = item.get("text", "")
-            box = item.get("coordinates", {}).get("box")
-            if target_label in text:
-                pos = self.calculate_sub_coords(text, target_label, box)
+            if target_label in item["text"]:
+                pos = self.calculate_sub_coords(item["text"], target_label, item["coordinates"]["box"])
                 if pos: candidates.append(pos)
 
-        # 5. 决策与执行
+        # --- 4. 智能选择点击点 ---
         final_pos = None
         if candidates:
-            if ref_pos:
-                # 关键：寻找离参考点（数据库坐标或锚点坐标）最近的那个目标
-                final_pos = min(candidates, key=lambda p: get_distance(ref_pos, p))
-                SLog.i(TAG, f"基于参考点匹配到最近目标: {target_label}")
+            # 方案 A: 锚点偏移校准 (最强，抗缩放)
+            if current_anchor_pos and db_anchor_pos and db_target_pos:
+                # 基于数据库中的原始偏移量预测当前坐标
+                dx, dy = db_target_pos[0] - db_anchor_pos[0], db_target_pos[1] - db_anchor_pos[1]
+                predicted_pos = (current_anchor_pos[0] + dx, current_anchor_pos[1] + dy)
+                final_pos = min(candidates, key=lambda p: get_distance(predicted_pos, p))
+                SLog.i(TAG, f"通过热区锚点校准成功: {target_label}")
+
+            # 方案 B: 数据库绝对坐标参考 (次优)
+            elif db_target_pos:
+                final_pos = min(candidates, key=lambda p: get_distance(db_target_pos, p))
+                SLog.i(TAG, "无有效锚点，使用数据库原始坐标匹配最近项")
+
+            # 方案 C: 默认首选
             else:
-                # 没有任何参考，默认选第一个
                 final_pos = candidates[0]
-                SLog.w(TAG, f"无参考点，默认点击第一个匹配项: {target_label}")
 
+        # --- 5. 执行与兜底 ---
         if final_pos:
-            self._do_action(sub_type, final_pos)
-            self.result.success()
-            return self.result
+            return self._do_action(sub_type, final_pos)
 
-
-
-        # --- 优先级 3: 走传统的 locator_chain (DOM 定位) ---
-        SLog.w(TAG, "OCR 路径全部失败，尝试 DOM 路径兜底...")
+        # DOM 兜底逻辑
+        SLog.w(TAG, "OCR 失败，尝试 DOM 路径...")
         source_el = self.engine.find_element(locator_chain)
         if source_el:
             try:
@@ -249,9 +243,7 @@ class Gesture(Template):
                 return self.result
             except Exception as e:
                 SLog.e(TAG, f"DOM 执行失败: {e}")
-
-        self.result.fail()
-        return self.result
+        return self.result.fail()
 
     def _find_best_ocr_match(self, label, ref_pos=None):
         """
