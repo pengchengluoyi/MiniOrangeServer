@@ -15,7 +15,7 @@ class ImageVision:
     TAG = "ImageVision"
 
     @staticmethod
-    def get_template_match(interaction_id, current_screenshot_np, threshold=0.8):
+    def get_template_match(interaction_id, current_screenshot_np, threshold=0.35): # threshold 较低后续需要优化这里的算法
         db = SessionLocal()
         try:
             # 1. 获取组件及其所属 Node
@@ -48,6 +48,16 @@ class ImageVision:
     @staticmethod
     def _do_robust_match(target_img, template, threshold):
         """多尺度匹配：应对桌面窗口缩放"""
+        if not isinstance(target_img, np.ndarray):
+            target_img = np.array(target_img)
+            # 如果是 RGB (PIL 默认)，转换为 BGR (OpenCV 默认)
+            if len(target_img.shape) == 3:
+                target_img = cv2.cvtColor(target_img, cv2.COLOR_RGB2BGR)
+
+            # 同样确保模板也是 Numpy 数组
+        if not isinstance(template, np.ndarray):
+            template = np.array(template)
+
         target_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
         template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
@@ -69,4 +79,10 @@ class ImageVision:
             cx = best_match["max_loc"][0] + int(tw * scale / 2)
             cy = best_match["max_loc"][1] + int(th * scale / 2)
             return (cx, cy)
+        # mImageMatching.py
+        if max_val > best_match["max_val"]:
+            best_match = {"max_val": max_val, "max_loc": max_loc, "scale": scale}
+        # 在循环结束后增加
+        if best_match["max_val"] < threshold:
+            SLog.w(ImageVision.TAG, f"图像匹配失败，最高相似度仅为: {best_match['max_val']:.2f}")  # 这样你能看到差多少分
         return None
