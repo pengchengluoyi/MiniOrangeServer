@@ -25,6 +25,7 @@ class WindowsEngine(BaseEngine):
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             ctypes.windll.user32.SetProcessDPIAware()
+        self.windows_minimize_all()
 
     def start_app(self, app_path_or_link=None):
         if not app_path_or_link: return False
@@ -61,6 +62,19 @@ class WindowsEngine(BaseEngine):
     def end(self):
         SLog.i(TAG, "退出 Windows 引擎")
         return True
+
+    @staticmethod
+    def windows_minimize_all():
+        """通过 COM 对象直接触发最小化所有窗口"""
+        try:
+            # 使用 shell32 接口
+            # 也可以通过 pywin32: win32com.client.Dispatch("Shell.Application").MinimizeAll()
+            ctypes.windll.shell32.ShellExecuteW(None, "open", "shell:::{3080f90d-d7ad-11d9-bd98-0000947b0257}", None,
+                                                None, 6)
+            return True
+        except Exception as e:
+            SLog.e("SYS", f"最小化失败: {e}")  #
+            return False
 
     # --- 动作实现 ---
 
@@ -138,52 +152,11 @@ class WindowsEngine(BaseEngine):
             # 3. 在终点弹起
             ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
-    def find_element(self, locator_chain=[]):
+    def find_element(self, locator_chain=None):
         """
         Windows 版控件查找：链式遍历 UI 树并返回中心坐标
         """
-        SLog.d(TAG, "window not find_element api")
-        return None
-        # import uiautomation as auto
-        # SLog.d(TAG, f"Windows 控件定位链: {locator_chain}")
-        #
-        # # 从根桌面开始查找
-        # current = auto.GetRootControl()
-        #
-        # try:
-        #     for condition in locator_chain:
-        #         # 映射参数：将你的通用 key 映射到 Windows UIA 属性
-        #         search_params = {}
-        #         if condition.get('id'): search_params['AutomationId'] = condition['id']
-        #         if condition.get('text'): search_params['Name'] = condition['text']
-        #         if condition.get('type'): search_params['ClassName'] = condition['type']
-        #         if condition.get('desc'): search_params['Description'] = condition['desc']
-        #
-        #         # 如果这一层没有任何过滤条件，跳过
-        #         if not search_params:
-        #             continue
-        #
-        #         # 查找匹配的子控件 (searchDepth=1 模拟链式逐级查找)
-        #         current = current.Control(searchDepth=1, **search_params)
-        #
-        #         # 检查是否存在，如果中途断链则返回 None
-        #         if not current.Exists(0):
-        #             SLog.w(TAG, f"未找到匹配控件: {search_params}")
-        #             return None
-        #
-        #     # 最终匹配成功，获取控件的矩形区域
-        #     if current.Exists(0):
-        #         rect = current.BoundingRectangle
-        #         # 计算中心点坐标 (left, top, right, bottom)
-        #         cx = (rect.left + rect.right) // 2
-        #         cy = (rect.top + rect.bottom) // 2
-        #         SLog.i(TAG, f"Windows 控件定位成功: ({cx}, {cy})")
-        #         return (cx, cy)
-        #
-        # except Exception as e:
-        #     SLog.e(TAG, f"Windows 控件解析出错: {e}")
-        #
-        # return None
+        ...
 
     def close_window(self, exe_name=None):
         return self.stop_app(exe_name)
