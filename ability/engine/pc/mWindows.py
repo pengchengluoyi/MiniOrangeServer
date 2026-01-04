@@ -20,12 +20,18 @@ MOUSEEVENTF_ABSOLUTE = 0x8000
 
 class WindowsEngine(BaseEngine):
     def init_driver(self, test_subject=None):
+        if self.driver is not None:  # 二次检查
+            return
+
         SLog.i(TAG, "初始化 Windows 引擎 (全功能版)")
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             ctypes.windll.user32.SetProcessDPIAware()
+
         self.windows_minimize_all()
+        # 🔥 关键修复：设置标志位，防止 BaseEngine.start 重复触发
+        self.driver = "Windows_Driver_Active"
 
     def start_app(self, app_path_or_link=None):
         if not app_path_or_link: return False

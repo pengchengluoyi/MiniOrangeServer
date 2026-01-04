@@ -35,8 +35,13 @@ class AndroidADBEngine(BaseEngine):
         return f'"{full_path}"'  # 加引号防止路径中有空格
 
     def init_driver(self, test_subject=None):
+        if self.driver is not None:  # 二次检查
+            return
+
         self.adb_exe_path = self.get_adb_path()
         self.adb_base = f"{self.adb_exe_path} -s {test_subject}" if test_subject else self.adb_exe_path
+        # 🔥 关键修复：设置标志位，防止 BaseEngine.start 重复触发
+        self.driver = "Android_Driver_Active"
 
     def shell(self, cmd):
         full_cmd = f"{self.adb_base} shell {cmd}"

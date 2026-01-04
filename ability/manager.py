@@ -47,24 +47,28 @@ class Manager(metaclass=SingletonMeta):
 
     def apply_engine(self, info):
         if info.platform in platform_code.MMOBILE:
+            if self.MobileEngine:
+                return True
             if info.platform == platform_code.IOS:
                 from ability.engine.mobile.mIOS import IOSEngine
                 self.MobileEngine = IOSEngine()
             else:
-                # from ability.engine.mobile.mAndroid import AndroidEngine
                 from ability.engine.mobile.mAndroidADB import AndroidADBEngine
                 self.MobileEngine = AndroidADBEngine()
         if info.platform in platform_code.MWEB:
+            if self.WebEngine:
+                return True
             from ability.engine.web.mChrome import ChromeEngine
             self.WebEngine = ChromeEngine()
         if info.platform in platform_code.MPC:
+            if self.PCEngine:
+                return True
             if info.platform == platform_code.MACOS:
                 from ability.engine.pc.mMac import MacEngine
                 self.PCEngine = MacEngine()
             elif info.platform == platform_code.WINDOWS:
                 from ability.engine.pc.mWindows import WindowsEngine
                 self.PCEngine = WindowsEngine()
-
         return True
 
     def offline(self):
