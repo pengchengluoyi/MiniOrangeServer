@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
-import re, math, time
+import time
 from script.log import SLog
 from script.sleep import mSleep
 from ability.component.template import Template
@@ -141,7 +141,7 @@ class Gesture(Template):
         在 OCR 结果中寻找匹配项。
         如果有 ref_pos，则返回距离最近的；否则返回第一个匹配项。
         """
-        from ability.component.public.ocr import analyze
+        from ability.component.tools.ocr import analyze
         img = self.engine.screenshot()
         ocr_results = analyze(None, img)
 

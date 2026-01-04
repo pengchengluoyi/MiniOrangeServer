@@ -8,8 +8,8 @@ from ability.component.router import BaseRouter
 from server.routers.rAppGraph import sync_layout
 
 
-@BaseRouter.route('public/dump_dom')
-class PublicDumpHierarchy(Template):
+@BaseRouter.route('tools/dump_dom')
+class DumpHierarchy(Template):
     """
         This component will close web browser.
     """

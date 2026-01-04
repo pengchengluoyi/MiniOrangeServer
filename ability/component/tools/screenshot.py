@@ -14,7 +14,7 @@ from server.core.database import APP_DATA_DIR
 TAG = "SCREENSHOT"
 
 
-@BaseRouter.route('public/screenshot')
+@BaseRouter.route('tools/screenshot')
 class Screenshot(Template):
     """
         This component will take a screenshot.

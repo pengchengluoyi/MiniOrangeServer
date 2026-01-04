@@ -31,23 +31,11 @@ MAP = {
                 "icon": "wallpaper",
                 "address": "public/input",
             },
-            "screenshot": {
+            "wait": {
                 "type": 200,
-                "name": "截图/截屏",
+                "name": "输入",
                 "icon": "wallpaper",
-                "address": "public/screenshot",
-            },
-            "ocr": {
-                "type": 200,
-                "name": "OCR",
-                "icon": "wallpaper",
-                "address": "public/ocr",
-            },
-            "dump_dom": {
-                "type": 200,
-                "name": "获取布局",
-                "icon": "target",
-                "address": "public/dump_dom",
+                "address": "public/wait",
             },
         }
     },
@@ -77,20 +65,53 @@ MAP = {
                 "icon": "bed",  # 对应前端 iconMap 里的图标
                 "address": "cfs/sleep",
             },
+            "mAssert": {
+                "type": 200,  # 前端根据这个来渲染特殊的条件构造器UI
+                "name": "断言",
+                "icon": "bed",  # 对应前端 iconMap 里的图标
+                "address": "cfs/mAssert",
+            },
         }
     },
-    "web": {
+    "tools": {
         "desc": {
-            "category": "网页端",  # 名称
+            "category": "工具",  # 名称
             "icon": "Chrome",  # 该文件夹下所有组件默认图标
             "color": "#ff1486"  # 谷歌红
         },
         "details": {
-            "upload_file": {
-                "address": "web/upload_file"
+            "screenshot": {
+                "type": 200,
+                "name": "截图/截屏",
+                "icon": "wallpaper",
+                "address": "tools/screenshot",
+            },
+            "ocr": {
+                "type": 200,
+                "name": "OCR",
+                "icon": "wallpaper",
+                "address": "tools/ocr",
+            },
+            "dump_dom": {
+                "type": 200,
+                "name": "获取布局",
+                "icon": "target",
+                "address": "tools/dump_dom",
             },
         }
     },
+    # "web": {
+    #     "desc": {
+    #         "category": "网页端",  # 名称
+    #         "icon": "Chrome",  # 该文件夹下所有组件默认图标
+    #         "color": "#ff1486"  # 谷歌红
+    #     },
+    #     "details": {
+    #         "upload_file": {
+    #             "address": "web/upload_file"
+    #         },
+    #     }
+    # },
     # "mobile": {
     #     "desc": {
     #         "category": "移动端",  # 如果不写，默认就是文件夹名 "web"

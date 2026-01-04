@@ -11,7 +11,7 @@ TAG = "OCR"
 
 
 
-@BaseRouter.route('public/ocr')
+@BaseRouter.route('tools/ocr')
 class FastOCR(Template):
     META = {
         "inputs": [
