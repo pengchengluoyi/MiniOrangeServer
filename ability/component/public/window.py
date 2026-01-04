@@ -40,6 +40,14 @@ class Window(Template):
                 "defaultValue": "start"
             },
             {
+                "name": "restart",
+                "type": "bool",
+                "desc": "是否重启应用",
+                "defaultValue": True,
+                "trueText": "重启",
+                "falseText": "保持"
+            },
+            {
                 "name": "target_mobile",
                 "type": "str",
                 "desc": "应用包名 (Package Name)",
@@ -64,6 +72,7 @@ class Window(Template):
         "defaultData": {
             "platform": "",
             "operation": "start",
+            "restart": False,
             "target_mobile": "",
             "target_pc": "",
             "target_web": ""
@@ -78,6 +87,7 @@ class Window(Template):
         self.get_engine()
         operation = self.get_param_value("operation")
         platform = self.get_param_value("platform")
+        restart = self.get_param_value("restart")
         target = None
         if platform in platform_code.MMOBILE:
             target = self.get_param_value("target_mobile")
@@ -88,6 +98,9 @@ class Window(Template):
 
         
         try:
+            if restart:
+                if hasattr(self.engine, 'close_window'):
+                    self.engine.close_window(target)
             if operation == 'start':
                 pid = self.engine.start_app(target)
                 self.memory.set(self.info, "PID", pid)

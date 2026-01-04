@@ -53,8 +53,8 @@ class Manager(metaclass=SingletonMeta):
                 from ability.engine.mobile.mIOS import IOSEngine
                 self.MobileEngine = IOSEngine()
             else:
-                from ability.engine.mobile.mAndroidADB import AndroidADBEngine
-                self.MobileEngine = AndroidADBEngine()
+                from ability.engine.mobile.mAdb import MAdbEngine
+                self.MobileEngine = MAdbEngine()
         if info.platform in platform_code.MWEB:
             if self.WebEngine:
                 return True

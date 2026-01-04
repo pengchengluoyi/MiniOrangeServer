@@ -12,10 +12,10 @@ from PIL import Image
 from script.log import SLog
 from ability.core.engine import BaseEngine
 
-TAG = 'AndroidADBEngine'
+TAG = 'MAdbEngine'
 
 
-class AndroidADBEngine(BaseEngine):
+class MAdbEngine(BaseEngine):
 
     def get_adb_path(self):
         """动态获取集成的 ADB 路径"""

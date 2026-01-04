@@ -10,7 +10,7 @@ from ability.core.engine import BaseEngine
 TAG = 'AndroidEngine'
 
 
-class AndroidEngine(BaseEngine):
+class MUiautomator(BaseEngine):
 
     def init_driver(self, test_subject=None):
         SLog.i(TAG, "Create a mobile connection")

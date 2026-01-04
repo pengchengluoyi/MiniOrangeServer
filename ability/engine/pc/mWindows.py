@@ -126,6 +126,14 @@ class WindowsEngine(BaseEngine):
             time.sleep(duration)
             ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
+    def hover(self, element=None, position=None):
+        """
+        右键点击。对应 gesture.py 中的 right-click 和 long_press。
+        """
+        if position:
+            SLog.d(TAG, f"执行悬停: {position}")
+            self._move_to(position[0], position[1])
+
     def send_keys(self, element, text):
         """
         Windows 极简输入。

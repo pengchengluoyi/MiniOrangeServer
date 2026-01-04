@@ -1,8 +1,9 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
-import re, math
+import re, math, time
 from script.log import SLog
+from script.sleep import mSleep
 from ability.component.template import Template
 from ability.component.router import BaseRouter
 from ability.engine.vision.mPositionCalculation import PositionManager
@@ -110,13 +111,17 @@ class Gesture(Template):
         locator_chain = self.get_param_value("locator_chain")
         sub_type = self.get_param_value("sub_type")
 
-        current_img = self.engine.screenshot()
 
-        # 🔥 调用统一的视觉调度接口
-        final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, locator_chain, current_img)
+        start_time = time.time()
+        while time.time() - start_time <= 20:
+            # 🔥 调用统一的视觉调度接口
+            current_img = self.engine.screenshot()
+            final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, locator_chain, current_img)
 
-        if final_pos:
-            return self._do_action(sub_type, final_pos)
+            if final_pos:
+                return self._do_action(sub_type, final_pos)
+            mSleep(0.5)
+
 
         # DOM 兜底逻辑
         SLog.w(TAG, "OCR 失败，尝试 DOM 路径...")
@@ -145,7 +150,7 @@ class Gesture(Template):
             text = item.get("text", "")
             box = item.get("coordinates", {}).get("box")
             if label in text:
-                pos = PositionCalculator.calculate_sub_coords(text, label, box)
+                pos = PositionManager.calculate_sub_coords(text, label, box)
                 if pos: candidates.append(pos)
 
         if not candidates:
@@ -153,7 +158,7 @@ class Gesture(Template):
 
         if ref_pos:
             # 返回离数据库坐标最近的候选者 [消除 Hardcoding 歧义的关键]
-            return min(candidates, key=lambda p: PositionCalculator.get_distance(ref_pos, p))
+            return min(candidates, key=lambda p: PositionManager.get_distance(ref_pos, p))
 
         return candidates[0]
 
@@ -163,6 +168,8 @@ class Gesture(Template):
             self.engine.double_click(None, position=pos)
         elif sub_type in ['right-click', 'long_press']:
             self.engine.context_click(None, position=pos)
+        elif sub_type  == 'hover':
+            self.engine.hover(None, position=pos)
         else:
             self.engine.click(None, position=pos)
         self.result.success()

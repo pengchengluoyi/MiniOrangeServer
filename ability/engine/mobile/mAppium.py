@@ -12,13 +12,13 @@ from selenium.webdriver.common.actions import interaction
 from script.log import SLog
 from ability.core.engine import BaseEngine
 
-TAG = 'AppiumAndroidEngine'
+TAG = 'MAppiumEngine'
 
 
-class AppiumAndroidEngine(BaseEngine):
+class MAppiumEngine(BaseEngine):
     """
     基于 Appium 的 Android 引擎
-    保持与 mAndroid.py 一致的 locator_chain 定位风格
+    保持与 mUiautomator.py 一致的 locator_chain 定位风格
     """
 
     def init_driver(self, test_subject=None):
