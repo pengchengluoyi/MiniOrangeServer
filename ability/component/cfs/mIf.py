@@ -1,14 +1,14 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 from script.log import SLog
-from ability.component.template import Template
+from ability.core.base_logic import LogicBase
 from ability.component.router import BaseRouter
 
 TAG = "MIf"
 
 
 @BaseRouter.route('cfs/mIf')
-class MIf(Template):
+class MIf(LogicBase):
     """
         This component performs conditional logic checks (If-Else).
     """
@@ -28,21 +28,26 @@ class MIf(Template):
         pass
 
     def execute(self):
-        conditions = self.get_param_value("conditions")  # 这里的 conditions 结构建议保持为一组
+        conditions = self.get_param_value("conditions")
         branches = self.get_param_value("branches")
         logic_type = self.get_param_value("logic", "AND")
 
-        # 判定这组条件是否成立
-        is_match = self.evaluate_multi_conditions(conditions, logic_type)
+        # 判定
+        is_match = self.evaluate_logic(conditions, logic_type)
 
-        # 根据判定结果选择分支 (0 为 True 分支, else 为 False 分支)
+        # 结果映射到分支索引
+        # 通常逻辑：满足为 "0"，不满足为 "else"
         target_index = "0" if is_match else "else"
+        self.index = target_index
 
         try:
-            self.index = target_index
-            self.info.nextCodes = [branches[str(target_index)]]
-            SLog.i(self.TAG, f"条件判定结果: {is_match}, 跳转分支: {target_index}")
-        except KeyError:
-            SLog.w(self.TAG, f"未找到对应分支: {target_index}")
+            next_code = branches.get(str(target_index))
+            if next_code:
+                self.info.nextCodes = [next_code]
+                SLog.i(self.TAG, f"Branch routing to: {target_index} -> {next_code}")
+            else:
+                SLog.w(self.TAG, f"No branch code found for: {target_index}")
+        except Exception as e:
+            SLog.e(self.TAG, f"Routing error: {e}")
 
         return self.result

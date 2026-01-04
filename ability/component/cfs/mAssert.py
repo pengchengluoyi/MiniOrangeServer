@@ -1,33 +1,40 @@
-from .base_logic import BaseLogic
+from ability.core.base_logic import LogicBase
 from ability.component.router import BaseRouter
 from script.log import SLog
 
 
 @BaseRouter.route('cfs/mAssert')
-class MAssert(BaseLogic):
+class MAssert(LogicBase):
+
+    """
+        This component performs conditional logic checks (If-Else).
+    """
+    META = {
+        "inputs": [],
+        "defaultData": {
+            "conditions": [
+                {"left": "", "op": "=", "right": ""}
+            ],
+            "logic": "AND"
+        },
+        "outputVars": []
+    }
+    index = "else"
     TAG = "MAssert"
 
     def execute(self):
         conditions = self.get_param_value("conditions")
         logic_type = self.get_param_value("logic", "AND")
-        # 新增：是否阻断任务执行（默认开启）
-        abort_on_fail = self.get_param_value("abortOnFail", True)
 
-        # 执行多条件判定
-        is_passed = self.evaluate_multi_conditions(conditions, logic_type)
+        # 执行判定
+        is_passed = self.evaluate_logic(conditions, logic_type)
 
         if is_passed:
-            SLog.i(self.TAG, "断言通过")
-            self.result.success("所有断言条件已满足")
+            self.result.success("Assertion Passed")
         else:
-            msg = f"断言失败: 条件逻辑为 {logic_type}"
+            # 关键：调用 fail 会标记任务状态为失败，并通常由引擎阻断后续步骤
+            msg = f"Assertion Failed: conditions {conditions} with logic {logic_type}"
             SLog.e(self.TAG, msg)
-
-            if abort_on_fail:
-                # 关键：调用 fail 会导致框架层级识别到任务异常，从而停止后续执行
-                self.result.fail(msg)
-            else:
-                # 仅记录不通过，但不停止流程
-                self.result.success(f"断言不满足(未阻断): {msg}")
+            self.result.fail(msg)
 
         return self.result
