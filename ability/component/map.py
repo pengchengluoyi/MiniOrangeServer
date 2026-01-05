@@ -33,7 +33,7 @@ MAP = {
             },
             "wait": {
                 "type": 200,
-                "name": "输入",
+                "name": "等待",
                 "icon": "wallpaper",
                 "address": "public/wait",
             },

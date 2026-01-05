@@ -43,14 +43,54 @@ class WindowsEngine(BaseEngine):
             SLog.e(TAG, f"启动失败: {e}")
             return False
 
-    def stop_app(self, exe_name=None):
-        if not exe_name: return False
+    def stop_app(self, exe_path=None):
+        """
+            强制关闭进程。
+            支持传入完整路径（如 D:/path/app.exe）或仅文件名（app.exe）。
+            """
+        if not exe_path:
+            SLog.w(TAG, "stop_app 失败: 未提供进程名称或路径")
+            return False
+
+        # 1. 核心改进：从路径中提取文件名 (xxxx.exe)
+        # os.path.basename 会处理 'C:/test/app.exe' -> 'app.exe'
+        # 同时它也能兼容 Linux/macOS 的路径分隔符
+        exe_name = os.path.basename(exe_path)
+
+        if not exe_name:
+            SLog.e(TAG, f"无法从路径解析出有效文件名: {exe_path}")
+            return False
+
         try:
-            SLog.i(TAG, f"强制关闭进程: {exe_name}")
-            subprocess.run(f"taskkill /F /IM {exe_name} /T", shell=True, check=False)
-            return True
+            SLog.i(TAG, f"正在强制关闭进程: {exe_name} (输入源: {exe_path})")
+
+            # 2. 增强鲁棒性：使用列表形式调用 subprocess
+            # 避免 shell=True 带来的空格注入风险
+            # /F: 强制终止 /IM: 指定映像名 /T: 终止子进程
+            cmd = ["taskkill", "/F", "/IM", exe_name, "/T"]
+
+            # 使用 capture_output 捕获错误信息以便在日志中分析
+            result = subprocess.run(
+                cmd,
+                shell=False,
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                SLog.i(TAG, f"进程 {exe_name} 已成功关闭")
+                return True
+            else:
+                # 忽略“进程未找到”的错误（通常返回码 128），这在关闭操作中是常见的
+                if "not found" in result.stderr.lower() or "找不到" in result.stderr:
+                    SLog.w(TAG, f"进程 {exe_name} 当前并未运行")
+                    return True
+
+                SLog.e(TAG, f"Taskkill 失败 [Code {result.returncode}]: {result.stderr}")
+                return False
+
         except Exception as e:
-            SLog.e(TAG, f"关闭失败: {e}")
+            SLog.e(TAG, f"执行关闭命令时发生异常: {str(e)}")
             return False
 
     def screenshot(self, path=None):
