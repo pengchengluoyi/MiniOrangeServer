@@ -92,6 +92,7 @@ class Wait(Template):
                     self.result.success()
                     return True
             mSleep(0.5)
+            SLog.i(TAG, "while - end")
 
         self.memory.set(self.info, "status", False)
         return self.result.fail()
