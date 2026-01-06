@@ -30,9 +30,9 @@ def scan():
 
             # 3. 动态导入模块
             # address 格式如 "public/start" -> 转换为 "public.start"
-            # 最终拼接为 ability.component.public.start
+            # 最终拼接为 driver.tentacle.component.public.start
             module_sub_path = address.strip('/').replace('/', '.')
-            module_pkg = f'ability.component.{module_sub_path}'
+            module_pkg = f'driver.tentacle.component.{module_sub_path}'
 
             try:
                 # 这一步非常关键：

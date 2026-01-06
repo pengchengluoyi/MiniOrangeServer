@@ -94,10 +94,10 @@ class BaseRouter:
 
         try:
             # 避免重复导入 (可选优化：sys.modules检查)
-            # SLog.i(TAG, f'Loading module: ability.component.{module_path}')
-            importlib.import_module(f'ability.component.{module_path}')
+            # SLog.i(TAG, f'Loading module: driver.tentacle.component.{module_path}')
+            importlib.import_module(f'driver.tentacle.component.{module_path}')
         except ModuleNotFoundError as e:
-            SLog.e(TAG, f'ModuleNotFoundError: ability.component.{module_path} | Error: {e}')
+            SLog.e(TAG, f'ModuleNotFoundError: driver.tentacle.component.{module_path} | Error: {e}')
             pass
         except Exception as e:
             SLog.e(TAG, f'Error importing module {module_path}: {e}')

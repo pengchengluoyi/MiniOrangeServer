@@ -123,7 +123,7 @@ def find_local_modules(root_dir):
                 full_path = os.path.join(root, file)
                 # 获取相对路径 (例如 ability/component/mobile/click.py)
                 rel_path = os.path.relpath(full_path, ".")
-                # 转换为模块名 (例如 ability.component.mobile.click)
+                # 转换为模块名 (例如 driver.tentacle.component.mobile.click)
                 # os.sep 会自动适配 Windows(\) 和 Mac(/)
                 mod_name = rel_path.replace(os.sep, ".")[:-3]
                 modules.append(mod_name)

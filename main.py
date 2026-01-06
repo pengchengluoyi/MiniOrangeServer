@@ -141,7 +141,11 @@ async def register_mdns(port):
     # 使用异步版 AsyncZeroconf
     aiozc = AsyncZeroconf(ip_version=IPVersion.V4Only)
     # 使用 await 注册
-    await aiozc.async_register_service(info)
+    # 🔥 修复: 允许名称变更 (allow_name_change=True) 以解决重启时的 NonUniqueNameException
+    try:
+        await aiozc.async_register_service(info, allow_name_change=True)
+    except Exception as e:
+        print(f"--- [Warning] mDNS Registration failed: {e} ---")
 
     print(f"--- [System] mDNS Registered: http://miniorange.local:{port} ({local_ip}) ---")
     return aiozc, info
@@ -203,7 +207,7 @@ app.include_router(device_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.61", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.62", "upload_dir": UPLOAD_DIR}
 
 
 @app.get("/get_api")

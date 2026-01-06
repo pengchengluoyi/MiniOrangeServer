@@ -1,5 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
+from driver.tentacle.common import platform
 from driver.brain.common.task_result import TaskResult
 
 
