@@ -93,8 +93,16 @@ from server.routers import rWorkflowRun as workflowRun_router
 print(f"--- [Perf] rWorkflowRun loaded: {time.time() - t_start:.3f}s ---")
 
 t_start = time.time()
+from server.routers import rDevice as device_router
+print(f"--- [Perf] rDevice loaded: {time.time() - t_start:.3f}s ---")
+
+
+t_start = time.time()
 from server.routers import rAbility as ability_router
 print(f"--- [Perf] rAbility loaded: {time.time() - t_start:.3f}s ---")
+
+# 确保模型被加载，以便 create_all 能扫描到
+import server.models.mDevice
 
 # ⏱️ [Perf] 打印导入总耗时
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
@@ -139,10 +147,11 @@ app.include_router(project_router.router)
 app.include_router(task_router.router)
 app.include_router(workflowRun_router.router)
 app.include_router(ability_router.router)
+app.include_router(device_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.56", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.57", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():

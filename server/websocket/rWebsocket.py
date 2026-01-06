@@ -4,6 +4,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from script.log import SLog
 from server.websocket.wsMap import HANDLERS
 
+
 router = APIRouter()
 
 TAG = "rWebSocket"
@@ -35,8 +36,9 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if action in HANDLERS:
                 # 执行对应的处理函数
-                result = await HANDLERS[action](data)
-                response.update(result)
+                result = await HANDLERS[action](websocket, data)
+                if result:
+                    response.update(result)
             else:
                 response.update({"code": 404, "msg": f"Action '{action}' not supported"})
             
@@ -45,5 +47,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         SLog.i(TAG, "Client disconnected")
+        if "disconnect" in HANDLERS:
+            await HANDLERS["disconnect"](websocket, {})
     except Exception as e:
         SLog.e(TAG, f"WebSocket error: {e}")
