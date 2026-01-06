@@ -141,7 +141,6 @@ class DeviceClient:
                     "data": {"sn": self.sn}
                 }
                 await self.websocket.send(json.dumps(payload))
-                SLog.i(TAG, "Heartbeat sent")
                 await asyncio.sleep(1)  # 测试期间改为10秒，方便观察
             except Exception as e:
                 SLog.e(TAG, f"Heartbeat error: {e}")
@@ -175,8 +174,6 @@ class DeviceClient:
                     self.execute_task(params)
                 else:
                     SLog.w(TAG, f"Unknown command: {command}")
-            elif action == "heartbeat":
-                SLog.i(TAG, "Heartbeat Ack received")
                     
         except json.JSONDecodeError:
             SLog.e(TAG, "Invalid JSON received")
