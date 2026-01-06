@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 import platform
 
 # 🛡️ 只有在 Windows 平台上才执行 comtypes 的初始化逻辑
@@ -102,7 +103,6 @@ from server.routers import rAbility as ability_router
 print(f"--- [Perf] rAbility loaded: {time.time() - t_start:.3f}s ---")
 
 # 确保模型被加载，以便 create_all 能扫描到
-import server.models.mDevice
 
 # ⏱️ [Perf] 打印导入总耗时
 print(f"--- [Perf] Imports loaded in: {time.time() - BOOT_START_TIME:.3f}s ---")
@@ -124,7 +124,17 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     Base.metadata.create_all(bind=engine)
     LogBase.metadata.create_all(bind=log_engine)
+
+    # 2. 启动后台客户端 (解决你原代码中被 uvicorn 阻塞的问题)
+    from driver.client import DeviceClient, DEVICE_SN
+    client = DeviceClient("ws://127.0.0.1:10104/ws", DEVICE_SN)
+    # 使用 asyncio 创建后台任务
+    bg_task = asyncio.create_task(client.start())
+
+    print("--- [LifeSpan] Backend services & Database ready ---")
     yield
+
+    bg_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -151,11 +161,11 @@ app.include_router(device_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.58", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.59", "upload_dir": UPLOAD_DIR}
 
 @app.get("/get_api")
 def get_api():
-    from ability.component.scan import scan
+    from driver.tentacle.component.scan import scan
     return scan()
 
 if __name__ == "__main__":
@@ -167,7 +177,7 @@ if __name__ == "__main__":
     is_frozen = getattr(sys, 'frozen', False)
     run_config = {
         "app": app,
-        "host": "127.0.0.1",
+        "host": "0.0.0.0",
         "port": 10104,
         "reload": False,
         "access_log": True,
@@ -183,3 +193,4 @@ if __name__ == "__main__":
 
     print(f"--- [Server] Starting Uvicorn (Frozen: {is_frozen}) | Total Boot Time: {time.time() - BOOT_START_TIME:.3f}s ---")
     uvicorn.run(**run_config)
+

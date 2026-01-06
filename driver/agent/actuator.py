@@ -3,7 +3,7 @@ import os
 from script.log import SLog, current_run_id, current_flow_id
 from server.core.log_database import LogSessionLocal
 from server.models.log import WorkflowLog
-from driver.core.manager import Manager
+from driver.brain.core.manager import Manager
 from server.services import run_service
 from script.mTask import report
 

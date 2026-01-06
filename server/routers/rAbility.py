@@ -1,8 +1,8 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 from fastapi import APIRouter, Body
-from ability.manager import Manager
-from ability.component.router import BaseRouter
+from driver.tentacle.manager import Manager
+from driver.tentacle.component.router import BaseRouter
 
 router = APIRouter(prefix="/ability", tags=["Ability"])
 
