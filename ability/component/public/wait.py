@@ -80,19 +80,20 @@ class Wait(Template):
             # 🔥 调用统一的视觉调度接口
             current_img = self.engine.screenshot()
             final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, None, current_img)
-            show_time = True if final_pos else False
             if display:
                 if final_pos:
+                    SLog.i(TAG, "The element is detected and displayed normally")
                     self.memory.set(self.info, "status", True)
                     self.result.success()
                     return True
             else:
-                if not show_time:
+                if not final_pos:
+                    SLog.i(TAG, "No element detected")
                     self.memory.set(self.info, "status", True)
                     self.result.success()
                     return True
             mSleep(0.5)
-            SLog.i(TAG, "while - end")
+            SLog.i(TAG, "continuous monitoring")
 
         self.memory.set(self.info, "status", False)
         return self.result.fail()
