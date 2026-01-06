@@ -70,9 +70,9 @@ try:
 except Exception:
     pass
 
-# --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow) ---
+# --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow, zeroconf, websockets) ---
 # 这些库可能在插件或 try-except 块中被引用，显式收集以防遗漏
-for lib in ['numpy', 'onnxruntime', 'PIL']:
+for lib in ['numpy', 'onnxruntime', 'PIL', 'zeroconf', 'websockets']:
     try:
         tmp_ret_lib = collect_all(lib)
         datas += tmp_ret_lib[0]

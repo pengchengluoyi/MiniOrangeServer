@@ -77,7 +77,8 @@ class DeviceManager:
         }
 
         msg_str = json.dumps(msg)
-        
+
+        SLog.i("DeviceManager", f"msg_str {msg_str}")
         try:
             await self.active_connections[sn].send_text(msg_str)
             self._save_log(sn, "send", "command", msg_str)

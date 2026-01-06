@@ -41,7 +41,12 @@ class Manager(metaclass=SingletonMeta):
         if not channel:
             return self.router.handle_request(info.nodeCode, info)
         execute_router = self.router.handle_request(info.nodeCode, info)
-        result = execute_router.execute()
+        try:
+            result = execute_router.execute()
+        except TypeError as e:
+            if 'stat: path should be string' in str(e) and 'NoneType' in str(e):
+                raise Exception("No device connected or device not responding")
+            raise e
         return result
 
     def apply_engine(self, info):

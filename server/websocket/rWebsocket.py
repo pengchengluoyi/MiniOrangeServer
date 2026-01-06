@@ -24,6 +24,8 @@ async def websocket_endpoint(websocket: WebSocket):
         action = payload.get("action")
         req_id = payload.get("req_id")
         data = payload.get("data", {})
+        if action != "heartbeat":
+            SLog.i(TAG, payload)
         
         response = {
             "action": action,

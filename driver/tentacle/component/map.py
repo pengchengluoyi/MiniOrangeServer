@@ -126,16 +126,16 @@ MAP = {
     #         }
     #     }
     # },
-    "api": {
-        "desc": {
-            "category": "接口",  # 如果不写，默认就是文件夹名 "web"
-            "icon": "Cable",  # 该文件夹下所有组件默认图标
-            "color": "#fa7000"  # 橙色
-        },
-        "details": {
-            "request": {
-                "address": "api/request"
-            }
-        }
-    }
+    # "api": {
+    #     "desc": {
+    #         "category": "接口",  # 如果不写，默认就是文件夹名 "web"
+    #         "icon": "Cable",  # 该文件夹下所有组件默认图标
+    #         "color": "#fa7000"  # 橙色
+    #     },
+    #     "details": {
+    #         "request": {
+    #             "address": "api/clientSide/request"
+    #         }
+    #     }
+    # }
 }
