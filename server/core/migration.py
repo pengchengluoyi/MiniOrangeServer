@@ -54,6 +54,10 @@ def _check_and_migrate(db_path):
             'tasks': [
                 ('uid', 'TEXT', None),
                 ('result_summary', 'JSON', None)
+            ],
+            'm_device': [
+                ('role', 'TEXT', 'node'),
+                ('password', 'TEXT', None)
             ]
         }
 
@@ -87,6 +91,9 @@ def _check_and_migrate(db_path):
                     # 5. 处理其他有默认值的字段 (如 app_id)
                     elif col_name == 'app_id':
                         cursor.execute(f"UPDATE {table} SET {col_name} = 'default_app' WHERE {col_name} IS NULL")
+                    
+                    elif col_name == 'role':
+                        cursor.execute(f"UPDATE {table} SET {col_name} = 'node' WHERE {col_name} IS NULL")
 
         conn.commit()
     finally:

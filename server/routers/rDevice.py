@@ -16,12 +16,18 @@ class DeviceInfo(BaseModel):
     model: Optional[str] = None
     ip: Optional[str] = None
     status: str
+    role: Optional[str] = "node"
+    password: Optional[str] = None
     last_online: Optional[str] = None
 
 class CommandReq(BaseModel):
     sn: str
     command: str
     params: Dict[str, Any] = {}
+
+class SetPasswordReq(BaseModel):
+    sn: str
+    password: str
 
 @router.get("/list", response_model=List[DeviceInfo])
 def get_device_list():
@@ -37,6 +43,8 @@ def get_device_list():
                 "model": d.model,
                 "ip": d.ip_address,
                 "status": d.status,
+                "role": d.role,
+                "password": d.password,
                 "last_online": str(d.last_online_time) if d.last_online_time else None
             })
         return result
@@ -59,3 +67,21 @@ async def send_command(req: CommandReq):
         return {"code": 200, "msg": "Command sent"}
     else:
         return {"code": 500, "msg": "Failed to send"}
+
+@router.post("/set_password")
+def set_device_password(req: SetPasswordReq):
+    """设置设备解锁密码"""
+    session = SessionLocal()
+    try:
+        device = session.query(MDevice).filter(MDevice.sn == req.sn).first()
+        if not device:
+            return {"code": 404, "msg": "Device not found"}
+        
+        device.password = req.password
+        session.commit()
+        return {"code": 200, "msg": "Password updated"}
+    except Exception as e:
+        SLog.e("rDevice", f"Set password error: {e}")
+        return {"code": 500, "msg": f"Error: {e}"}
+    finally:
+        session.close()

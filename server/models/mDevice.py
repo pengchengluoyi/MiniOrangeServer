@@ -23,6 +23,10 @@ class MDevice(Base):
     os_version = Column(String, nullable=True, comment="系统版本")
     resolution = Column(String, nullable=True, comment="屏幕分辨率")
     
+    # 🚀 新增字段
+    role = Column(String, default="node", comment="角色: node, hub, client")
+    password = Column(String, nullable=True, comment="设备解锁密码")
+    
     # 状态管理
     status = Column(String, default="offline", comment="状态: online, offline, busy, error")
     owner = Column(String, nullable=True, comment="当前占用者/任务ID")
