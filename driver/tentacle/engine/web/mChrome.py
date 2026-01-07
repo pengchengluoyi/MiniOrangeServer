@@ -118,23 +118,35 @@ class ChromeEngine(BaseEngine):
 
     # --- 统一动作接口 ---
 
-    def click(self, element, position=None):
+    def click(self, element=None, position=None):
         if position:
             ActionChains(self.driver).move_to_location(position[0], position[1]).click().perform()
-        else:
+        elif element:
             element.click()
 
-    def double_click(self, element, position=None):
+    def double_click(self, element=None, position=None):
         if position:
             ActionChains(self.driver).move_to_location(position[0], position[1]).double_click().perform()
-        else:
+        elif element:
             ActionChains(self.driver).double_click(element).perform()
 
-    def context_click(self, element, position=None):
+    def context_click(self, element=None, position=None):
         if position:
             ActionChains(self.driver).move_to_location(position[0], position[1]).context_click().perform()
-        else:
+        elif element:
             ActionChains(self.driver).context_click(element).perform()
+
+    def long_click(self, element=None, position=None, duration=1.5):
+        action = ActionChains(self.driver)
+        if position:
+            action.move_to_location(position[0], position[1])
+        elif element:
+            action.move_to_element(element)
+
+        action.click_and_hold()
+        action.pause(duration)
+        action.release()
+        action.perform()
 
     def send_keys(self, element, text):
         element.send_keys(text)
@@ -143,17 +155,39 @@ class ChromeEngine(BaseEngine):
         element.clear()
 
     def drag_and_drop(self, source, target):
-        ActionChains(self.driver).drag_and_drop(source, target).perform()
+        action = ActionChains(self.driver)
+        # 兼容坐标拖拽
+        if isinstance(source, (list, tuple)):
+            action.move_to_location(source[0], source[1])
+        else:
+            action.move_to_element(source)
 
-    def hover(self, element):
-        ActionChains(self.driver).move_to_element(element).perform()
+        action.click_and_hold()
+
+        if isinstance(target, (list, tuple)):
+            action.move_to_location(target[0], target[1])
+        else:
+            action.move_to_element(target)
+
+        action.release()
+        action.perform()
+
+    def hover(self, element=None, position=None):
+        if position:
+            ActionChains(self.driver).move_to_location(position[0], position[1]).perform()
+        elif element:
+            ActionChains(self.driver).move_to_element(element).perform()
 
     def screenshot(self, path=None):
-        if path:
-            self.driver.save_screenshot(path)
-            return path
-        png_data = self.driver.get_screenshot_as_png()
-        return Image.open(io.BytesIO(png_data))
+        try:
+            if path:
+                self.driver.save_screenshot(path)
+                return path
+            png_data = self.driver.get_screenshot_as_png()
+            return Image.open(io.BytesIO(png_data))
+        except Exception as e:
+            SLog.e(TAG, f"Screenshot failed: {e}")
+            return None
 
     def execute_script(self, script):
         return self.driver.execute_script(script)
