@@ -5,7 +5,8 @@ import json
 from typing import Dict
 from fastapi import WebSocket
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, timedelta
+import asyncio
 
 from server.core.database import engine
 from server.models.mDevice import MDevice, MDeviceLog
@@ -52,16 +53,15 @@ class DeviceManager:
     async def disconnect(self, websocket: WebSocket, data: dict):
         """处理断开连接 (对应 wsMap 中的 disconnect)"""
         # 因为 disconnect 事件传来的 data 通常为空，我们需要反查 websocket 对应的 SN
-        target_sn = None
+        target_sns = []
         for sn, ws in self.active_connections.items():
             if ws == websocket:
-                target_sn = sn
-                break
+                target_sns.append(sn)
         
-        if target_sn:
-            del self.active_connections[target_sn]
-            self._update_device_status(target_sn, "offline")
-            SLog.i("DeviceManager", f"Device disconnected: {target_sn}")
+        for sn in target_sns:
+            del self.active_connections[sn]
+            self._update_device_status(sn, "offline")
+            SLog.i("DeviceManager", f"Device disconnected: {sn}")
 
     async def send_command(self, sn: str, command: str, params: dict = None):
         """给设备发送指令"""
@@ -101,6 +101,46 @@ class DeviceManager:
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error update status: {e}")
 
+    async def monitor_heartbeats(self):
+        """后台任务：监控设备心跳，超时自动下线"""
+        SLog.i("DeviceManager", "Starting heartbeat monitor...")
+        while True:
+            await asyncio.sleep(30) # 每30秒检查一次
+            try:
+                with SessionLocal() as db:
+                    # 查找在线但超过 60 秒未更新心跳的设备
+                    timeout_threshold = datetime.now() - timedelta(seconds=60)
+                    devices = db.query(MDevice).filter(
+                        MDevice.status == "online",
+                        MDevice.last_online_time < timeout_threshold
+                    ).all()
+                    
+                    for dev in devices:
+                        SLog.w("DeviceManager", f"Device {dev.sn} heartbeat timeout. Marking offline.")
+                        dev.status = "offline"
+                        # 清理内存连接
+                        if dev.sn in self.active_connections:
+                            del self.active_connections[dev.sn]
+                    
+                    if devices:
+                        db.commit()
+            except Exception as e:
+                SLog.e("DeviceManager", f"Heartbeat monitor error: {e}")
+
+    async def handle_client_log(self, websocket: WebSocket, data: dict):
+        """处理客户端回传的日志"""
+        # data: {run_id, flow_id, node_id, level, tag, message}
+        self._save_log(data.get("node_id", "system"), "client", "log", json.dumps(data))
+        # 如果需要写入 WorkflowLog 表，请在此处添加逻辑
+
+    async def handle_task_report(self, websocket: WebSocket, data: dict):
+        """处理客户端回传的任务报告"""
+        # 更新服务端的全局 report 变量，以便前端轮询时能获取到结果
+        from script.mTask import report
+        if isinstance(data, dict):
+            report.update(data)
+            SLog.i("DeviceManager", f"Received task report with {len(data)} items")
+
     def _register_device(self, sn: str, info: dict):
         try:
             with SessionLocal() as db:
@@ -116,6 +156,9 @@ class DeviceManager:
                 device.mac_address = info.get("mac")
                 device.os_version = info.get("os_version")
                 device.resolution = info.get("resolution")
+                # 🚀 新增字段: 角色与密码
+                device.role = info.get("role", "node")
+                device.password = info.get("password")
                 device.status = "online"
                 device.last_online_time = datetime.now()
                 db.commit()

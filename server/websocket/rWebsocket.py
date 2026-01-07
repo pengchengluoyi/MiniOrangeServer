@@ -4,6 +4,7 @@ import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from script.log import SLog
 from server.websocket.wsMap import HANDLERS
+from server.websocket.device_manager import DeviceManager
 
 
 router = APIRouter()
@@ -13,6 +14,12 @@ TAG = "rWebSocket"
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # 🚀 注册额外的系统级 Handler
+    dm = DeviceManager()
+    HANDLERS["client_log"] = dm.handle_client_log
+    HANDLERS["task_report"] = dm.handle_task_report
+    # 注意：monitor_heartbeats 建议在 main.py 的 lifespan 中启动，避免每个连接都启动
+
     await websocket.accept()
     SLog.i(TAG, "Client connected")
     

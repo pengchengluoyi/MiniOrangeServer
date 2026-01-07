@@ -5,12 +5,15 @@ import asyncio
 import json
 import uuid
 import platform
+import re
 import socket
 import os
 import sys
 import traceback
+import subprocess
 import multiprocessing
 import websockets
+import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
 from driver.brain.core.manager import Manager
 from server.core.log_database import LogSessionLocal
@@ -29,36 +32,32 @@ TAG = "DeviceClient"
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---
 
-def _client_log_writer(run_id, flow_id, node_id, level, tag, message):
-    """
-    客户端日志回调。
-    由于客户端无法直接连接服务端数据库，这里仅做占位或控制台输出。
-    后续可通过 WebSocket 将日志回传给服务端。
-    """
-    # 默认 SLog 会打印到控制台，这里可以扩展为发送到 WS 队列
-    db = LogSessionLocal()
-    try:
-        log = WorkflowLog(
-            run_id=run_id,
-            flow_id=flow_id,
-            node_id=node_id,
-            level=level,
-            tag=tag,
-            message=message
-        )
-        db.add(log)
-        db.commit()
-    except Exception as e:
-        SLog.e("System", f"Log Write Error: {e}")
-    finally:
-        db.close()
-
-def process_runner_wrapper(run_data, run_id, flow_id):
+def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url):
     """
     在独立进程中执行任务的包装器
     """
+    # 注入远程 API 地址供 PositionManager 使用
+    builtins.REMOTE_API_URL = server_http_url
+
+    # 定义基于队列的日志回调
+    def _queue_log_writer(run_id, flow_id, node_id, level, tag, message):
+        try:
+            msg_queue.put({
+                "type": "log",
+                "data": {
+                    "run_id": run_id,
+                    "flow_id": flow_id,
+                    "node_id": node_id,
+                    "level": level,
+                    "tag": tag,
+                    "message": message
+                }
+            })
+        except Exception:
+            pass
+
     # 1. 设置日志上下文
-    SLog.set_log_callback(_client_log_writer)
+    SLog.set_log_callback(_queue_log_writer)
     token_run = current_run_id.set(run_id)
     token_flow = current_flow_id.set(str(flow_id))
 
@@ -67,6 +66,11 @@ def process_runner_wrapper(run_data, run_id, flow_id):
         # 2. 执行业务逻辑
         runner = Manager(run_data)
         runner.run()
+        
+        # 3. 任务结束后，回传 Report
+        from script.mTask import report
+        msg_queue.put({"type": "report", "data": report})
+        
     except Exception:
         SLog.e("System", f"Task Failed: {traceback.format_exc()}")
     finally:
@@ -75,11 +79,13 @@ def process_runner_wrapper(run_data, run_id, flow_id):
         current_flow_id.reset(token_flow)
 
 class DeviceClient:
-    def __init__(self, server_url, sn):
+    def __init__(self, server_url, sn, role="node"):
         self.server_url = server_url
         self.sn = sn
+        self.role = role
         self.websocket = None
         self.is_running = False
+        self.msg_queue = multiprocessing.Queue() # 进程间通信队列
 
     async def start(self):
         """启动客户端主循环"""
@@ -98,7 +104,8 @@ class DeviceClient:
                         # 2. 注册成功后，并发运行 心跳任务 和 消息监听任务
                         await asyncio.gather(
                             self.heartbeat_loop(),
-                            self.listen_loop()
+                            self.listen_loop(),
+                            self.queue_consumer_loop() # 新增队列消费循环
                         )
             except (websockets.ConnectionClosed, ConnectionRefusedError, OSError) as e:
                 SLog.w(TAG, f"Connection lost or failed: {e}. Retrying in 5s...")
@@ -111,7 +118,19 @@ class DeviceClient:
 
     async def register(self):
         """向服务端注册设备信息"""
-        info = self._get_device_info()
+        # 1. 注册本机 (PC/Mac)
+        pc_info = self._get_device_info()
+        pc_result = await self._send_register_packet(pc_info)
+
+        # 2. 扫描并注册连接的移动设备
+        sub_devices = self._scan_connected_devices()
+        for dev_info in sub_devices:
+            await self._send_register_packet(dev_info)
+
+        return pc_result
+
+    async def _send_register_packet(self, info):
+        """发送单个设备的注册包"""
         payload = {
             "action": "register",
             "req_id": str(uuid.uuid4()),
@@ -123,25 +142,122 @@ class DeviceClient:
             res_data = json.loads(response)
             
             if res_data.get("code") == 200:
-                SLog.i(TAG, "Registration successful.")
+                SLog.i(TAG, f"Registration successful: {info.get('sn')}")
                 return True
             else:
-                SLog.e(TAG, f"Registration failed: {res_data}")
+                SLog.e(TAG, f"Registration failed for {info.get('sn')}: {res_data}")
                 return False
         except Exception as e:
-            SLog.e(TAG, f"Registration error: {e}")
+            SLog.e(TAG, f"Registration error for {info.get('sn')}: {e}")
             return False
+
+    def _scan_connected_devices(self):
+        """扫描连接的 Android/iOS 设备"""
+        devices = []
+        
+        # --- Android (ADB) ---
+        try:
+            # 尝试执行 adb devices -l
+            # 注意：这里假设 adb 在系统 PATH 中，或者需要配置环境变量
+            cmd = ["adb", "devices", "-l"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines[1:]: # 跳过第一行 List of devices attached
+                    if not line.strip(): continue
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] == 'device':
+                        sn = parts[0]
+                        # 尝试解析 model: product:Pixel_4 model:Pixel_4 device:flame
+                        model = "Android Device"
+                        for part in parts:
+                            if part.startswith("model:"):
+                                model = part.split(":")[1]
+                        
+                        devices.append({
+                            "sn": sn,
+                            "type": "android",
+                            "role": "hub",  # 按照要求，USB连接的设备标记为 hub
+                            "model": model,
+                            "ip": self._get_android_ip(sn),  # 尝试获取具体 IP
+                            "os_version": "Android",
+                            "mac": sn
+                        })
+        except Exception as e:
+            SLog.w(TAG, f"ADB scan failed: {e}")
+
+        # --- iOS (tidevice) ---
+        try:
+            # 检查 tidevice 是否可用
+            cmd = ["tidevice", "list"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if not line.strip(): continue
+                    # tidevice list 输出格式: UDID Name
+                    parts = line.split()
+                    if len(parts) >= 1:
+                        udid = parts[0]
+                        name = parts[1] if len(parts) > 1 else "iOS Device"
+                        devices.append({
+                            "sn": udid,
+                            "type": "ios",
+                            "role": "hub",  # 按照要求，USB连接的设备标记为 hub
+                            "model": name,
+                            "ip": "USB",
+                            "os_version": "iOS",
+                            "mac": udid
+                        })
+        except Exception:
+            pass # tidevice 可能未安装，忽略
+
+        return devices
+
+    def _get_android_ip(self, sn):
+        """尝试获取 Android 设备 IP"""
+        try:
+            # 方法 1: ip route (适用于较新 Android)
+            # 输出示例: ... src 192.168.0.105 ...
+            cmd = ["adb", "-s", sn, "shell", "ip", "route"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                match = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', result.stdout)
+                if match:
+                    return match.group(1)
+            
+            # 方法 2: ifconfig wlan0 (适用于旧 Android)
+            cmd = ["adb", "-s", sn, "shell", "ifconfig", "wlan0"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                match = re.search(r'inet\s+(?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})', result.stdout)
+                if match:
+                    return match.group(1)
+        except Exception:
+            pass
+        return "USB"
 
     async def heartbeat_loop(self):
         """定时发送心跳"""
         while self.websocket:
             try:
+                # 1. 发送本机心跳
                 payload = {
                     "action": "heartbeat",
                     "data": {"sn": self.sn}
                 }
                 await self.websocket.send(json.dumps(payload))
-                await asyncio.sleep(1)  # 测试期间改为10秒，方便观察
+
+                # 2. 发送子设备心跳
+                sub_devices = self._scan_connected_devices()
+                for dev in sub_devices:
+                    payload_sub = {
+                        "action": "heartbeat",
+                        "data": {"sn": dev["sn"]}
+                    }
+                    await self.websocket.send(json.dumps(payload_sub))
+
+                await asyncio.sleep(5)
             except Exception as e:
                 SLog.e(TAG, f"Heartbeat error: {e}")
                 break
@@ -157,6 +273,24 @@ class DeviceClient:
                 break
             except Exception as e:
                 SLog.e(TAG, f"Receive error: {e}")
+
+    async def queue_consumer_loop(self):
+        """消费子进程产生的日志和报告，通过 WS 发送"""
+        while self.websocket:
+            while not self.msg_queue.empty():
+                try:
+                    msg = self.msg_queue.get_nowait()
+                    if msg["type"] == "log":
+                        payload = {"action": "client_log", "data": msg["data"]}
+                        await self.websocket.send(json.dumps(payload))
+                    elif msg["type"] == "report":
+                        payload = {"action": "task_report", "data": msg["data"]}
+                        await self.websocket.send(json.dumps(payload))
+                except Exception as e:
+                    SLog.e(TAG, f"Queue send error: {e}")
+            
+            # 避免空转占用 CPU
+            await asyncio.sleep(0.1)
 
     async def handle_message(self, message):
         """处理具体的业务消息"""
@@ -190,10 +324,13 @@ class DeviceClient:
 
         SLog.i(TAG, f"Spawning process for task RunID: {run_id}")
         
+        # 转换 WS URL 为 HTTP URL 供子进程使用 (简单替换)
+        http_url = self.server_url.replace("ws://", "http://").replace("/ws", "")
+
         # 使用 multiprocessing 启动任务，避免阻塞 WebSocket 通信
         p = multiprocessing.Process(
             target=process_runner_wrapper,
-            args=(run_data, run_id, flow_id)
+            args=(run_data, run_id, flow_id, self.msg_queue, http_url)
         )
         p.start()
 
@@ -202,6 +339,7 @@ class DeviceClient:
         return {
             "sn": self.sn,
             "type": "pc",  # 默认为 PC 节点
+            "role": self.role,
             "model": platform.node(),
             "ip": self._get_ip(),
             "os_version": f"{platform.system()} {platform.release()}",
@@ -222,7 +360,7 @@ if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
     multiprocessing.freeze_support()
     
-    client = DeviceClient(SERVER_URL, DEVICE_SN)
+    client = DeviceClient(SERVER_URL, DEVICE_SN, role="node")
     try:
         asyncio.run(client.start())
     except KeyboardInterrupt:

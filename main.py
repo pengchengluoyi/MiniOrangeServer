@@ -3,7 +3,7 @@ import sys
 import asyncio
 import platform
 import socket  # 🚀 新增
-from zeroconf import IPVersion, ServiceInfo  # 🚀 新增
+from zeroconf import IPVersion, ServiceInfo, Zeroconf  # 🚀 新增 Zeroconf 同步类
 from zeroconf.asyncio import AsyncZeroconf  # 🚀 改为异步版导入
 
 # 🛡️ 只有在 Windows 平台上才执行 comtypes 的初始化逻辑
@@ -161,9 +161,13 @@ async def lifespan(app: FastAPI):
     # 2. 异步注册 mDNS 🚀
     aiozc, srv_info = await register_mdns(10104)
 
-    # 3. 启动后台客户端 (保持不变)
+    # 3. 启动设备管理器心跳监控 🚀
+    from server.websocket.device_manager import DeviceManager
+    asyncio.create_task(DeviceManager().monitor_heartbeats())
+
+    # 4. 启动后台客户端 (保持不变)
     from driver.client import DeviceClient, DEVICE_SN
-    client = DeviceClient("ws://127.0.0.1:10104/ws", DEVICE_SN)
+    client = DeviceClient("ws://127.0.0.1:10104/ws", DEVICE_SN, role="client")
     bg_task = asyncio.create_task(client.start())
 
     print("--- [LifeSpan] Backend services & Database ready ---")
@@ -207,7 +211,7 @@ app.include_router(device_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.65", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.66", "upload_dir": UPLOAD_DIR}
 
 
 @app.get("/get_api")
@@ -234,6 +238,26 @@ if __name__ == "__main__":
     if not is_frozen:
         run_config["app"] = "main:app"
 
-    print(
-        f"--- [Server] Starting Uvicorn (Frozen: {is_frozen}) | Total Boot Time: {time.time() - BOOT_START_TIME:.3f}s ---")
-    uvicorn.run(**run_config)
+    # 🚀 自动发现逻辑: 检查局域网内是否已存在 miniorange.local
+    existing_server_url = None
+    try:
+        zc = Zeroconf()
+        info = zc.get_service_info("_http._tcp.local.", "miniorange._http._tcp.local.")
+        zc.close()
+        if info:
+            addr = socket.inet_ntoa(info.addresses[0])
+            existing_server_url = f"ws://{addr}:{info.port}/ws"
+            print(f"--- [System] Found existing server at {existing_server_url} ---")
+    except Exception as e:
+        print(f"--- [Warning] Discovery check failed: {e} ---")
+
+    if existing_server_url:
+        print("--- [System] Switching to Node Mode (Server found in LAN) ---")
+        from driver.client import DeviceClient, DEVICE_SN
+        # 只启动 driver client，不启动 uvicorn
+        client = DeviceClient(existing_server_url, DEVICE_SN, role="node")
+        asyncio.run(client.start())
+    else:
+        print(
+            f"--- [Server] Starting Uvicorn (Frozen: {is_frozen}) | Total Boot Time: {time.time() - BOOT_START_TIME:.3f}s ---")
+        uvicorn.run(**run_config)
