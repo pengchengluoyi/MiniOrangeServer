@@ -41,6 +41,10 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
 
     # 注入通用查询函数 (通过 Queue -> WS -> Server -> WS -> SharedDict 获取数据)
     def query_server(action, params, timeout=10):
+        if shared_responses is None:
+            SLog.e("Client", "Shared responses dict is None, cannot query server.")
+            return None
+
         req_id = str(uuid.uuid4())
         # 1. 发送请求到主进程
         msg_queue.put({
@@ -56,7 +60,7 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
                 return shared_responses.pop(req_id)
             time.sleep(0.05)
         return None
-    
+
     builtins.SERVER_QUERY = query_server
 
     # 定义基于队列的日志回调
@@ -86,11 +90,11 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
         # 2. 执行业务逻辑
         runner = Manager(run_data)
         runner.run()
-        
+
         # 3. 任务结束后，回传 Report
         from script.mTask import report
         msg_queue.put({"type": "report", "data": report})
-        
+
     except Exception:
         SLog.e("System", f"Task Failed: {traceback.format_exc()}")
     finally:
@@ -103,8 +107,19 @@ class DeviceClient:
         self.server_url = server_url
         self.sn = sn
         self.role = role
-        self.shared_responses = shared_responses # 进程间共享的响应字典
+
+        # 如果外部未传入 shared_responses，则内部自动初始化 Manager
+        self._internal_manager = None
+        if shared_responses is None:
+            self._internal_manager = multiprocessing.Manager()
+            self.shared_responses = self._internal_manager.dict()
+            SLog.i(TAG, "Initialized internal Manager for shared_responses")
+        else:
+            self.shared_responses = shared_responses
+
         self.websocket = None
+        if self.shared_responses is None:
+            SLog.w(TAG, "Warning: shared_responses is None. IPC queries will fail.")
         self.is_running = False
         self.msg_queue = multiprocessing.Queue() # 进程间通信队列
 
@@ -112,14 +127,14 @@ class DeviceClient:
         """启动客户端主循环"""
         self.is_running = True
         SLog.i(TAG, f"Device Client Starting... SN: {self.sn}")
-        
+
         while self.is_running:
             try:
                 SLog.i(TAG, f"Connecting to {self.server_url}...")
                 async with websockets.connect(self.server_url) as ws:
                     self.websocket = ws
                     SLog.i(TAG, "Connected to server.")
-                    
+
                     # 1. 发送注册包
                     if await self.register():
                         # 2. 注册成功后，并发运行 心跳任务 和 消息监听任务
@@ -161,7 +176,7 @@ class DeviceClient:
             await self.websocket.send(json.dumps(payload))
             response = await self.websocket.recv()
             res_data = json.loads(response)
-            
+
             if res_data.get("code") == 200:
                 SLog.i(TAG, f"Registration successful: {info.get('sn')}")
                 return True
@@ -175,7 +190,7 @@ class DeviceClient:
     def _scan_connected_devices(self):
         """扫描连接的 Android/iOS 设备"""
         devices = []
-        
+
         # --- Android (ADB) ---
         try:
             # 获取集成 ADB 路径 (去除引号，因为 subprocess list 参数不需要引号)
@@ -195,7 +210,7 @@ class DeviceClient:
                         for part in parts:
                             if part.startswith("model:"):
                                 model = part.split(":")[1]
-                        
+
                         devices.append({
                             "sn": sn,
                             "type": "android",
@@ -248,7 +263,7 @@ class DeviceClient:
                 match = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', result.stdout)
                 if match:
                     return match.group(1)
-            
+
             # 方法 2: ifconfig wlan0 (适用于旧 Android)
             cmd = [adb_path, "-s", sn, "shell", "ifconfig", "wlan0"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
@@ -312,14 +327,14 @@ class DeviceClient:
                     elif msg["type"] == "query":
                         # 转发子进程的查询请求
                         payload = {
-                            "action": msg["action"], 
+                            "action": msg["action"],
                             "req_id": msg["req_id"],
                             "data": msg["params"]
                         }
                         await self.websocket.send(json.dumps(payload))
                 except Exception as e:
                     SLog.e(TAG, f"Queue send error: {e}")
-            
+
             # 避免空转占用 CPU
             await asyncio.sleep(0.1)
 
@@ -329,23 +344,23 @@ class DeviceClient:
             data = json.loads(message)
             msg_type = data.get("type")
             action = data.get("action")
-            
+
             if msg_type == "command":
                 command = data.get("command")
                 params = data.get("params", {})
                 SLog.i(TAG, f"Received command: {command}")
-                
+
                 if command == "run_task":
                     self.execute_task(params)
                 else:
                     SLog.w(TAG, f"Unknown command: {command}")
-            
+
             else:
                 # 处理查询响应 (非 command 类型的消息)
                 req_id = data.get("req_id")
                 if req_id and self.shared_responses is not None:
                     self.shared_responses[req_id] = data.get("data")
-                    
+
         except json.JSONDecodeError:
             SLog.e(TAG, "Invalid JSON received")
 
@@ -354,13 +369,13 @@ class DeviceClient:
         run_id = params.get("run_id")
         flow_id = params.get("flow_id")
         run_data = params.get("run_data")
-        
+
         if not (run_id and flow_id and run_data):
             SLog.e(TAG, "Missing task parameters (run_id, flow_id, or run_data)")
             return
 
         SLog.i(TAG, f"Spawning process for task RunID: {run_id}")
-        
+
         # 转换 WS URL 为 HTTP URL 供子进程使用 (简单替换)
         http_url = self.server_url.replace("ws://", "http://").replace("/ws", "")
 
@@ -396,7 +411,7 @@ class DeviceClient:
 if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
     multiprocessing.freeze_support()
-    
+
     # 自动选择连接地址: 优先尝试本地，失败则使用 mDNS 域名
     target_url = DEFAULT_SERVER_URL
     try:

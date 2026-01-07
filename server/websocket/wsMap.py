@@ -13,5 +13,7 @@ HANDLERS = {
     "get_component": handle_get_component,
     "register": device_manager.register,
     "heartbeat": device_manager.heartbeat,
-    "disconnect": device_manager.disconnect
+    "disconnect": device_manager.disconnect,
+    "client_log": device_manager.handle_client_log,
+    "task_report": device_manager.handle_task_report
 }

@@ -77,7 +77,8 @@ async def handle_run_workflow(websocket, data: dict):
     params = {
         "run_id": data.get("run_id") or str(uuid.uuid4()),
         "flow_id": flow_id,
-        "run_data": run_data
+        "run_data": run_data,
+        "target_sn": sn
     }
 
     SLog.i("handle_run_workflow", params)
@@ -124,6 +125,26 @@ async def handle_get_component(websocket, data: dict):
         return {"code": 200, "data": info}
     except Exception as e:
         SLog.e("wsHandlers", f"Get component error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+async def handle_get_device_password(websocket, data: dict):
+    """
+    获取设备锁屏密码
+    """
+    sn = data.get("sn")
+    if not sn:
+        return {"code": 400, "msg": "Missing SN"}
+
+    session = SessionLocal()
+    try:
+        device = session.query(MDevice).filter(MDevice.sn == sn).first()
+        if not device:
+            return {"code": 404, "msg": "Device not found"}
+        return {"code": 200, "data": {"password": device.password}}
+    except Exception as e:
+        SLog.e("wsHandlers", f"Get device password error: {e}")
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()

@@ -14,10 +14,6 @@ TAG = "rWebSocket"
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    # 🚀 注册额外的系统级 Handler
-    dm = DeviceManager()
-    HANDLERS["client_log"] = dm.handle_client_log
-    HANDLERS["task_report"] = dm.handle_task_report
     # 注意：monitor_heartbeats 建议在 main.py 的 lifespan 中启动，避免每个连接都启动
 
     await websocket.accept()

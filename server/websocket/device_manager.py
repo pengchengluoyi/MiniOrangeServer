@@ -129,10 +129,19 @@ class DeviceManager:
             except Exception as e:
                 SLog.e("DeviceManager", f"Heartbeat monitor error: {e}")
 
+    def _get_sn_by_ws(self, websocket: WebSocket):
+        """通过 WebSocket 连接反查设备 SN"""
+        for sn, ws in self.active_connections.items():
+            if ws == websocket:
+                return sn
+        return "unknown"
+
     async def handle_client_log(self, websocket: WebSocket, data: dict):
         """处理客户端回传的日志"""
         # data: {run_id, flow_id, node_id, level, tag, message}
-        self._save_log(data.get("node_id", "system"), "client", "log", json.dumps(data))
+        # 修复: 获取正确的设备 SN，而不是使用 node_id
+        device_sn = self._get_sn_by_ws(websocket)
+        self._save_log(device_sn, "client", "log", json.dumps(data))
         
         # 写入 WorkflowLog 表 (替代客户端直接写库)
         try:
@@ -144,7 +153,7 @@ class DeviceManager:
                     level=data.get("level"),
                     tag=data.get("tag"),
                     message=data.get("message"),
-                    create_time=datetime.now()
+                    created_at=datetime.now()
                 )
                 db.add(log)
                 db.commit()
