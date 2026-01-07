@@ -3,12 +3,10 @@
 import cv2
 import numpy as np
 import os
-from pathlib import Path
+import builtins
+import base64
 
 from script.log import SLog
-from script.mPath import UPLOAD_DIR, get_final_path
-from server.core.database import SessionLocal
-from server.models.AppGraph.app_component import AppComponent
 
 
 class ImageVision:
@@ -16,34 +14,35 @@ class ImageVision:
 
     @staticmethod
     def get_template_match(interaction_id, current_screenshot_np, threshold=0.35): # threshold 较低后续需要优化这里的算法
-        db = SessionLocal()
+        # 1. 通过 WS 代理从服务端获取数据
+        query_func = getattr(builtins, "SERVER_QUERY", None)
+        if not query_func:
+            SLog.e(ImageVision.TAG, "SERVER_QUERY not available")
+            return None
+
+        comp_data = query_func("get_component", {"uid": interaction_id})
+        
+        if not comp_data or not comp_data.get("screenshot_b64"):
+            SLog.e(ImageVision.TAG, f"未找到热区或原始截图数据: {interaction_id}")
+            return None
+
+        # 2. 解码 Base64 图片
         try:
-            # 1. 获取组件及其所属 Node
-            comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-            # 修正点：AppNode 里的字段名是 screenshot
-            if not comp or not comp.node or not comp.node.screenshot:
-                SLog.e(ImageVision.TAG, f"未找到热区或原始截图数据: {interaction_id}")
-                return None
+            img_bytes = base64.b64decode(comp_data["screenshot_b64"])
+            orig_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        except Exception as e:
+            SLog.e(ImageVision.TAG, f"Base64 decode failed: {e}")
+            return None
+        
+        if orig_img is None:
+            return None
 
-            # 2. 读取原始大图 (使用 comp.node.screenshot)
-            orig_path = get_final_path(comp.node.screenshot)
-            if not os.path.exists(orig_path):
-                SLog.e(ImageVision.TAG, f"原始截图文件不存在: {orig_path}")
-                return None
+        # 3. 实时裁剪模板
+        x, y, w, h = int(comp_data["x"]), int(comp_data["y"]), int(comp_data["width"]), int(comp_data["height"])
+        template = orig_img[y:y + h, x:x + w]
 
-            orig_img = cv2.imdecode(np.fromfile(orig_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if orig_img is None:
-                return None
-
-            # 3. 实时裁剪模板
-            # 转换为 int 像素值
-            x, y, w, h = int(comp.x), int(comp.y), int(comp.width), int(comp.height)
-            template = orig_img[y:y + h, x:x + w]
-
-            # 4. 执行多尺度匹配以提高鲁棒性
-            return ImageVision._do_robust_match(current_screenshot_np, template, threshold)
-        finally:
-            db.close()
+        # 4. 执行多尺度匹配
+        return ImageVision._do_robust_match(current_screenshot_np, template, threshold)
 
     @staticmethod
     def _do_robust_match(target_img, template, threshold):

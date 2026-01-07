@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 import platform
 import re
@@ -16,6 +17,7 @@ import websockets
 import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
 from driver.brain.core.manager import Manager
+from driver.tentacle.common.mPath import get_adb_path
 
 # 服务端 WebSocket 地址 (根据实际部署修改)
 DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
@@ -30,12 +32,32 @@ TAG = "DeviceClient"
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---
 
-def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url):
+def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url, shared_responses):
     """
     在独立进程中执行任务的包装器
     """
     # 注入远程 API 地址供 PositionManager 使用
     builtins.REMOTE_API_URL = server_http_url
+
+    # 注入通用查询函数 (通过 Queue -> WS -> Server -> WS -> SharedDict 获取数据)
+    def query_server(action, params, timeout=10):
+        req_id = str(uuid.uuid4())
+        # 1. 发送请求到主进程
+        msg_queue.put({
+            "type": "query",
+            "req_id": req_id,
+            "action": action,
+            "params": params
+        })
+        # 2. 轮询共享字典等待响应
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if req_id in shared_responses:
+                return shared_responses.pop(req_id)
+            time.sleep(0.05)
+        return None
+    
+    builtins.SERVER_QUERY = query_server
 
     # 定义基于队列的日志回调
     def _queue_log_writer(run_id, flow_id, node_id, level, tag, message):
@@ -77,10 +99,11 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
         current_flow_id.reset(token_flow)
 
 class DeviceClient:
-    def __init__(self, server_url, sn, role="node"):
+    def __init__(self, server_url, sn, role="node", shared_responses=None):
         self.server_url = server_url
         self.sn = sn
         self.role = role
+        self.shared_responses = shared_responses # 进程间共享的响应字典
         self.websocket = None
         self.is_running = False
         self.msg_queue = multiprocessing.Queue() # 进程间通信队列
@@ -155,9 +178,10 @@ class DeviceClient:
         
         # --- Android (ADB) ---
         try:
+            # 获取集成 ADB 路径 (去除引号，因为 subprocess list 参数不需要引号)
+            adb_path = get_adb_path().strip('"')
             # 尝试执行 adb devices -l
-            # 注意：这里假设 adb 在系统 PATH 中，或者需要配置环境变量
-            cmd = ["adb", "devices", "-l"]
+            cmd = [adb_path, "devices", "-l"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
@@ -215,9 +239,10 @@ class DeviceClient:
     def _get_android_ip(self, sn):
         """尝试获取 Android 设备 IP"""
         try:
+            adb_path = get_adb_path().strip('"')
             # 方法 1: ip route (适用于较新 Android)
             # 输出示例: ... src 192.168.0.105 ...
-            cmd = ["adb", "-s", sn, "shell", "ip", "route"]
+            cmd = [adb_path, "-s", sn, "shell", "ip", "route"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 match = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', result.stdout)
@@ -225,7 +250,7 @@ class DeviceClient:
                     return match.group(1)
             
             # 方法 2: ifconfig wlan0 (适用于旧 Android)
-            cmd = ["adb", "-s", sn, "shell", "ifconfig", "wlan0"]
+            cmd = [adb_path, "-s", sn, "shell", "ifconfig", "wlan0"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 match = re.search(r'inet\s+(?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})', result.stdout)
@@ -284,6 +309,14 @@ class DeviceClient:
                     elif msg["type"] == "report":
                         payload = {"action": "task_report", "data": msg["data"]}
                         await self.websocket.send(json.dumps(payload))
+                    elif msg["type"] == "query":
+                        # 转发子进程的查询请求
+                        payload = {
+                            "action": msg["action"], 
+                            "req_id": msg["req_id"],
+                            "data": msg["params"]
+                        }
+                        await self.websocket.send(json.dumps(payload))
                 except Exception as e:
                     SLog.e(TAG, f"Queue send error: {e}")
             
@@ -306,6 +339,12 @@ class DeviceClient:
                     self.execute_task(params)
                 else:
                     SLog.w(TAG, f"Unknown command: {command}")
+            
+            else:
+                # 处理查询响应 (非 command 类型的消息)
+                req_id = data.get("req_id")
+                if req_id and self.shared_responses is not None:
+                    self.shared_responses[req_id] = data.get("data")
                     
         except json.JSONDecodeError:
             SLog.e(TAG, "Invalid JSON received")
@@ -328,7 +367,7 @@ class DeviceClient:
         # 使用 multiprocessing 启动任务，避免阻塞 WebSocket 通信
         p = multiprocessing.Process(
             target=process_runner_wrapper,
-            args=(run_data, run_id, flow_id, self.msg_queue, http_url)
+            args=(run_data, run_id, flow_id, self.msg_queue, http_url, self.shared_responses)
         )
         p.start()
 
@@ -371,8 +410,12 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    client = DeviceClient(target_url, DEVICE_SN, role="node")
-    try:
-        asyncio.run(client.start())
-    except KeyboardInterrupt:
-        SLog.i(TAG, "Stopped by user")
+    # 使用 Manager 创建跨进程共享字典
+    from multiprocessing import Manager as SyncManager
+    with SyncManager() as manager:
+        shared_responses = manager.dict()
+        client = DeviceClient(target_url, DEVICE_SN, role="node", shared_responses=shared_responses)
+        try:
+            asyncio.run(client.start())
+        except KeyboardInterrupt:
+            SLog.i(TAG, "Stopped by user")

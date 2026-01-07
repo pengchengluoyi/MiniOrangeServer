@@ -5,8 +5,6 @@ import builtins
 import requests
 from driver.tentacle.engine.vision.mOcr import analyze
 from driver.tentacle.engine.vision.mImageMatching import ImageVision
-from server.core.database import SessionLocal
-from server.models.AppGraph.app_component import AppComponent
 
 
 class PositionManager:
@@ -53,40 +51,21 @@ class PositionManager:
         target_label, db_target_pos = None, None
         anchor_label, db_anchor_pos = None, None
 
-        # 1. 检索数据库
-        # 检查是否配置了远程 API (由 client.py 注入)
-        remote_api = getattr(builtins, "REMOTE_API_URL", None)
+        # 1. 检索数据 (通过 WS 代理)
+        query_func = getattr(builtins, "SERVER_QUERY", None)
         
-        if remote_api:
-            # --- 远程模式 (Client) ---
-            try:
-                # 假设服务端有通用查询接口，或者我们直接请求 app_graph 的数据
-                # 这里简化处理：如果需要远程支持，服务端需要提供 /api/component/{uid} 接口
-                # 暂时使用模拟逻辑或需要您在服务端补充对应接口
-                if interaction_id:
-                    res = requests.get(f"{remote_api}/app_graph/component/{interaction_id}", timeout=2)
-                    if res.status_code == 200:
-                        data = res.json()
-                        target_label = data.get("label")
-                        db_target_pos = (data.get("x") + data.get("width") / 2, data.get("y") + data.get("height") / 2)
-            except Exception as e:
-                print(f"[Vision] Remote fetch failed: {e}")
-        else:
-            # --- 本地模式 (Server/Local) ---
-            db = SessionLocal()
-            try:
-                if interaction_id:
-                    comp = db.query(AppComponent).filter(AppComponent.uid == interaction_id).first()
-                    if comp:
-                        target_label = comp.label
-                        db_target_pos = (comp.x + comp.width / 2, comp.y + comp.height / 2)
-                if anchor_id:
-                    a_comp = db.query(AppComponent).filter(AppComponent.uid == anchor_id).first()
-                    if a_comp:
-                        anchor_label = a_comp.label
-                        db_anchor_pos = (a_comp.x + a_comp.width / 2, a_comp.y + a_comp.height / 2)
-            finally:
-                db.close()
+        if query_func:
+            if interaction_id:
+                data = query_func("get_component", {"uid": interaction_id})
+                if data:
+                    target_label = data.get("label")
+                    db_target_pos = (data.get("x") + data.get("width") / 2, data.get("y") + data.get("height") / 2)
+            
+            if anchor_id:
+                data = query_func("get_component", {"uid": anchor_id})
+                if data:
+                    anchor_label = data.get("label")
+                    db_anchor_pos = (data.get("x") + data.get("width") / 2, data.get("y") + data.get("height") / 2)
 
         # 2. 模式判定
         invalid_labels = {None, "", "new area", "icon"}

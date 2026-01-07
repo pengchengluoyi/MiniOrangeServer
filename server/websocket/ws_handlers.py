@@ -3,9 +3,13 @@
 
 import uuid
 import json
+import os
+import base64
 from server.websocket.device_manager import DeviceManager, SessionLocal
 from server.models.mDevice import MDevice
 from server.models.workflow import Workflow
+from server.models.AppGraph.app_component import AppComponent
+from script.mPath import get_final_path
 from script.log import SLog
 
 async def handle_get_device_list(websocket, data: dict):
@@ -84,3 +88,42 @@ async def handle_run_workflow(websocket, data: dict):
         return {"code": 200, "msg": "Command sent", "run_id": params["run_id"]}
     else:
         return {"code": 500, "msg": "Failed to send command (Device offline?)"}
+
+async def handle_get_component(websocket, data: dict):
+    """
+    获取组件信息 (包含截图Base64), 供 Driver 端视觉定位使用
+    """
+    uid = data.get("uid")
+    if not uid:
+        return {"code": 400, "msg": "Missing uid"}
+
+    session = SessionLocal()
+    try:
+        comp = session.query(AppComponent).filter(AppComponent.uid == uid).first()
+        if not comp:
+            return {"code": 404, "msg": "Component not found"}
+
+        info = {
+            "uid": comp.uid,
+            "label": comp.label,
+            "x": comp.x,
+            "y": comp.y,
+            "width": comp.width,
+            "height": comp.height,
+            "screenshot_b64": None
+        }
+
+        # 处理截图: 读取文件并转为 Base64
+        if comp.node and comp.node.screenshot:
+            path = get_final_path(comp.node.screenshot)
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    b64_str = base64.b64encode(f.read()).decode('utf-8')
+                    info["screenshot_b64"] = b64_str
+        
+        return {"code": 200, "data": info}
+    except Exception as e:
+        SLog.e("wsHandlers", f"Get component error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
