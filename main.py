@@ -211,7 +211,7 @@ app.include_router(device_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.66", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.67", "upload_dir": UPLOAD_DIR}
 
 
 @app.get("/get_api")
@@ -242,12 +242,24 @@ if __name__ == "__main__":
     existing_server_url = None
     try:
         zc = Zeroconf()
-        info = zc.get_service_info("_http._tcp.local.", "miniorange._http._tcp.local.")
+        # 增加 timeout 防止阻塞过久
+        info = zc.get_service_info("_http._tcp.local.", "miniorange._http._tcp.local.", timeout=2000)
         zc.close()
-        if info:
+        if info and info.addresses:
             addr = socket.inet_ntoa(info.addresses[0])
-            existing_server_url = f"ws://{addr}:{info.port}/ws"
-            print(f"--- [System] Found existing server at {existing_server_url} ---")
+            port = info.port
+            
+            # 🛡️ 二次验证: 尝试连接该端口，确保服务真实在线 (防止 mDNS 缓存/残留导致的误判)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            result = s.connect_ex((addr, port))
+            s.close()
+            
+            if result == 0:
+                existing_server_url = f"ws://{addr}:{port}/ws"
+                print(f"--- [System] Found active server at {existing_server_url} ---")
+            else:
+                print(f"--- [System] Found mDNS record but port {port} is unreachable. Assuming Server is down. ---")
     except Exception as e:
         print(f"--- [Warning] Discovery check failed: {e} ---")
 

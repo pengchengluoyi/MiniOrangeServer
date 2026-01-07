@@ -16,11 +16,9 @@ import websockets
 import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
 from driver.brain.core.manager import Manager
-from server.core.log_database import LogSessionLocal
-from server.models.log import WorkflowLog
 
 # 服务端 WebSocket 地址 (根据实际部署修改)
-SERVER_URL = "ws://127.0.0.1:10104/ws"
+DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
 
 # 生成或读取持久化的设备SN (此处示例为基于MAC生成)
 def get_mac_address():
@@ -360,7 +358,20 @@ if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
     multiprocessing.freeze_support()
     
-    client = DeviceClient(SERVER_URL, DEVICE_SN, role="node")
+    # 自动选择连接地址: 优先尝试本地，失败则使用 mDNS 域名
+    target_url = DEFAULT_SERVER_URL
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        # 检查本地 10104 端口是否开放
+        if sock.connect_ex(('127.0.0.1', 10104)) == 0:
+            target_url = "ws://127.0.0.1:10104/ws"
+            SLog.i(TAG, "Detected local server, switching to localhost.")
+        sock.close()
+    except Exception:
+        pass
+
+    client = DeviceClient(target_url, DEVICE_SN, role="node")
     try:
         asyncio.run(client.start())
     except KeyboardInterrupt:

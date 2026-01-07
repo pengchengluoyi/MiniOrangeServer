@@ -10,6 +10,8 @@ import asyncio
 
 from server.core.database import engine
 from server.models.mDevice import MDevice, MDeviceLog
+from server.core.log_database import LogSessionLocal
+from server.models.log import WorkflowLog
 from script.log import SLog
 
 # 创建会话工厂
@@ -131,7 +133,23 @@ class DeviceManager:
         """处理客户端回传的日志"""
         # data: {run_id, flow_id, node_id, level, tag, message}
         self._save_log(data.get("node_id", "system"), "client", "log", json.dumps(data))
-        # 如果需要写入 WorkflowLog 表，请在此处添加逻辑
+        
+        # 写入 WorkflowLog 表 (替代客户端直接写库)
+        try:
+            with LogSessionLocal() as db:
+                log = WorkflowLog(
+                    run_id=data.get("run_id"),
+                    flow_id=data.get("flow_id"),
+                    node_id=data.get("node_id"),
+                    level=data.get("level"),
+                    tag=data.get("tag"),
+                    message=data.get("message"),
+                    create_time=datetime.now()
+                )
+                db.add(log)
+                db.commit()
+        except Exception as e:
+            SLog.e("DeviceManager", f"DB Error save workflow log: {e}")
 
     async def handle_task_report(self, websocket: WebSocket, data: dict):
         """处理客户端回传的任务报告"""
@@ -150,15 +168,28 @@ class DeviceManager:
                     db.add(device)
                 
                 # 更新字段
-                device.device_type = info.get("type", "unknown")
-                device.model = info.get("model")
-                device.ip_address = info.get("ip")
-                device.mac_address = info.get("mac")
-                device.os_version = info.get("os_version")
-                device.resolution = info.get("resolution")
+                if info.get("type"):
+                    device.device_type = info.get("type")
+                if info.get("model"):
+                    device.model = info.get("model")
+                if info.get("ip"):
+                    device.ip_address = info.get("ip")
+                if info.get("mac"):
+                    device.mac_address = info.get("mac")
+                if info.get("os_version"):
+                    device.os_version = info.get("os_version")
+                if info.get("resolution"):
+                    device.resolution = info.get("resolution")
+                
                 # 🚀 新增字段: 角色与密码
-                device.role = info.get("role", "node")
-                device.password = info.get("password")
+                if info.get("role"):
+                    device.role = info.get("role")
+                elif not device.role:
+                    device.role = "node"
+
+                # 修复: 仅当 info 中包含有效密码时才更新，防止设备重连时覆盖数据库中已保存的密码
+                if info.get("password"):
+                    device.password = info.get("password")
                 device.status = "online"
                 device.last_online_time = datetime.now()
                 db.commit()
