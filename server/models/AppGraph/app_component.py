@@ -1,4 +1,4 @@
-# server/app/models/app_component.py
+# server/models/AppGraph/app_component.py
 from sqlalchemy import Column, Integer, String, Boolean, JSON, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from server.core.database import Base

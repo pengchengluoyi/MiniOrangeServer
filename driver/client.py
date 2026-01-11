@@ -1,3 +1,4 @@
+# driver/client.py
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
@@ -16,7 +17,9 @@ import multiprocessing
 import websockets
 import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
-from driver.brain.core.manager import Manager
+# from driver.brain.core.manager import Manager
+# from driver.brain.central_nervous_system import CentralNervousSystem
+from driver.agent.Core.orchestrator import Orchestrator
 from driver.tentacle.common.mPath import get_adb_path
 
 # 服务端 WebSocket 地址 (根据实际部署修改)
@@ -32,7 +35,7 @@ TAG = "DeviceClient"
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---
 
-def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url, shared_responses):
+def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_responses):
     """
     在独立进程中执行任务的包装器
     """
@@ -66,6 +69,8 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
     # 定义基于队列的日志回调
     def _queue_log_writer(run_id, flow_id, node_id, level, tag, message):
         try:
+            if not isinstance(message, str):
+                message = str(message)
             msg_queue.put({
                 "type": "log",
                 "data": {
@@ -88,8 +93,10 @@ def process_runner_wrapper(run_data, run_id, flow_id, msg_queue, server_http_url
     try:
         SLog.i("System", f"Task Process Started PID:{os.getpid()}")
         # 2. 执行业务逻辑
-        runner = Manager(run_data)
-        runner.run()
+        # runner = Manager(run_data)
+        # runner.run()
+        cns = Orchestrator()
+        cns.run()
 
         # 3. 任务结束后，回传 Report
         from script.mTask import report
@@ -326,10 +333,12 @@ class DeviceClient:
                         await self.websocket.send(json.dumps(payload))
                     elif msg["type"] == "query":
                         # 转发子进程的查询请求
+                        params = msg["params"]
+                        params["req_id"] = msg["req_id"]
                         payload = {
                             "action": msg["action"],
                             "req_id": msg["req_id"],
-                            "data": msg["params"]
+                            "data": params
                         }
                         await self.websocket.send(json.dumps(payload))
                 except Exception as e:
@@ -368,10 +377,9 @@ class DeviceClient:
         """在独立进程中执行任务"""
         run_id = params.get("run_id")
         flow_id = params.get("flow_id")
-        run_data = params.get("run_data")
 
-        if not (run_id and flow_id and run_data):
-            SLog.e(TAG, "Missing task parameters (run_id, flow_id, or run_data)")
+        if not (run_id and flow_id):
+            SLog.e(TAG, "Missing task parameters (run_id, flow_id)")
             return
 
         SLog.i(TAG, f"Spawning process for task RunID: {run_id}")
@@ -382,7 +390,7 @@ class DeviceClient:
         # 使用 multiprocessing 启动任务，避免阻塞 WebSocket 通信
         p = multiprocessing.Process(
             target=process_runner_wrapper,
-            args=(run_data, run_id, flow_id, self.msg_queue, http_url, self.shared_responses)
+            args=(run_id, flow_id, self.msg_queue, http_url, self.shared_responses)
         )
         p.start()
 

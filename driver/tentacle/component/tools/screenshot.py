@@ -66,7 +66,7 @@ class Screenshot(Template):
         timestamp = int(time.time())
         random_num = random.randint(1000, 9999)
         filename = f"{prefix}_{timestamp}_{random_num}.png"
-        
+
         # 修正：使用用户数据目录，确保截图持久保存
         save_dir = os.path.join(APP_DATA_DIR, "uploads")
 

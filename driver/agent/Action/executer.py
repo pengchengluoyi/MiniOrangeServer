@@ -1,7 +1,8 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 from driver.tentacle.manager import Manager
-from driver.brain.common.task_result import TaskResult
+from driver.agent.Common.task_result import TaskResult
+from driver.agent.Action.tools import Tool
 
 TAG = "Executer"
 
@@ -11,6 +12,7 @@ class Executer:
         self.taskResult = TaskResult()
         self.center = Manager()
         self.task = None
+        self.tool = Tool()
 
     def online(self):
         ...
@@ -34,7 +36,6 @@ class Executer:
 
     def offline(self):
         self.center.offline()
-
 
 
 

@@ -1,4 +1,4 @@
-# server/app/models/app_types.py
+# server/models/AppGraph/app_types.py
 from enum import Enum
 
 class NodeType(str, Enum):

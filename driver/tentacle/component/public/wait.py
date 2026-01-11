@@ -62,7 +62,8 @@ class Wait(Template):
             "display": True,
         },
         "outputVars": [
-            {"key": "status", "type": "bool", "desc": "元素是否显示: True显示,False不显示"},
+            {"key": "display", "type": "bool", "desc": "是否存在"},
+            {"key": "position", "type": "json", "desc": "x: xxx, y: yyy"},
         ]
     }
 
@@ -83,19 +84,22 @@ class Wait(Template):
             if display:
                 if final_pos:
                     SLog.i(TAG, "The element is detected and displayed normally")
-                    self.memory.set(self.info, "status", True)
+                    self.memory.set(self.info, "display", True)
+                    self.memory.set(self.info, "position", final_pos)
                     self.result.success()
                     return True
             else:
                 if not final_pos:
                     SLog.i(TAG, "No element detected")
-                    self.memory.set(self.info, "status", True)
+                    self.memory.set(self.info, "display", True)
+                    self.memory.set(self.info, "position", None)
                     self.result.success()
                     return True
             mSleep(0.5)
             SLog.i(TAG, "continuous monitoring")
 
-        self.memory.set(self.info, "status", False)
+        self.memory.set(self.info, "display", False)
+        self.memory.set(self.info, "position", None)
         return self.result.fail()
 
 

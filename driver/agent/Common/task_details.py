@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 from driver.tentacle.common import platform
-from driver.brain.common.task_result import TaskResult
+from driver.agent.Common.task_result import TaskResult
 
 
 class TaskDetails:
@@ -17,14 +17,14 @@ class TaskDetails:
         }
     """
     def __init__(self, case_info: dict):
-        self.id = case_info["id"]
-        self.nodeType = case_info["nodeType"]
-        self.nodeCode = case_info["nodeCode"]
+        self.id = case_info["id"] if case_info.get("nodeCode") else "node_id_null"
+        self.nodeType = case_info["nodeType"] if case_info.get("nodeCode") else None
+        self.nodeCode = case_info["nodeCode"] if case_info.get("nodeCode") else None
         self.platform = case_info["platform"] if case_info.get("platform") else platform.COMMON
-        self.displayName = case_info["displayName"]
-        self.lastCodes = case_info["lastCodes"]
-        self.nextCodes = case_info["nextCodes"]
-        self.data = case_info["data"]
+        self.displayName = case_info["displayName"] if case_info.get("displayName") else "displayName"
+        self.lastCodes = case_info["lastCodes"] if case_info.get("lastCodes") else []
+        self.nextCodes = case_info["nextCodes"] if case_info.get("nextCodes") else []
+        self.data = case_info["data"] if case_info.get("data") else {}
         self.router = None
         self.result = None
 

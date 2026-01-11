@@ -1,3 +1,4 @@
+# driver/tentacle/component/map.py
 MAP = {
     "public": {
         "desc": {
@@ -97,6 +98,13 @@ MAP = {
                 "name": "获取布局",
                 "icon": "target",
                 "address": "tools/dump_dom",
+            },
+            "vision": {
+                "type": 200,
+                "name": "视觉识别",
+                "icon": "target",
+                "address": "tools/vision",
+                "hide": True
             },
         }
     },

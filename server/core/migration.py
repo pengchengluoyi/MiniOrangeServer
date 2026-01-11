@@ -58,6 +58,10 @@ def _check_and_migrate(db_path):
             'm_device': [
                 ('role', 'TEXT', 'node'),
                 ('password', 'TEXT', None)
+            ],
+            'scheduled_tasks': [
+                ('app_id', 'TEXT', None),
+                ('skip_nodes', 'TEXT', None)
             ]
         }
 
