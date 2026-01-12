@@ -70,7 +70,7 @@ try:
 except Exception:
     pass
 
-# --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow, zeroconf, websockets) ---
+# --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow, zeroconf, websockets, torch, transformers, qwen_vl_utils, accelerate) ---
 # 这些库可能在插件或 try-except 块中被引用，显式收集以防遗漏
 for lib in ['numpy', 'onnxruntime', 'PIL', 'zeroconf', 'websockets', 'torch', 'transformers', 'qwen_vl_utils', 'accelerate']:
     try:

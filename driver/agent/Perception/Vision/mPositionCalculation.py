@@ -46,16 +46,6 @@ class PositionManager:
         统一视觉定位入口：判定模式并返回最终坐标
         优先级：数据库 ID(Label判定) -> 图像比对/OCR -> 锚点校准
         """
-        # target_label, db_target_pos = None, None
-        # anchor_label, db_anchor_pos = None, None
-        #
-        # # 1. 检索数据 (通过 WS 代理)
-        # query_func = getattr(builtins, "SERVER_QUERY", None)
-        #
-        # if query_func:
-        #     if interaction_id:
-        #         data = query_func("get_component", {"uid": interaction_id})
-        # 3. 执行匹配
         final_pos = None
 
         # 路径 A: 纯图标 -> 模板匹配
