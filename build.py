@@ -72,7 +72,7 @@ except Exception:
 
 # --- A4. 强制收集其他依赖库 (numpy, onnxruntime, pillow, zeroconf, websockets) ---
 # 这些库可能在插件或 try-except 块中被引用，显式收集以防遗漏
-for lib in ['numpy', 'onnxruntime', 'PIL', 'zeroconf', 'websockets']:
+for lib in ['numpy', 'onnxruntime', 'PIL', 'zeroconf', 'websockets', 'torch', 'transformers', 'qwen_vl_utils', 'accelerate']:
     try:
         tmp_ret_lib = collect_all(lib)
         datas += tmp_ret_lib[0]
@@ -88,7 +88,7 @@ try:
     datas += tmp_ret_uia[0]
     binaries += tmp_ret_uia[1]
     hiddenimports += tmp_ret_uia[2]
-    
+
     # 显式补强 comtypes 依赖
     hiddenimports += [
         'comtypes',
@@ -97,7 +97,7 @@ try:
     ]
 except Exception as e:
     print(f"Warning: Failed to collect uiautomation dependencies: {e}")
-    
+
 # --- A6. 补充缺失的隐式依赖 ---
 hiddenimports += [
     'onnx', 
@@ -153,7 +153,7 @@ a = Analysis(
     runtime_hooks=[],
     # 🔥 优化：排除不必要的重型库，减少文件数量，加快 Electron 签名速度
     # 如果你的项目没用到 PyTorch，排除它可以减少几百 MB 体积和数千个文件
-    excludes=['torch', 'torchvision', 'torchaudio'], 
+    excludes=[], 
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
