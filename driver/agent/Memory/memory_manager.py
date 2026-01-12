@@ -121,10 +121,11 @@ class MemoryManager(metaclass=SingletonMeta):
                     filename = f"timeline_{run_id}_{ts}.jpg"
                     # 增加超时时间到 60秒，防止网络波动或图片过大导致超时 (虽然服务端可能已经保存成功)
                     res = ServerBridge.query("upload", {"name": filename, "content": b64_str}, timeout=60)
+                    SLog.i("sync_timeline", res)
                     
-                    if res and (res.get("code") == 200 or res.get("url")):
-                        # 兼容返回格式: 优先取根节点的 url，其次取 data.url
-                        record["data"] = res.get("url") or res.get("data", {}).get("url")
+                    if res and res.get("url"):
+                        # 兼容返回格式: 优先取根节点的 filename，其次取 data.url
+                        record["data"] = res.get("filename") or res.get("data", {}).get("url")
                     else:
                         record["data"] = "upload_failed"
                         SLog.e("MemoryManager", f"Timeline upload failed. Res: {res}")
