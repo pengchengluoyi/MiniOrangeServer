@@ -4,7 +4,7 @@
 import driver.tentacle.common.platform as platform_code
 from driver.tentacle.component.router import BaseRouter
 from script.singleton_meta import SingletonMeta
-from driver.brain.common.task_details import TaskDetails
+from driver.agent.Common.task_details import TaskDetails
 
 
 class TaskInfo:

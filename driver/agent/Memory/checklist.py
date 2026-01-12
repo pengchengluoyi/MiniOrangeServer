@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 import copy
-from driver.brain.common.task_details import TaskDetails
+from driver.agent.Common.task_details import TaskDetails
 
 TAG = "Checklist"
 

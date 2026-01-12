@@ -161,7 +161,7 @@ app.include_router(schedule_router.router)
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "version": "0.0.72", "upload_dir": UPLOAD_DIR}
+    return {"status": "ok", "version": "0.0.73", "upload_dir": UPLOAD_DIR}
 
 
 @app.get("/get_api")

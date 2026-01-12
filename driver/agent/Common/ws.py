@@ -1,5 +1,5 @@
 # driver/brain/common/graph_loader.py
-from driver.brain.common.bridge import ServerBridge
+from driver.agent.Common.bridge import ServerBridge
 
 class WS:
     @staticmethod
