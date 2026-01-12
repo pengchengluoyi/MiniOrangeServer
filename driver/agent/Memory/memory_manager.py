@@ -125,7 +125,7 @@ class MemoryManager(metaclass=SingletonMeta):
                     
                     if res and res.get("url"):
                         # 兼容返回格式: 优先取根节点的 filename，其次取 data.url
-                        record["data"] = res.get("filename") or res.get("data", {}).get("url")
+                        record["data"] = res.get("filename") or res.get("path")
                     else:
                         record["data"] = "upload_failed"
                         SLog.e("MemoryManager", f"Timeline upload failed. Res: {res}")
