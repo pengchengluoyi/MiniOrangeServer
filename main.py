@@ -5,6 +5,7 @@ import platform
 import socket
 import time
 import multiprocessing
+import psutil
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -69,12 +70,44 @@ if not os.path.exists(UPLOAD_DIR):
 # -------------------------------------------------------------
 # 2. 辅助函数
 # -------------------------------------------------------------
+def configure_proxy_bypass():
+    """配置环境变量以绕过系统代理，防止局域网连接被拦截"""
+    # 追加常见的本地回环和局域网地址到 no_proxy
+    # 注意：requests/websockets 等库会读取此环境变量
+    bypass_hosts = "localhost,127.0.0.1,::1,miniorange.local,0.0.0.0"
+    
+    current_no_proxy = os.environ.get("no_proxy", "")
+    if current_no_proxy:
+        os.environ["no_proxy"] = f"{current_no_proxy},{bypass_hosts}"
+    else:
+        os.environ["no_proxy"] = bypass_hosts
+    
+    # 同步设置大写变量
+    os.environ["NO_PROXY"] = os.environ["no_proxy"]
+
 def get_local_ip():
+    """获取本机真实局域网 IP (过滤代理虚拟网卡)"""
     try:
+        # 方案 A: 使用 psutil 遍历网卡，优先匹配局域网段
+        for interface, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                if snic.family == socket.AF_INET:
+                    ip = snic.address
+                    if ip == "127.0.0.1": continue
+                    # 过滤常见的代理虚拟 IP (Clash 等常使用 198.18.x.x)
+                    if ip.startswith("198.18."): continue
+                    # 优先返回常见的局域网段
+                    if ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
+                        return ip
+
+        # 方案 B: 回退到 socket 方式
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
+        # 如果 socket 拿到的也是虚拟 IP，则降级为 localhost
+        if ip.startswith("198.18."):
+            return "127.0.0.1"
         return ip
     except:
         return "127.0.0.1"
@@ -107,6 +140,9 @@ async def lifespan(app: FastAPI):
     run_auto_migration()
     Base.metadata.create_all(bind=engine)
     LogBase.metadata.create_all(bind=log_engine)
+
+    # 配置代理绕过
+    configure_proxy_bypass()
 
     # 启动后台服务
     aiozc, srv_info = await register_mdns(10104)

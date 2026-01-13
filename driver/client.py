@@ -19,6 +19,7 @@ import pathlib
 import zipfile
 import tempfile
 import shutil
+import psutil
 import multiprocessing
 import websockets
 import builtins # 用于注入全局变量
@@ -713,11 +714,24 @@ class DeviceClient:
         }
 
     def _get_ip(self):
+        """获取本机 IP (过滤代理虚拟 IP)"""
         try:
+            # 优先使用 psutil
+            for interface, snics in psutil.net_if_addrs().items():
+                for snic in snics:
+                    if snic.family == socket.AF_INET:
+                        ip = snic.address
+                        if ip == "127.0.0.1": continue
+                        if ip.startswith("198.18."): continue # 过滤 Clash 虚拟 IP
+                        if ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
+                            return ip
+            
+            # 回退方案
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
+            if ip.startswith("198.18."): return "127.0.0.1"
             return ip
         except:
             return "127.0.0.1"
@@ -725,6 +739,10 @@ class DeviceClient:
 if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
     multiprocessing.freeze_support()
+
+    # 配置代理绕过 (防止连接 ws://miniorange.local 时走代理)
+    os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",localhost,127.0.0.1,::1,miniorange.local,0.0.0.0"
+    os.environ["NO_PROXY"] = os.environ["no_proxy"]
 
     # 自动选择连接地址: 优先尝试本地，失败则使用 mDNS 域名
     target_url = DEFAULT_SERVER_URL

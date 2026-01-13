@@ -135,6 +135,7 @@ full_libs_list = [
     'ujson',          # 高性能 JSON
     'trio',           # 异步 I/O (Selenium 依赖)
     'trio_websocket', # WebSocket (Selenium 依赖)
+    'psutil',         # 系统信息 (用于精准获取局域网 IP)
 ]
 
 print("--- Collecting comprehensive libraries (Smart Mode) ---")
