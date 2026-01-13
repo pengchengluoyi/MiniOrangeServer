@@ -53,7 +53,7 @@ def process_runner_wrapper(run_data, run_id, flow_id):
 
         run_service.create_run()
         # --- C. 执行真正的业务脚本 ---
-        runner = CentralNervousSystem(run_data)
+        runner = Orchestrator()
         runner.run()
 
         run_service.finish_run("success", report)
