@@ -5,8 +5,10 @@ import numpy as np
 import os
 import builtins
 import base64
+from PIL import Image
 
 from script.log import SLog
+from driver.agent.Memory import memory_manager
 
 
 class ImageVision:
@@ -40,6 +42,14 @@ class ImageVision:
         # 3. 实时裁剪模板
         x, y, w, h = int(comp_data["x"]), int(comp_data["y"]), int(comp_data["width"]), int(comp_data["height"])
         template = orig_img[y:y + h, x:x + w]
+
+        # 保存模板图片到时间线 (类型为 screen)
+        try:
+            # OpenCV (BGR) -> PIL (RGB)
+            template_rgb = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
+            memory_manager.short_term.set_timeline_scope("screen", Image.fromarray(template_rgb))
+        except Exception as e:
+            SLog.w(ImageVision.TAG, f"Failed to save template to timeline: {e}")
 
         # 4. 执行多尺度匹配
         return ImageVision._do_robust_match(current_screenshot_np, template, threshold)

@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  # 1. 新增任务：提取版本号 (类似前端读取 package.json)
+  # 1. 任务：提取版本号
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -47,35 +47,35 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 2. 设置 Python 环境 (建议使用 3.10 或 3.11 以保证依赖库兼容性)
+    # 2. 设置 Python 环境
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-        cache: 'pip' # 开启 pip 缓存，加快依赖安装速度
+        cache: 'pip'
 
     # 3. 安装依赖
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 🔥 显式安装 OCR 核心依赖，防止 requirements.txt 遗漏或版本不兼容
+        # 🔥 显式安装 OCR 核心依赖
         pip install opencv-python rapidocr-onnxruntime onnxruntime numpy
         pip install -r requirements.txt
 
-    # 4. 执行打包脚本 (调用你写的 build.py)
+    # 4. 执行打包脚本
     - name: Run Build Script
       run: |
         python build.py
 
-    # 5. 压缩打包结果 (Windows)
-    # 将 dist/main.exe 压缩为 autobots-win-amd64.zip
+    # 5. 压缩打包结果 (Windows) - 🔥🔥🔥 核心修改：改用 7z 🔥🔥🔥
+    # 7z 速度极快，几万个文件也能在 1-2 分钟内搞定，彻底解决 PowerShell 卡死问题
     - name: Zip Build (Windows)
       if: matrix.os == 'windows-latest'
+      shell: cmd
       run: |
-        powershell Compress-Archive -Path dist/MiniOrangeServer_v* -DestinationPath miniorange-win-amd64.zip
+        7z a -tzip miniorange-win-amd64.zip "dist\MiniOrangeServer_v*"
 
     # 6. 压缩打包结果 (macOS)
-    # 将 dist/MiniOrangeServer_v* (文件夹) 压缩为 miniorange-macos-arm64.zip
     - name: Zip Build (macOS)
       if: matrix.os == 'macos-latest'
       run: |
@@ -83,7 +83,7 @@ jobs:
         zip -r ../miniorange-macos-arm64.zip MiniOrangeServer_v*
         cd ..
 
-    # 7. 上传 Artifact (供 Release 任务使用)
+    # 7. 上传 Artifact
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
@@ -94,7 +94,6 @@ jobs:
   release:
     needs: [build, check-version]
     runs-on: ubuntu-latest
-    # 仅当推送到 main 分支时才发布，避免开发分支频繁发布
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Download All Artifacts
@@ -106,7 +105,6 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          # 🔥 使用 check-version 任务提取到的版本号
           tag_name: v${{ needs.check-version.outputs.version }}
           name: Release v${{ needs.check-version.outputs.version }}
           draft: false

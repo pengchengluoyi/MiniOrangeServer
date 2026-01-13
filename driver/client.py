@@ -23,12 +23,38 @@ from driver.tentacle.common.mPath import get_adb_path
 # 服务端 WebSocket 地址 (根据实际部署修改)
 DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
 
-# 生成或读取持久化的设备SN (此处示例为基于MAC生成)
-def get_mac_address():
-    mac = uuid.getnode()
-    return ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+def get_persistent_device_sn():
+    """获取持久化的设备 SN，防止重启后 MAC 漂移导致识别为新设备"""
+    # 将 SN 文件保存在 client.py 同级目录下，确保跨目录运行时也能找到
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    sn_file = os.path.join(base_dir, "device_id.txt")
+    
+    # 1. 尝试从文件读取
+    if os.path.exists(sn_file):
+        try:
+            with open(sn_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    return content
+        except Exception as e:
+            SLog.w("DeviceClient", f"Error reading device_id.txt: {e}")
 
-DEVICE_SN = f"device_{get_mac_address()}"
+    # 2. 如果文件不存在或读取失败，生成新的 SN
+    mac = uuid.getnode()
+    mac_str = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+    sn = f"device_{mac_str}"
+
+    # 3. 保存到文件
+    try:
+        with open(sn_file, "w", encoding="utf-8") as f:
+            f.write(sn)
+            SLog.i("DeviceClient", f"Generated and saved new Device SN: {sn}")
+    except Exception as e:
+        SLog.w("DeviceClient", f"Failed to save device_id.txt: {e}")
+    
+    return sn
+
+DEVICE_SN = get_persistent_device_sn()
 TAG = "DeviceClient"
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---

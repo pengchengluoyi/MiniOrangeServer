@@ -6,7 +6,7 @@ import re
 
 
 # =============================================================================
-# 1. 基础工具函数 (保持你原有的逻辑)
+# 1. 基础工具函数
 # =============================================================================
 
 def clean(targets):
@@ -37,22 +37,6 @@ def get_version():
     return "1.0.0"
 
 
-def get_requirements_libs():
-    """读取 requirements.txt 并提取纯包名"""
-    libs = []
-    if os.path.exists("requirements.txt"):
-        with open("requirements.txt", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'): continue
-                # 提取包名 (例如 'rapidocr_onnxruntime==1.0' -> 'rapidocr_onnxruntime')
-                name = re.split(r'[<>=!~;@\s]', line)[0]
-                if name and name.lower() not in ['pip', 'setuptools', 'wheel', 'pyinstaller']:
-                    libs.append(name)
-    print(f"--- Libraries to collect: {libs} ---")
-    return libs
-
-
 # =============================================================================
 # 2. 构建主逻辑
 # =============================================================================
@@ -60,18 +44,11 @@ def get_requirements_libs():
 def build():
     version = get_version()
     dist_name = f"MiniOrangeServer_v{version}"
-    req_libs = get_requirements_libs()
-
-    # 将列表转为字符串注入到 spec 文件
-    req_libs_str = str(req_libs)
 
     print(f"--- 1. Cleaning up old builds (Target: {dist_name}) ---")
     clean(['build', 'dist', 'main.spec'])
 
     print("--- 2. Generating main.spec ---")
-
-    # 注意：我们在这里注入了一个强大的辅助函数 collect_package_deeply
-    # 它会找到包的物理路径，并把整个文件夹作为资源打包，解决 config.yaml 丢失问题
 
     spec_content = f"""# -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
@@ -81,98 +58,109 @@ import sys
 
 block_cipher = None
 
-# --- 来自 build.py 的 requirements 列表 ---
-requirements_libs = {req_libs_str}
-
 datas = []
 binaries = []
 hiddenimports = []
 
 # =============================================================================
-# 🔥 核心增强：全量深度收集函数
+# A. 暴力修复区：针对那些配置文件必定丢失的库
 # =============================================================================
-def collect_package_deeply(package_name):
+def force_deep_collect(package_name):
     '''
-    暴力收集：找到包的安装目录，将其所有内容（包含 yaml, json, dll 等）
-    都添加到 datas 中，确保任何配置文件都不会丢失。
+    暴力收集：直接拷贝包的物理安装目录。
+    仅用于 RapidOCR 这种普通方法无法收集配置文件的库。
     '''
     d_list = []
-    b_list = []
-    h_list = []
-
     try:
-        # 1. 尝试使用 PyInstaller 标准收集 (获取依赖、dll 等)
-        # 这步是为了保证基础的二进制依赖被识别
-        try:
-            tmp = collect_all(package_name)
-            d_list += tmp[0]
-            b_list += tmp[1]
-            h_list += tmp[2]
-        except Exception:
-            pass # 有些包没有 hook，忽略错误
-
-        # 2. 深度资源扫描 (解决 config.yaml 等丢失的关键)
         spec = importlib.util.find_spec(package_name)
         if spec and spec.origin:
-            # 获取包的根目录 (例如 .../site-packages/rapidocr_onnxruntime)
             pkg_path = os.path.dirname(spec.origin)
-
-            # 只有当它是一个目录时才处理 (排除单文件模块)
             if os.path.isdir(pkg_path):
-                print(f"  -> Deep collecting resources for: {{package_name}}")
-                # 语法: (本地源路径, 打包后的目标目录名)
-                # 这样打包后，程序运行时能在 _internal/package_name/ 下找到所有原文件
+                print(f"  -> [Hard Copy] Collecting source for: {{package_name}}")
                 d_list.append((pkg_path, package_name))
-
     except Exception as e:
-        print(f"  -> Warning: Could not deeply collect {{package_name}}: {{e}}")
+        print(f"  -> Warning: Could not collect {{package_name}}: {{e}}")
+    return d_list
 
-    return d_list, b_list, h_list
+# 🔥 RapidOCR 必须暴力拷贝，否则 config.yaml 会丢
+datas += force_deep_collect('rapidocr_onnxruntime')
+
 
 # =============================================================================
-# A. 循环处理所有依赖 (All-in-One Collection)
+# B. 核心依赖全名单 (使用智能收集 collect_all)
 # =============================================================================
-print("--- Starting Comprehensive Dependency Collection ---")
+# 这里列出了你项目里所有可能用到的“重型”库。
+# collect_all 会自动分析依赖，比暴力拷贝快，但比默认打包全。
 
-# 1. 先对 requirements 里的每个包进行“深度收集”
-for lib in requirements_libs:
-    d, b, h = collect_package_deeply(lib)
-    datas += d
-    binaries += b
-    hiddenimports += h
+full_libs_list = [
+    # 1. 基础自动化
+    'uiautomator2', 
+    'uiautomation', 
+    'cv2', 
+    'PIL',            # Pillow
+    'numpy',
+    'zeroconf', 
+    'websockets',
 
-# 2. 显式补充关键库 (虽然上面循环了，但为了保险起见，保留核心库的显式声明)
-# 尤其是 cv2，容易出玄学问题
-try:
-    tmp_cv2 = collect_all('cv2')
-    datas += tmp_cv2[0]
-    binaries += tmp_cv2[1]
-    hiddenimports += tmp_cv2[2]
-except: 
-    pass
+    # 2. AI 与 大模型相关 (你刚才反馈缺失的部分)
+    'torch',          # PyTorch 核心
+    'accelerate',     # HuggingFace Accelerate
+    'transformers',   # HuggingFace Transformers
+    'qwen_vl_utils',  # Qwen VL 工具
+    'onnxruntime',    # ONNX 推理
+    'torchvision',    # (可选) 如果用到图像处理通常都需要
+]
 
-# 3. 补充 comtypes 和 uiautomation (Windows 自动化核心)
-hiddenimports += ['comtypes', 'comtypes.gen', 'comtypes.stream', 'uiautomation']
+print("--- Collecting comprehensive libraries (Smart Mode) ---")
+for lib in full_libs_list:
+    try:
+        # print(f"  -> Analyzing: {{lib}}") # 如果想看进度可以取消注释
+        tmp = collect_all(lib)
+        datas += tmp[0]
+        binaries += tmp[1]
+        hiddenimports += tmp[2]
+    except Exception as e:
+        # 很多库是可选的，比如没装 torchvision 报错忽略即可
+        pass 
 
-# 4. 补充隐式依赖
+# =============================================================================
+# C. 补充隐式 Hidden Imports
+# =============================================================================
 hiddenimports += [
-    'onnx', 
+    # Windows COM 接口
+    'comtypes', 
+    'comtypes.gen', 
+    'comtypes.stream',
+
+    # 基础依赖补漏
+    'onnx',
     'uiautomator2.core',
     'pkg_resources.extern',
+
+    # FastAPI / Uvicorn 服务器组件
     'uvicorn.loops.auto',
     'uvicorn.protocols.http.auto',
     'uvicorn.lifespan.on',
+
+    # HuggingFace / Torch 常见隐式调用
+    'tqdm',
+    'regex',
+    'requests',
+    'packaging',
+    'packaging.version',
+    'packaging.specifiers',
+    'packaging.requirements',
 ]
 
 # =============================================================================
-# B. 本地源码与资源收集
+# D. 本地代码全量扫描 (防止业务代码丢失)
 # =============================================================================
 
-# 1. 收集项目根目录下的 resource 文件夹
+# 1. 资源目录
 if os.path.exists('resource'):
     datas.append(('resource', 'resource'))
 
-# 2. 收集本地 Python 源码模块 (ability, server, driver 等)
+# 2. 源码目录扫描
 def find_local_modules(root_dir):
     modules = []
     if not os.path.exists(root_dir): return modules
@@ -185,16 +173,17 @@ def find_local_modules(root_dir):
                 modules.append(mod_name)
     return modules
 
+# 扫描所有业务文件夹
 hiddenimports += find_local_modules('ability')
 hiddenimports += find_local_modules('server')
 hiddenimports += find_local_modules('script')
 hiddenimports += find_local_modules('driver')
 
-# 3. 去重
+# 去重
 hiddenimports = list(set(hiddenimports))
 
 # =============================================================================
-# C. PyInstaller 配置对象
+# E. PyInstaller 配置
 # =============================================================================
 a = Analysis(
     ['main.py'],
@@ -205,7 +194,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=[], # 如果需要减小体积，可在此排除不需要的库
+    excludes=[], 
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

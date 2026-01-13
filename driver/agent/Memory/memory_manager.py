@@ -108,7 +108,7 @@ class MemoryManager(metaclass=SingletonMeta):
             record = {"type": item_type, "data": item_data}
 
             # 1. 处理截图: 转 Base64 -> 上传 -> 替换为 URL
-            if item_type == "screenshot" and hasattr(item_data, "save"):
+            if item_type in ["screenshot", "screen"] and hasattr(item_data, "save"):
                 try:
                     buf = io.BytesIO()
                     # 转换为 RGB 并保存为 JPEG 以减小体积，防止 WebSocket 传输超时

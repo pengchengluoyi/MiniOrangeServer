@@ -104,13 +104,17 @@ class DeviceManager:
                 if device:
                     device.status = status
                     if status == "online":
-                        device.last_online_time = datetime.now()
+                        # 优化：直接去除微秒，避免产生 .200000 这种让用户困惑的格式，只保留到秒
+                        now = datetime.now()
+                        device.last_online_time = now.replace(microsecond=0)
                     db.commit()
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error update status: {e}")
 
     async def monitor_heartbeats(self):
         """后台任务：监控设备心跳，超时自动下线"""
+        # 启动时先执行一次清理重复设备
+        self._cleanup_duplicate_devices()
         SLog.i("DeviceManager", "Starting heartbeat monitor...")
         while True:
             await asyncio.sleep(30) # 每30秒检查一次
@@ -134,6 +138,50 @@ class DeviceManager:
                         db.commit()
             except Exception as e:
                 SLog.e("DeviceManager", f"Heartbeat monitor error: {e}")
+
+    def _cleanup_duplicate_devices(self):
+        """清理同名(model)的重复设备，保留最近上线的一个"""
+        try:
+            with SessionLocal() as db:
+                # 获取所有 PC 类型的设备
+                devices = db.query(MDevice).filter(MDevice.device_type == "pc").all()
+                
+                # 按 model 分组
+                grouped = {}
+                for dev in devices:
+                    if not dev.model: continue
+                    if dev.model not in grouped:
+                        grouped[dev.model] = []
+                    grouped[dev.model].append(dev)
+                
+                for model, devs in grouped.items():
+                    if len(devs) > 1:
+                        # 按最后上线时间降序排序 (None 视为最旧)
+                        devs.sort(key=lambda x: x.last_online_time or datetime.min, reverse=True)
+                        
+                        # 保留第一个 (最新的)，删除其余的
+                        keep = devs[0]
+                        to_delete = devs[1:]
+                        
+                        # 修复：如果保留的最新记录没有密码，尝试从即将删除的旧记录中继承密码
+                        # 这样可以防止设备 SN 变化后，用户之前设置的锁屏密码丢失
+                        if not keep.password:
+                            for old_dev in to_delete:
+                                if old_dev.password:
+                                    keep.password = old_dev.password
+                                    SLog.i("DeviceManager", f"Inherited password from duplicate {old_dev.sn} to {keep.sn}")
+                                    break
+
+                        SLog.i("DeviceManager", f"Cleaning up duplicates for model '{model}'. Keeping {keep.sn}, deleting {len(to_delete)} others.")
+                        
+                        for d in to_delete:
+                            if d.sn in self.active_connections:
+                                del self.active_connections[d.sn]
+                            db.delete(d)
+                
+                db.commit()
+        except Exception as e:
+            SLog.e("DeviceManager", f"Error cleaning duplicates: {e}")
 
     def _get_sn_by_ws(self, websocket: WebSocket):
         """通过 WebSocket 连接反查设备 SN"""
@@ -206,7 +254,9 @@ class DeviceManager:
                 if info.get("password"):
                     device.password = info.get("password")
                 device.status = "online"
-                device.last_online_time = datetime.now()
+                # 优化：直接去除微秒
+                now = datetime.now()
+                device.last_online_time = now.replace(microsecond=0)
                 db.commit()
                 SLog.i("DeviceManager", f"Device registered/updated: {sn}")
         except Exception as e:
