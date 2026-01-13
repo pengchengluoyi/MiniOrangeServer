@@ -17,8 +17,6 @@ import multiprocessing
 import websockets
 import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
-# from driver.brain.core.manager import Manager
-# from driver.brain.central_nervous_system import CentralNervousSystem
 from driver.agent.Core.orchestrator import Orchestrator
 from driver.tentacle.common.mPath import get_adb_path
 
@@ -35,12 +33,17 @@ TAG = "DeviceClient"
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---
 
-def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_responses):
+def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_responses, task_params=None):
     """
     在独立进程中执行任务的包装器
     """
     # 注入远程 API 地址供 PositionManager 使用
     builtins.REMOTE_API_URL = server_http_url
+
+    # 🔥 注入目标设备 SN，供 Orchestrator/Driver 使用
+    if task_params and "target_sn" in task_params:
+        builtins.TARGET_DEVICE_SN = task_params["target_sn"]
+        SLog.i("ProcessRunner", f"Target Device SN set to: {builtins.TARGET_DEVICE_SN}")
 
     # 注入通用查询函数 (通过 Queue -> WS -> Server -> WS -> SharedDict 获取数据)
     def query_server(action, params, timeout=10):
@@ -357,7 +360,7 @@ class DeviceClient:
             if msg_type == "command":
                 command = data.get("command")
                 params = data.get("params", {})
-                SLog.i(TAG, f"Received command: {command}")
+                SLog.i(TAG, f"Received command: {command} Target: {params.get('target_sn')}")
 
                 if command == "run_task":
                     self.execute_task(params)
@@ -382,7 +385,7 @@ class DeviceClient:
             SLog.e(TAG, "Missing task parameters (run_id, flow_id)")
             return
 
-        SLog.i(TAG, f"Spawning process for task RunID: {run_id}")
+        SLog.i(TAG, f"Spawning process for task RunID: {run_id} TargetSN: {params.get('target_sn')}")
 
         # 转换 WS URL 为 HTTP URL 供子进程使用 (简单替换)
         http_url = self.server_url.replace("ws://", "http://").replace("/ws", "")
@@ -390,7 +393,7 @@ class DeviceClient:
         # 使用 multiprocessing 启动任务，避免阻塞 WebSocket 通信
         p = multiprocessing.Process(
             target=process_runner_wrapper,
-            args=(run_id, flow_id, self.msg_queue, http_url, self.shared_responses)
+            args=(run_id, flow_id, self.msg_queue, http_url, self.shared_responses, params)
         )
         p.start()
 

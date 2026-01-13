@@ -49,6 +49,12 @@ class DeviceManager:
         """处理心跳 (对应 wsMap 中的 heartbeat)"""
         sn = data.get("sn")
         if sn:
+            # 修复：如果设备是热插拔接入（未经过 register），或者服务重启后内存丢失
+            # 只要收到心跳，就认为该设备可通过当前 WebSocket 访问，重建映射
+            # 同时也处理设备漫游的情况（从一个节点移动到另一个节点），更新 WebSocket 引用
+            if sn not in self.active_connections or self.active_connections[sn] != websocket:
+                self.active_connections[sn] = websocket
+                SLog.i("DeviceManager", f"Active connection updated for {sn} via heartbeat")
             self._update_device_status(sn, "online")
         return None  # 心跳通常不需要回复内容，或者回复简单的 ack
 
