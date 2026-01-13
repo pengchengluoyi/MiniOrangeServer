@@ -22,11 +22,22 @@ class DeviceManager:
     
     # 内存中维护活跃连接: { "device_sn": WebSocket }
     active_connections: Dict[str, WebSocket] = {}
+    # 维护观察者连接 (如前端页面)
+    observers: set = set()
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DeviceManager, cls).__new__(cls)
         return cls._instance
+
+    def _get_req_id(self, data: dict):
+        """尝试从最外层或 data 层获取 req_id"""
+        req_id = data.get("req_id")
+        if not req_id:
+            inner = data.get("data")
+            if isinstance(inner, dict):
+                req_id = inner.get("req_id")
+        return req_id
 
     async def register(self, websocket: WebSocket, data: dict):
         """处理设备注册 (对应 wsMap 中的 register)"""
@@ -70,6 +81,9 @@ class DeviceManager:
             del self.active_connections[sn]
             self._update_device_status(sn, "offline")
             SLog.i("DeviceManager", f"Device disconnected: {sn}")
+        
+        if websocket in self.observers:
+            self.observers.remove(websocket)
 
     async def send_command(self, sn: str, command: str, params: dict = None):
         """给设备发送指令"""
@@ -95,6 +109,67 @@ class DeviceManager:
             SLog.e("DeviceManager", f"Send command failed: {e}")
             return False
 
+    async def handle_list_dir(self, websocket: WebSocket, data: dict):
+        """
+        [前端 -> 服务端 -> 设备]
+        处理前端请求获取文件列表
+        data: { "sn": "target_device_sn", "path": "/" }
+        """
+        target_sn = data.get("sn")
+        path = data.get("path", "/")
+        req_id = self._get_req_id(data)
+
+        # 将请求者(前端)加入观察者列表，以便接收后续的 dir_list 广播
+        self.observers.add(websocket)
+        
+        if not target_sn:
+            return {"code": 400, "msg": "Missing SN"}
+            
+        target_ws = self.active_connections.get(target_sn)
+        if not target_ws:
+            return {"code": 404, "msg": "Device offline"}
+            
+        # 构造指令发送给设备 (复用现有的 command 结构)
+        cmd = {
+            "type": "command",
+            "command": "list_dir",
+            "params": {"path": path}
+        }
+        try:
+            await target_ws.send_text(json.dumps(cmd))
+            return {"code": 200, "msg": "Request forwarded", "req_id": req_id}
+        except Exception as e:
+            return {"code": 500, "msg": str(e), "req_id": req_id}
+
+    async def handle_dir_list(self, websocket: WebSocket, data: dict):
+        """
+        [设备 -> 服务端 -> 前端]
+        处理设备返回的文件列表，广播给前端
+        data: { "path": "...", "files": [...] }
+        """
+        sn = self._get_sn_by_ws(websocket)
+        
+        # 包装消息
+        resp = {
+            "type": "dir_list",
+            "data": {
+                "sn": sn,
+                "path": data.get("path"),
+                "files": data.get("files")
+            }
+        }
+        msg_str = json.dumps(resp)
+        
+        # 广播给所有连接 (设备 + 观察者)
+        targets = set(self.active_connections.values()) | self.observers
+        for ws in targets:
+            if ws != websocket:
+                try:
+                    await ws.send_text(msg_str)
+                except: pass
+        
+        return {"code": 200, "msg": "ack"}
+
     async def handle_p2p_signal(self, websocket: WebSocket, data: dict):
         """
         处理设备间 P2P 文件传输信令转发
@@ -102,6 +177,7 @@ class DeviceManager:
         """
         target_sn = data.get("target_sn")
         content = data.get("content")
+        req_id = self._get_req_id(data)
 
         if not target_sn or not content:
             return {"code": 400, "msg": "Invalid P2P parameters"}
@@ -116,16 +192,17 @@ class DeviceManager:
         payload = {"type": "p2p_signal", "source_sn": source_sn, "data": content}
         try:
             await target_ws.send_text(json.dumps(payload))
-            return {"code": 200, "msg": "Signal forwarded"}
+            return {"code": 200, "msg": "Signal forwarded", "req_id": req_id}
         except Exception as e:
             SLog.e("DeviceManager", f"P2P forward error: {e}")
-            return {"code": 500, "msg": f"Forward error: {str(e)}"}
+            return {"code": 500, "msg": f"Forward error: {str(e)}", "req_id": req_id}
 
     async def handle_transfer_progress(self, websocket: WebSocket, data: dict):
         """
         处理设备上报的文件传输进度
         data: { "transfer_id": "...", "progress": 50.0, "speed": ..., "status": "..." }
         """
+        req_id = self._get_req_id(data)
         # 1. 构造广播消息
         # 前端监听 type="transfer_progress" 即可获取进度
         payload = {
@@ -134,17 +211,18 @@ class DeviceManager:
         }
         msg_str = json.dumps(payload)
 
-        # 2. 广播给所有连接 (除了发送者自己)
+        # 2. 广播给所有连接 (设备 + 观察者)
         # 这样前端页面 (作为 WebSocket 客户端连接) 就能收到进度更新
-        for sn, ws in list(self.active_connections.items()):
+        targets = set(self.active_connections.values()) | self.observers
+        for ws in targets:
             if ws != websocket:
                 try:
                     await ws.send_text(msg_str)
                 except Exception as e:
                     # 发送失败不应中断广播循环
-                    SLog.w("DeviceManager", f"Broadcast progress failed for {sn}: {e}")
+                    SLog.w("DeviceManager", f"Broadcast progress failed: {e}")
 
-        return {"code": 200, "msg": "ack"}
+        return {"code": 200, "msg": "ack", "req_id": req_id}
 
 
     # --- 数据库操作 ---

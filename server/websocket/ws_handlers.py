@@ -19,8 +19,18 @@ from script.log import SLog
 from server.core.local_brain import LocalBrain
 
 
+def get_req_id(data: dict):
+    """尝试从最外层或 data 层获取 req_id"""
+    req_id = data.get("req_id")
+    if not req_id:
+        inner = data.get("data")
+        if isinstance(inner, dict):
+            req_id = inner.get("req_id")
+    return req_id
+
 async def handle_get_device_list(websocket, data: dict):
     session = SessionLocal()
+    req_id = get_req_id(data)
     try:
         devices = session.query(MDevice).all()
         result = []
@@ -34,10 +44,10 @@ async def handle_get_device_list(websocket, data: dict):
                 "last_online": str(d.last_online_time) if d.last_online_time else None
             })
         # 🔥 修复：回传 req_id
-        return {"code": 200, "data": result, "req_id": data.get("req_id")}
+        return {"code": 200, "data": result, "req_id": req_id}
     except Exception as e:
         SLog.e("wsHandlers", f"Get device list error: {e}")
-        return {"code": 500, "msg": str(e), "req_id": data.get("req_id")}
+        return {"code": 500, "msg": str(e), "req_id": req_id}
     finally:
         session.close()
 
@@ -46,7 +56,7 @@ async def handle_get_timeline_list(websocket, data: dict):
     """
     获取时间线列表 (分页 + 聚合)
     """
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     page = int(data.get("page", 1))
     page_size = int(data.get("page_size", 20))
     SLog.i("wsHandlers", f"handle_get_timeline_list enter. req_id: {req_id}")
@@ -106,19 +116,20 @@ async def handle_run_workflow(websocket, data: dict):
     SLog.i("handle_run_workflow", data)
     sn = data.get("sn")
     flow_id = data.get("flow_id")
+    req_id = get_req_id(data)
 
-    if not sn: return {"code": 400, "msg": "Missing SN", "req_id": data.get("req_id")}
-    if not flow_id: return {"code": 400, "msg": "Missing flow_id", "req_id": data.get("req_id")}
+    if not sn: return {"code": 400, "msg": "Missing SN", "req_id": req_id}
+    if not flow_id: return {"code": 400, "msg": "Missing flow_id", "req_id": req_id}
 
     session = SessionLocal()
     try:
         wf = session.query(Workflow).filter(Workflow.id == flow_id).first()
         if not wf:
-            return {"code": 404, "msg": "Workflow not found", "req_id": data.get("req_id")}
+            return {"code": 404, "msg": "Workflow not found", "req_id": req_id}
 
     except Exception as e:
         SLog.e("wsHandlers", f"Query workflow error: {e}")
-        return {"code": 500, "msg": str(e), "req_id": data.get("req_id")}
+        return {"code": 500, "msg": str(e), "req_id": req_id}
     finally:
         session.close()
 
@@ -131,15 +142,16 @@ async def handle_run_workflow(websocket, data: dict):
     success = await DeviceManager().send_command(sn, "run_task", params)
 
     if success:
-        return {"code": 200, "msg": "Command sent", "run_id": params["run_id"], "req_id": data.get("req_id")}
+        return {"code": 200, "msg": "Command sent", "run_id": params["run_id"], "req_id": req_id}
     else:
-        return {"code": 500, "msg": "Failed to send command", "req_id": data.get("req_id")}
+        return {"code": 500, "msg": "Failed to send command", "req_id": req_id}
 
 
 async def handle_get_workflow_detail(websocket, data: dict):
     flow_id = data.get("flow_id")
+    req_id = get_req_id(data)
 
-    if not flow_id: return {"code": 400, "msg": "Missing flow_id", "req_id": data.get("req_id")}
+    if not flow_id: return {"code": 400, "msg": "Missing flow_id", "req_id": req_id}
 
     session = SessionLocal()
     try:
@@ -165,13 +177,13 @@ async def handle_get_workflow_detail(websocket, data: dict):
     finally:
         session.close()
 
-    return {"code": 500, "msg": "Command sent", "data": run_data}
+    return {"code": 200, "msg": "Success", "data": run_data, "req_id": req_id}
 
 
 async def handle_get_app_graph(websocket, data: dict):
     flow_id = data.get("flow_id")
     # 🔥 修复：回传 req_id
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
 
     if not flow_id: return {"code": 400, "msg": "Missing flow_id", "req_id": req_id}
 
@@ -224,7 +236,7 @@ async def handle_get_app_graph(websocket, data: dict):
 
 async def handle_get_world_model(websocket, data: dict):
     # 🔥 修复：回传 req_id
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     return {
         "code": 200,
         "data": {
@@ -252,7 +264,7 @@ async def handle_get_world_model(websocket, data: dict):
 
 
 async def handle_ask_local_ai(websocket, data: dict):
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     screenshot_b64 = data.get("screenshot")
     if not screenshot_b64: return {"code": 400, "msg": "No screenshot", "req_id": req_id}
 
@@ -265,7 +277,7 @@ async def handle_ask_local_ai(websocket, data: dict):
 
 async def handle_get_component(websocket, data: dict):
     uid = data.get("uid")
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     if not uid: return {"code": 400, "msg": "Missing uid", "req_id": req_id}
 
     session = SessionLocal()
@@ -296,7 +308,7 @@ async def handle_sync_timeline(websocket, data: dict):
     保存任务执行的时间线数据
     客户端需先调用 upload 接口上传图片，将 PIL 对象替换为 URL 后再调用此接口
     """
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     run_id = data.get("run_id")
     timeline = data.get("timeline", {})  # 预期格式: {'timestamp': {'type':..., 'data':...}}
 
@@ -326,7 +338,7 @@ async def handle_sync_timeline(websocket, data: dict):
 
 
 async def handle_get_device_password(websocket, data: dict):
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     sn = data.get("sn")
     if not sn: return {"code": 400, "msg": "Missing SN", "req_id": req_id}
 
@@ -342,7 +354,7 @@ async def handle_get_device_password(websocket, data: dict):
 
 
 async def handle_get_timeline(websocket, data: dict):
-    req_id = data.get("req_id")
+    req_id = get_req_id(data)
     run_id = data.get("run_id")
     SLog.i("wsHandlers", f"handle_get_timeline enter. run_id: {run_id}, req_id: {req_id}")
 

@@ -196,14 +196,16 @@ class FileTransferManager:
         # 2. 发送 Offer 信号
         req_payload = {
             "action": "p2p_signal",
-            "target_sn": target_sn,
-            "content": {
-                "type": "offer",
-                "transfer_id": transfer_id,
-                "filename": filename,
-                "size": file_size,
-                "is_folder": path.is_dir(), # 原始是否为文件夹
-                "save_path": save_path # 目标保存路径(用于自动接收)
+            "data": {
+                "target_sn": target_sn,
+                "content": {
+                    "type": "offer",
+                    "transfer_id": transfer_id,
+                    "filename": filename,
+                    "size": file_size,
+                    "is_folder": path.is_dir(), # 原始是否为文件夹
+                    "save_path": save_path # 目标保存路径(用于自动接收)
+                }
             }
         }
         await self.client.websocket.send(json.dumps(req_payload))
@@ -251,11 +253,13 @@ class FileTransferManager:
             # 发送 Accept 信号 (带 Offset)
             payload = {
                 "action": "p2p_signal",
-                "target_sn": source_sn,
-                "content": {
-                    "type": "accept",
-                    "transfer_id": transfer_id,
-                    "offset": offset
+                "data": {
+                    "target_sn": source_sn,
+                    "content": {
+                        "type": "accept",
+                        "transfer_id": transfer_id,
+                        "offset": offset
+                    }
                 }
             }
             await self.client.websocket.send(json.dumps(payload))
@@ -293,12 +297,14 @@ class FileTransferManager:
                     b64_data = base64.b64encode(chunk).decode('utf-8')
                     payload = {
                         "action": "p2p_signal",
-                        "target_sn": target_sn,
-                        "content": {
-                            "type": "chunk",
-                            "transfer_id": transfer_id,
-                            "index": index,
-                            "data": b64_data
+                        "data": {
+                            "target_sn": target_sn,
+                            "content": {
+                                "type": "chunk",
+                                "transfer_id": transfer_id,
+                                "index": index,
+                                "data": b64_data
+                            }
                         }
                     }
                     # 检查连接状态，避免死循环
@@ -335,8 +341,10 @@ class FileTransferManager:
             # 发送完成信号
             finish_payload = {
                 "action": "p2p_signal",
-                "target_sn": target_sn,
-                "content": {"type": "finish", "transfer_id": transfer_id}
+                "data": {
+                    "target_sn": target_sn,
+                    "content": {"type": "finish", "transfer_id": transfer_id}
+                }
             }
             asyncio.run_coroutine_threadsafe(
                 self.client.websocket.send(json.dumps(finish_payload)), 
@@ -637,9 +645,13 @@ class DeviceClient:
                     await self.websocket.send(json.dumps(payload_sub))
 
                 await asyncio.sleep(5)
+            except websockets.ConnectionClosed:
+                SLog.w(TAG, "Heartbeat connection closed.")
+                break
             except Exception as e:
                 SLog.e(TAG, f"Heartbeat error: {e}")
-                break
+                # 遇到非连接错误(如ADB扫描异常)不要退出循环，而是等待后重试
+                await asyncio.sleep(5)
 
     async def listen_loop(self):
         """监听服务端下发的指令"""
@@ -695,11 +707,8 @@ class DeviceClient:
 
                 if command == "run_task":
                     self.execute_task(params)
-                else:
-                    SLog.w(TAG, f"Unknown command: {command}")
-
                 # --- 新增文件传输指令 ---
-                if command == "send_file":
+                elif command == "send_file":
                     # 服务端/前端控制此设备发送文件
                     target_sn = params.get("target_sn")
                     file_path = params.get("file_path")
@@ -712,6 +721,46 @@ class DeviceClient:
                     save_path = params.get("save_path")
                     await self.file_transfer.accept_transfer(transfer_id, save_path)
 
+                elif command == "list_dir":
+                    # 处理文件列表请求
+                    target_path = params.get("path", "/")
+                    # Windows 盘符处理
+                    if platform.system() == "Windows" and target_path == "/":
+                        # 简单列出盘符 (需要 psutil 或 os.list_drives 在 Py3.12+)
+                        # 这里简化处理，默认 C:/
+                        target_path = "C:/"
+
+                    p = Path(target_path)
+                    files = []
+                    if p.exists() and p.is_dir():
+                        try:
+                            for item in p.iterdir():
+                                try:
+                                    files.append({
+                                        "name": item.name,
+                                        "is_dir": item.is_dir(),
+                                        "size": item.stat().st_size if not item.is_dir() else 0,
+                                        "time": item.stat().st_mtime
+                                    })
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            SLog.e(TAG, f"List dir error: {e}")
+
+                    # 发回结果
+                    resp = {
+                        "action": "dir_list",
+                        "data": {
+                            "path": str(p),
+                            "files": files
+                        }
+                    }
+                    await self.websocket.send(json.dumps(resp))
+
+                else:
+                    SLog.w(TAG, f"Unknown command: {command}")
+
+
             elif msg_type == "p2p_signal":
                 # 处理 P2P 文件传输信号
                 source_sn = data.get("source_sn")
@@ -720,6 +769,10 @@ class DeviceClient:
             else:
                 # 处理查询响应 (非 command 类型的消息)
                 req_id = data.get("req_id")
+                # 兜底：如果最外层没有 req_id，尝试从 data 内部获取
+                if not req_id and isinstance(data.get("data"), dict):
+                    req_id = data.get("data").get("req_id")
+
                 if req_id and self.shared_responses is not None:
                     self.shared_responses[req_id] = data.get("data")
 
