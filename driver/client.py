@@ -11,6 +11,7 @@ import re
 import socket
 import os
 import sys
+from pathlib import Path
 import traceback
 import subprocess
 import multiprocessing
@@ -25,12 +26,13 @@ DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
 
 def get_persistent_device_sn():
     """获取持久化的设备 SN，防止重启后 MAC 漂移导致识别为新设备"""
-    # 将 SN 文件保存在 client.py 同级目录下，确保跨目录运行时也能找到
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    sn_file = os.path.join(base_dir, "device_id.txt")
+    # 将 SN 文件保存在用户主目录下，防止程序更新/重新解压导致文件丢失
+    save_dir = Path.home() / ".miniorange"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    sn_file = save_dir / "device_id.txt"
     
     # 1. 尝试从文件读取
-    if os.path.exists(sn_file):
+    if sn_file.exists():
         try:
             with open(sn_file, "r", encoding="utf-8") as f:
                 content = f.read().strip()
