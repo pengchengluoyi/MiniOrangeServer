@@ -95,6 +95,32 @@ class DeviceManager:
             SLog.e("DeviceManager", f"Send command failed: {e}")
             return False
 
+    async def handle_p2p_signal(self, websocket: WebSocket, data: dict):
+        """
+        处理设备间 P2P 文件传输信令转发
+        data: { "target_sn": "...", "content": { "type": "...", ... } }
+        """
+        target_sn = data.get("target_sn")
+        content = data.get("content")
+
+        if not target_sn or not content:
+            return {"code": 400, "msg": "Invalid P2P parameters"}
+
+        source_sn = self._get_sn_by_ws(websocket)
+        target_ws = self.active_connections.get(target_sn)
+
+        if not target_ws:
+            return {"code": 404, "msg": f"Target device {target_sn} is offline"}
+
+        # 包装信令，注明来源，转发给目标
+        payload = {"type": "p2p_signal", "source_sn": source_sn, "data": content}
+        try:
+            await target_ws.send_text(json.dumps(payload))
+            return {"code": 200, "msg": "Signal forwarded"}
+        except Exception as e:
+            SLog.e("DeviceManager", f"P2P forward error: {e}")
+            return {"code": 500, "msg": f"Forward error: {str(e)}"}
+
     # --- 数据库操作 ---
 
     def _update_device_status(self, sn: str, status: str):

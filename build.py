@@ -125,6 +125,16 @@ full_libs_list = [
     'matplotlib',     # 绘图库
     'pywinauto',      # Windows 自动化
     'apscheduler',    # 定时任务调度 (requirements 中有)
+    'selenium',       # Web 自动化 (requirements 中有)
+    'paddleocr',      # PaddleOCR (requirements 中有)
+    'paddle',         # PaddlePaddle (requirements 中有)
+    'ruamel.yaml',    # YAML 处理
+    'coloredlogs',    # 日志美化
+    'humanfriendly',  # 日志依赖
+    'Crypto',         # pycryptodome 加密
+    'ujson',          # 高性能 JSON
+    'trio',           # 异步 I/O (Selenium 依赖)
+    'trio_websocket', # WebSocket (Selenium 依赖)
 ]
 
 print("--- Collecting comprehensive libraries (Smart Mode) ---")
@@ -168,6 +178,7 @@ hiddenimports += [
     'packaging.requirements',
     'yaml',           # PyYAML (RapidOCR 读取 config.yaml 需要)
     'python-multipart', # FastAPI 处理文件上传必须的隐式依赖 (wsFile.py 用到了上传)
+    'multiprocessing',  # 多进程支持
 ]
 
 # =============================================================================

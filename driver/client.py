@@ -5,6 +5,7 @@
 import asyncio
 import json
 import time
+import base64
 import uuid
 import platform
 import re
@@ -14,6 +15,10 @@ import sys
 from pathlib import Path
 import traceback
 import subprocess
+import pathlib
+import zipfile
+import tempfile
+import shutil
 import multiprocessing
 import websockets
 import builtins # 用于注入全局变量
@@ -140,6 +145,254 @@ def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_r
         current_run_id.reset(token_run)
         current_flow_id.reset(token_flow)
 
+class FileTransferManager:
+    """
+    管理设备间文件传输 (P2P via Server Relay)
+    支持: 断点续传、文件夹自动压缩、自定义保存路径
+    """
+    CHUNK_SIZE = 40 * 1024  # 40KB chunk size (safe for WS frames)
+
+    def __init__(self, client):
+        self.client = client
+        # 接收任务: {transfer_id: {file_handle, save_path, total_size, received_size}}
+        self.incoming_transfers = {}
+        # 发送任务: {transfer_id: {file_path, is_temp_zip}}
+        self.outgoing_transfers = {}
+        # 待处理的接收请求 (等待用户接受): {transfer_id: metadata}
+        self.pending_offers = {}
+
+    async def initiate_transfer(self, target_sn, file_path):
+        """[发送方] 发起文件传输请求 (Offer)"""
+        path = Path(file_path)
+        if not path.exists():
+            SLog.e(TAG, f"File not found: {file_path}")
+            return False
+
+        transfer_id = str(uuid.uuid4())
+        
+        # 1. 如果是文件夹，先压缩
+        is_zip = False
+        send_path = path
+        if path.is_dir():
+            SLog.i(TAG, f"Zipping folder: {path}")
+            temp_zip = Path(tempfile.gettempdir()) / f"{path.name}.zip"
+            await self._zip_folder(path, temp_zip)
+            send_path = temp_zip
+            is_zip = True
+
+        file_size = send_path.stat().st_size
+        filename = send_path.name
+
+        # 记录发送任务
+        self.outgoing_transfers[transfer_id] = {
+            "path": send_path,
+            "is_temp_zip": is_zip,
+            "target_sn": target_sn
+        }
+
+        SLog.i(TAG, f"Offering file {transfer_id} -> {target_sn} ({filename}, {file_size} bytes)")
+
+        # 2. 发送 Offer 信号
+        req_payload = {
+            "action": "p2p_signal",
+            "target_sn": target_sn,
+            "content": {
+                "type": "offer",
+                "transfer_id": transfer_id,
+                "filename": filename,
+                "size": file_size,
+                "is_folder": path.is_dir() # 原始是否为文件夹
+            }
+        }
+        await self.client.websocket.send(json.dumps(req_payload))
+
+    async def accept_transfer(self, transfer_id, save_dir):
+        """[接收方] 用户同意接收文件，指定保存路径"""
+        if transfer_id not in self.pending_offers:
+            SLog.w(TAG, f"Transfer ID {transfer_id} not found or expired.")
+            return
+
+        offer = self.pending_offers.pop(transfer_id)
+        filename = offer['filename']
+        total_size = offer['size']
+        source_sn = offer['source_sn']
+
+        # 构造保存路径
+        save_path = Path(save_dir) / filename
+        part_path = Path(save_dir) / (filename + ".part")
+
+        # 断点续传检查
+        offset = 0
+        if part_path.exists():
+            offset = part_path.stat().st_size
+            # 如果本地文件比远程还大，说明出错了，重新下载
+            if offset > total_size:
+                offset = 0
+                open(part_path, 'wb').close() # 清空
+            elif offset == total_size:
+                SLog.i(TAG, "File already downloaded.")
+                return
+
+        try:
+            # 以追加模式打开
+            f = open(part_path, "ab")
+            self.incoming_transfers[transfer_id] = {
+                "file": f,
+                "path": save_path,
+                "part_path": part_path,
+                "total": total_size,
+                "received": offset
+            }
+
+            SLog.i(TAG, f"Accepting {filename} from {offset} bytes. Saving to {save_path}")
+
+            # 发送 Accept 信号 (带 Offset)
+            payload = {
+                "action": "p2p_signal",
+                "target_sn": source_sn,
+                "content": {
+                    "type": "accept",
+                    "transfer_id": transfer_id,
+                    "offset": offset
+                }
+            }
+            await self.client.websocket.send(json.dumps(payload))
+
+        except Exception as e:
+            SLog.e(TAG, f"Failed to open file for writing: {e}")
+
+    async def _zip_folder(self, folder_path, output_path):
+        """在 Executor 中压缩文件夹，避免阻塞"""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._zip_folder_sync, folder_path, output_path)
+
+    def _zip_folder_sync(self, folder_path, output_path):
+        shutil.make_archive(str(output_path).replace('.zip', ''), 'zip', folder_path)
+
+    def _send_chunks_sync(self, target_sn, transfer_id, path, offset=0):
+        """同步读取文件并发送 Chunk (在 Executor 中运行)"""
+        try:
+            with open(path, "rb") as f:
+                if offset > 0:
+                    f.seek(offset)
+                    SLog.i(TAG, f"Resuming transfer {transfer_id} from offset {offset}")
+                
+                index = int(offset / self.CHUNK_SIZE)
+                while True:
+                    chunk = f.read(self.CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    
+                    b64_data = base64.b64encode(chunk).decode('utf-8')
+                    payload = {
+                        "action": "p2p_signal",
+                        "target_sn": target_sn,
+                        "content": {
+                            "type": "chunk",
+                            "transfer_id": transfer_id,
+                            "index": index,
+                            "data": b64_data
+                        }
+                    }
+                    # 检查连接状态，避免死循环
+                    if not self.client.websocket or self.client.websocket.closed:
+                        raise ConnectionError("WebSocket disconnected during transfer")
+
+                    asyncio.run_coroutine_threadsafe(
+                        self.client.websocket.send(json.dumps(payload)), 
+                        self.client.loop
+                    )
+                    index += 1
+                    time.sleep(0.005) # 简单流控
+
+            # 发送完成信号
+            finish_payload = {
+                "action": "p2p_signal",
+                "target_sn": target_sn,
+                "content": {"type": "finish", "transfer_id": transfer_id}
+            }
+            asyncio.run_coroutine_threadsafe(
+                self.client.websocket.send(json.dumps(finish_payload)), 
+                self.client.loop
+            )
+            SLog.i(TAG, f"Transfer {transfer_id} finished.")
+            
+            # 清理发送端的临时文件
+            if transfer_id in self.outgoing_transfers:
+                task = self.outgoing_transfers[transfer_id]
+                if task["is_temp_zip"] and task["path"].exists():
+                    try:
+                        os.remove(task["path"])
+                        SLog.i(TAG, "Cleaned up temp zip file")
+                    except: pass
+                del self.outgoing_transfers[transfer_id]
+
+        except Exception as e:
+            SLog.e(TAG, f"Error sending file chunks: {e}")
+
+    async def handle_signal(self, source_sn, data):
+        """处理接收到的 P2P 信号"""
+        msg_type = data.get("type")
+        transfer_id = data.get("transfer_id")
+
+        if msg_type == "offer":
+            # [接收方] 收到文件发送请求
+            SLog.i(TAG, f"Received file offer from {source_sn}: {data}")
+            # 暂存请求，等待前端/用户调用 accept_transfer
+            data['source_sn'] = source_sn
+            self.pending_offers[transfer_id] = data
+            # 这里可以通过 Log 通知前端有新文件请求
+            SLog.i(TAG, f"PENDING_OFFER|{transfer_id}|{data['filename']}|{data['size']}")
+
+        elif msg_type == "accept":
+            # [发送方] 收到接收方的确认，开始发送
+            offset = data.get("offset", 0)
+            if transfer_id in self.outgoing_transfers:
+                task = self.outgoing_transfers[transfer_id]
+                SLog.i(TAG, f"Starting transmission for {transfer_id} from offset {offset}")
+                
+                loop = asyncio.get_running_loop()
+                # 启动后台发送线程
+                loop.run_in_executor(
+                    None, 
+                    self._send_chunks_sync, 
+                    source_sn, # 这里的 source_sn 其实是 target (信号来源是接收方)
+                    transfer_id, 
+                    task["path"],
+                    offset
+                )
+
+        elif msg_type == "chunk":
+            # [接收方] 写入数据
+            if transfer_id in self.incoming_transfers:
+                task = self.incoming_transfers[transfer_id]
+                try:
+                    chunk_data = base64.b64decode(data.get("data"))
+                    task["file"].write(chunk_data)
+                    task["received"] += len(chunk_data)
+                except Exception as e:
+                    SLog.e(TAG, f"Write error: {e}")
+
+        elif msg_type == "finish":
+            # [接收方] 完成
+            if transfer_id in self.incoming_transfers:
+                task = self.incoming_transfers.pop(transfer_id)
+                task["file"].close()
+                
+                # 重命名 .part 为正式文件
+                if task["part_path"].exists():
+                    # 如果目标文件已存在，自动重命名
+                    final_path = task["path"]
+                    counter = 1
+                    while final_path.exists():
+                        stem = final_path.stem
+                        suffix = final_path.suffix
+                        final_path = final_path.parent / f"{stem}_{counter}{suffix}"
+                        counter += 1
+                    
+                    task["part_path"].rename(final_path)
+                    SLog.i(TAG, f"File transfer complete: {final_path}")
+
 class DeviceClient:
     def __init__(self, server_url, sn, role="node", shared_responses=None):
         self.server_url = server_url
@@ -160,6 +413,9 @@ class DeviceClient:
             SLog.w(TAG, "Warning: shared_responses is None. IPC queries will fail.")
         self.is_running = False
         self.msg_queue = multiprocessing.Queue() # 进程间通信队列
+        
+        # 初始化文件传输管理器
+        self.file_transfer = FileTransferManager(self)
 
     async def start(self):
         """启动客户端主循环"""
@@ -168,6 +424,7 @@ class DeviceClient:
 
         while self.is_running:
             try:
+                self.loop = asyncio.get_running_loop() # 捕获当前 loop 供线程使用
                 SLog.i(TAG, f"Connecting to {self.server_url}...")
                 async with websockets.connect(self.server_url) as ws:
                     self.websocket = ws
@@ -394,6 +651,24 @@ class DeviceClient:
                     self.execute_task(params)
                 else:
                     SLog.w(TAG, f"Unknown command: {command}")
+
+                # --- 新增文件传输指令 ---
+                if command == "send_file":
+                    # 服务端/前端控制此设备发送文件
+                    target_sn = params.get("target_sn")
+                    file_path = params.get("file_path")
+                    await self.file_transfer.initiate_transfer(target_sn, file_path)
+                
+                elif command == "accept_file":
+                    # 服务端/前端控制此设备接受文件
+                    transfer_id = params.get("transfer_id")
+                    save_path = params.get("save_path")
+                    await self.file_transfer.accept_transfer(transfer_id, save_path)
+
+            elif msg_type == "p2p_signal":
+                # 处理 P2P 文件传输信号
+                source_sn = data.get("source_sn")
+                await self.file_transfer.handle_signal(source_sn, data.get("data"))
 
             else:
                 # 处理查询响应 (非 command 类型的消息)
