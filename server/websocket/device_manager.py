@@ -121,8 +121,33 @@ class DeviceManager:
             SLog.e("DeviceManager", f"P2P forward error: {e}")
             return {"code": 500, "msg": f"Forward error: {str(e)}"}
 
-    # --- 数据库操作 ---
+    async def handle_transfer_progress(self, websocket: WebSocket, data: dict):
+        """
+        处理设备上报的文件传输进度
+        data: { "transfer_id": "...", "progress": 50.0, "speed": ..., "status": "..." }
+        """
+        # 1. 构造广播消息
+        # 前端监听 type="transfer_progress" 即可获取进度
+        payload = {
+            "type": "transfer_progress",
+            "data": data
+        }
+        msg_str = json.dumps(payload)
 
+        # 2. 广播给所有连接 (除了发送者自己)
+        # 这样前端页面 (作为 WebSocket 客户端连接) 就能收到进度更新
+        for sn, ws in list(self.active_connections.items()):
+            if ws != websocket:
+                try:
+                    await ws.send_text(msg_str)
+                except Exception as e:
+                    # 发送失败不应中断广播循环
+                    SLog.w("DeviceManager", f"Broadcast progress failed for {sn}: {e}")
+
+        return {"code": 200, "msg": "ack"}
+
+
+    # --- 数据库操作 ---
     def _update_device_status(self, sn: str, status: str):
         try:
             with SessionLocal() as db:

@@ -162,7 +162,7 @@ class FileTransferManager:
         # 待处理的接收请求 (等待用户接受): {transfer_id: metadata}
         self.pending_offers = {}
 
-    async def initiate_transfer(self, target_sn, file_path):
+    async def initiate_transfer(self, target_sn, file_path, save_path=None):
         """[发送方] 发起文件传输请求 (Offer)"""
         path = Path(file_path)
         if not path.exists():
@@ -202,7 +202,8 @@ class FileTransferManager:
                 "transfer_id": transfer_id,
                 "filename": filename,
                 "size": file_size,
-                "is_folder": path.is_dir() # 原始是否为文件夹
+                "is_folder": path.is_dir(), # 原始是否为文件夹
+                "save_path": save_path # 目标保存路径(用于自动接收)
             }
         }
         await self.client.websocket.send(json.dumps(req_payload))
@@ -273,10 +274,15 @@ class FileTransferManager:
     def _send_chunks_sync(self, target_sn, transfer_id, path, offset=0):
         """同步读取文件并发送 Chunk (在 Executor 中运行)"""
         try:
+            file_size = Path(path).stat().st_size
             with open(path, "rb") as f:
                 if offset > 0:
                     f.seek(offset)
                     SLog.i(TAG, f"Resuming transfer {transfer_id} from offset {offset}")
+                
+                start_time = time.time()
+                last_report_time = 0
+                total_sent = 0
                 
                 index = int(offset / self.CHUNK_SIZE)
                 while True:
@@ -305,6 +311,26 @@ class FileTransferManager:
                     )
                     index += 1
                     time.sleep(0.005) # 简单流控
+                    
+                    # --- Progress Reporting ---
+                    total_sent += len(chunk)
+                    now = time.time()
+                    if now - last_report_time > 1.0: # Report every 1s
+                        duration = now - start_time
+                        speed = total_sent / duration if duration > 0 else 0
+                        progress = ((offset + total_sent) / file_size * 100) if file_size > 0 else 0
+                        
+                        report_payload = {
+                            "action": "transfer_progress",
+                            "data": {
+                                "transfer_id": transfer_id,
+                                "progress": round(progress, 1),
+                                "speed": int(speed), # bytes/s
+                                "status": "transferring"
+                            }
+                        }
+                        asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps(report_payload)), self.client.loop)
+                        last_report_time = now
 
             # 发送完成信号
             finish_payload = {
@@ -317,6 +343,17 @@ class FileTransferManager:
                 self.client.loop
             )
             SLog.i(TAG, f"Transfer {transfer_id} finished.")
+            
+            # Report 100%
+            asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps({
+                "action": "transfer_progress",
+                "data": {
+                    "transfer_id": transfer_id,
+                    "progress": 100,
+                    "speed": 0,
+                    "status": "completed"
+                }
+            })), self.client.loop)
             
             # 清理发送端的临时文件
             if transfer_id in self.outgoing_transfers:
@@ -341,9 +378,17 @@ class FileTransferManager:
             SLog.i(TAG, f"Received file offer from {source_sn}: {data}")
             # 暂存请求，等待前端/用户调用 accept_transfer
             data['source_sn'] = source_sn
-            self.pending_offers[transfer_id] = data
-            # 这里可以通过 Log 通知前端有新文件请求
-            SLog.i(TAG, f"PENDING_OFFER|{transfer_id}|{data['filename']}|{data['size']}")
+            
+            # Check for auto-accept
+            save_path = data.get("save_path")
+            if save_path:
+                SLog.i(TAG, f"Auto-accepting transfer {transfer_id} to {save_path}")
+                self.pending_offers[transfer_id] = data
+                await self.accept_transfer(transfer_id, save_path)
+            else:
+                self.pending_offers[transfer_id] = data
+                # 这里可以通过 Log 通知前端有新文件请求
+                SLog.i(TAG, f"PENDING_OFFER|{transfer_id}|{data['filename']}|{data['size']}")
 
         elif msg_type == "accept":
             # [发送方] 收到接收方的确认，开始发送
@@ -658,7 +703,8 @@ class DeviceClient:
                     # 服务端/前端控制此设备发送文件
                     target_sn = params.get("target_sn")
                     file_path = params.get("file_path")
-                    await self.file_transfer.initiate_transfer(target_sn, file_path)
+                    save_path = params.get("save_path")
+                    await self.file_transfer.initiate_transfer(target_sn, file_path, save_path)
                 
                 elif command == "accept_file":
                     # 服务端/前端控制此设备接受文件
