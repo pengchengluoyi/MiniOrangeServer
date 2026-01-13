@@ -109,6 +109,22 @@ full_libs_list = [
     'qwen_vl_utils',  # Qwen VL 工具
     'onnxruntime',    # ONNX 推理
     'torchvision',    # (可选) 如果用到图像处理通常都需要
+    'pyclipper',      # RapidOCR 依赖 (必须显式收集，因为是动态引用的 C 扩展)
+    'shapely',        # RapidOCR 依赖 (几何计算库)
+    'fastapi',        # Web 服务端核心 (必须显式收集)
+    'uvicorn',        # ASGI 服务器
+    'sqlalchemy',     # 数据库 ORM
+    'starlette',      # FastAPI 依赖
+    'pydantic',       # 数据验证
+    'tiktoken',       # 大模型 Tokenizer (Qwen/OpenAI 依赖)
+    'sentencepiece',  # 大模型 Tokenizer (Llama/HF 依赖)
+    'ultralytics',    # YOLO 视觉模型 (包含大量配置和数据文件，必须收集)
+    'adbutils',       # ADB 通信库 (纯 Python 实现的 ADB 协议)
+    'pandas',         # 数据分析 (包含大量 C 扩展)
+    'scipy',          # 科学计算
+    'matplotlib',     # 绘图库
+    'pywinauto',      # Windows 自动化
+    'apscheduler',    # 定时任务调度 (requirements 中有)
 ]
 
 print("--- Collecting comprehensive libraries (Smart Mode) ---")
@@ -150,6 +166,8 @@ hiddenimports += [
     'packaging.version',
     'packaging.specifiers',
     'packaging.requirements',
+    'yaml',           # PyYAML (RapidOCR 读取 config.yaml 需要)
+    'python-multipart', # FastAPI 处理文件上传必须的隐式依赖 (wsFile.py 用到了上传)
 ]
 
 # =============================================================================
