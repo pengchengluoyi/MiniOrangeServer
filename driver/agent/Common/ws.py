@@ -13,3 +13,7 @@ class WS:
     @staticmethod
     def fetch_world_model():
         return ServerBridge.query("get_world_model")
+
+    @staticmethod
+    def get_device_password(sn):
+        return ServerBridge.query("get_device_password", {"sn": sn})

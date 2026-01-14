@@ -25,19 +25,16 @@ class Executer:
 
     def dispatch(self):
         self.taskResult.dispatched()
-        self.task.execute()
+        return self.task.execute()
 
     def self_check(self):
         self.taskResult.self_check()
+        return True
 
     def completed(self):
         self.taskResult.success()
         self.task = None
+        return True
 
     def offline(self):
         self.center.offline()
-
-
-
-
-

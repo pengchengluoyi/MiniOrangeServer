@@ -71,19 +71,7 @@ class Input(Template):
         self.get_engine()
         text = self.get_param_value("text")
         clear = self.get_param_value("clear")
-        interaction_id = self.get_param_value("interaction_id")
-        anchor_id = self.get_param_value("anchor_interaction_id")
 
-        current_img = self.engine.screenshot()
-
-        # 🔥 视觉定位：不管它是文字还是图标
-        final_pos = PositionManager.find_visual_target(interaction_id, anchor_id, None, current_img)
-
-        if final_pos:
-            self.engine.click(None, position=final_pos)  # 先聚焦
-            if clear: self.engine.clear(None)
-            self.engine.send_keys(None, str(text))
-            self.result.success()
-            return self.result
-        self.result.fail()
+        self.engine.send_keys(None, str(text))
+        self.result.success()
         return self.result

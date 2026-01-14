@@ -115,3 +115,25 @@ def visualize(image_path, results):
     ext = os.path.splitext(write_path)[1]
     cv2.imencode(ext, img)[1].tofile(write_path)
     return write_path
+
+
+def check_anchors(img, anchors):
+    """
+    静态锚点提取与校验
+    """
+    if not anchors:
+        return 1.0
+
+    results = analyze(None, img=img)
+    if not results:
+        return 0.0
+
+    matched_count = 0
+    for anchor in anchors:
+        target_text = anchor.get('value') or anchor.get('label')
+        if not target_text: continue
+        for item in results:
+            if target_text in item['text']:
+                matched_count += 1
+                break
+    return matched_count / len(anchors)

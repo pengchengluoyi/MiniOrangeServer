@@ -118,5 +118,20 @@ class MAdbEngine(BaseEngine):
             SLog.i(TAG, f"执行滑动: {source} -> {target}")
             self.shell(f"input swipe {source[0]} {source[1]} {target[0]} {target[1]} 500")
 
+    def keyevent(self, event):
+        if event:
+            # 如果event是数字（整数或字符串数字）
+            if isinstance(event, int):
+                key_value = str(event)
+            elif event.isdigit():
+                key_value = event  # 已经是数字字符串
+            else:
+                # 如果是字符串，转换为大写
+                key_value = event.upper()
+
+            self.shell(f"input keyevent {key_value}")
+
+
+
     def close_window(self, target):
         self.stop_app(target)

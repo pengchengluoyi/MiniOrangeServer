@@ -1,7 +1,7 @@
 # memory/long_term.py
 import threading
 from driver.agent.Common.ws import WS
-from script.log import SLog
+from script.log import SLog, current_flow_id
 
 
 class LongTermMemory:
@@ -10,8 +10,9 @@ class LongTermMemory:
         self.app_graph = {}  # 任务流程图
         self.is_loaded = False
 
-    def load_async(self, flow_id=None):
+    def load_async(self):
         """启动后台线程加载数据"""
+        flow_id = current_flow_id.get()
         t = threading.Thread(target=self._fetch_bg, args=(flow_id,))
         t.daemon = True
         t.start()
@@ -25,9 +26,7 @@ class LongTermMemory:
 
             # 加载应用图谱
             if flow_id:
-                ag = WS.fetch_app_graph(flow_id)
-                if ag:
-                    self.app_graph = ag.get("data", {})
+                self.app_graph = WS.fetch_app_graph(flow_id)
 
             self.is_loaded = True
             SLog.i("Memory", "✅ 长期记忆(配置/图谱) 加载完毕")

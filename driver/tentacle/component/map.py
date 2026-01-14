@@ -99,6 +99,12 @@ MAP = {
                 "icon": "target",
                 "address": "tools/dump_dom",
             },
+            "keyevent": {
+                "type": 200,
+                "name": "快捷键",
+                "icon": "target",
+                "address": "tools/keyevent",
+            },
             "vision": {
                 "type": 200,
                 "name": "视觉识别",

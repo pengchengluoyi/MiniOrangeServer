@@ -1,5 +1,10 @@
 # memory/short_term.py
 import time
+import threading
+
+import builtins # 用于注入全局变量
+from driver.agent.Common.ws import WS
+from script.log import SLog
 
 _MS_MULTIPLIER = 1000
 
@@ -13,6 +18,21 @@ class ShortTermMemory:
 
         # 3.时间线记忆
         self.timeline_scope = {}
+
+    def load_async(self):
+        t = threading.Thread(target=self._fetch_bg)
+        t.daemon = True
+        t.start()
+
+    def _fetch_bg(self):
+        try:
+            TARGET_DEVICE_SN = getattr(builtins, "TARGET_DEVICE_SN", None)
+            pd = WS.get_device_password(TARGET_DEVICE_SN)
+            if pd:
+                self.set_global(f"{TARGET_DEVICE_SN}_password", pd.get("password", None))
+            SLog.i("Memory", f"✅ 加载解锁密码成功 {pd}")
+        except Exception as e:
+            SLog.w("Memory", f"❌ 解锁密码加载失败: {e}")
 
     @staticmethod
     def _current_ms_timestamp() -> int:

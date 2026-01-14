@@ -5,7 +5,6 @@
 from driver.tentacle.component.template import Template
 from driver.tentacle.component.router import BaseRouter
 from script.log import SLog
-from driver.agent.Memory import memory_manager
 TAG = "GESTURE"
 
 
@@ -73,8 +72,6 @@ class Gesture(Template):
             sub_type = self.get_param_value("sub_type")
             mPosition = self.get_param_value("position")
             SLog.i(TAG, f" 点击 @ {str(mPosition)}")
-
-            memory_manager.short_term.set_timeline_scope(sub_type, mPosition)
             self.result.success()
             return self._do_action(sub_type, mPosition)
         except Exception as e:

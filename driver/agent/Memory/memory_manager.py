@@ -22,10 +22,11 @@ class MemoryManager(metaclass=SingletonMeta):
         self._lock = threading.RLock()
         self.initialized = True
 
-    def initialize(self, flow_id=None):
+    def initialize(self):
         """初始化加载"""
         self.short_term.clear()
-        # self.long_term.load_async(flow_id)
+        self.short_term.load_async()
+        self.long_term.load_async()
 
     # ================= 存数据接口 =================
 
