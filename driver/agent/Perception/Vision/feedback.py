@@ -37,7 +37,7 @@ class Feedback:
         # 4. Weighted Decision (Layout 60% + Anchors 40%)
         final_score = (0.6 * layout_score) + (0.4 * anchor_score)
         
-        is_match = final_score >= 0.7
+        is_match = final_score >= 0.8
         status_icon = "✅" if is_match else "❌"
         SLog.i("Feedback", f"{status_icon} Verification Result: {final_score:.2f} (Layout: {layout_score:.2f}, Anchors: {anchor_score:.2f})")
         

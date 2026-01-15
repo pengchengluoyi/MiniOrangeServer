@@ -51,8 +51,7 @@ class Orchestrator:
                     # 增加重试次数：应用启动可能较慢，给予更多等待时间 (10次 * 1秒 = 10秒)
                     for i in range(10):
                         img = employee.tool.vision()
-                        # 降低阈值：0.8 -> 0.7，提高对渲染差异的容忍度
-                        found_pos = ImageVision.get_template_match(interaction_id, img, threshold=0.7)
+                        found_pos = ImageVision.get_template_match(interaction_id, img, threshold=0.8)
                         if isinstance(found_pos, bool):
                             sop = DeviceDoctor.unlock_sop()
                             for step_info in sop:

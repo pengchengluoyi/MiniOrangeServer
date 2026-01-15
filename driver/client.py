@@ -22,6 +22,7 @@ import shutil
 import psutil
 import multiprocessing
 import websockets
+import concurrent.futures
 import builtins # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
 from driver.agent.Core.orchestrator import Orchestrator
@@ -151,7 +152,7 @@ class FileTransferManager:
     管理设备间文件传输 (P2P via Server Relay)
     支持: 断点续传、文件夹自动压缩、自定义保存路径
     """
-    CHUNK_SIZE = 40 * 1024  # 40KB chunk size (safe for WS frames)
+    CHUNK_SIZE = 512 * 1024  # 512KB chunk size (Base64后约684KB，适配默认1MB限制)
 
     def __init__(self, client):
         self.client = client
@@ -161,6 +162,9 @@ class FileTransferManager:
         self.outgoing_transfers = {}
         # 待处理的接收请求 (等待用户接受): {transfer_id: metadata}
         self.pending_offers = {}
+        # [新增] 异步写入队列，解耦网络接收与磁盘IO
+        self.write_queue = asyncio.Queue()
+        self._worker_running = False
 
     async def initiate_transfer(self, target_sn, file_path, save_path=None):
         """[发送方] 发起文件传输请求 (Offer)"""
@@ -225,6 +229,15 @@ class FileTransferManager:
         save_path = Path(save_dir) / filename
         part_path = Path(save_dir) / (filename + ".part")
 
+        # [修复] 检查是否有针对同一文件的旧传输任务未清理，导致文件占用
+        for tid, task in list(self.incoming_transfers.items()):
+            if task["part_path"] == part_path:
+                SLog.w(TAG, f"Found stale transfer {tid} for {filename}, cleaning up...")
+                try:
+                    task["file"].close()
+                except: pass
+                del self.incoming_transfers[tid]
+
         # 断点续传检查
         offset = 0
         if part_path.exists():
@@ -267,6 +280,69 @@ class FileTransferManager:
         except Exception as e:
             SLog.e(TAG, f"Failed to open file for writing: {e}")
 
+    def start(self):
+        """启动后台写入消费者"""
+        if not self._worker_running:
+            self._worker_running = True
+            asyncio.create_task(self._write_worker())
+
+    async def _write_worker(self):
+        """后台消费者：从队列取数据，在线程池中解码写入"""
+        while True:
+            try:
+                task = await self.write_queue.get()
+                msg_type, transfer_id, data = task
+                
+                if msg_type == "chunk":
+                    # 将耗时的解码和写入放入线程池，释放 EventLoop 接收网络包
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self._write_chunk_sync, transfer_id, data)
+                elif msg_type == "finish":
+                    await self._finish_transfer(transfer_id)
+                
+                self.write_queue.task_done()
+            except Exception as e:
+                SLog.e(TAG, f"Write worker error: {e}")
+
+    def _write_chunk_sync(self, transfer_id, b64_data):
+        """同步写入逻辑 (运行在 Executor 线程中)"""
+        if transfer_id in self.incoming_transfers:
+            task = self.incoming_transfers[transfer_id]
+            try:
+                chunk_data = base64.b64decode(b64_data)
+                task["file"].write(chunk_data)
+                task["received"] += len(chunk_data)
+            except Exception as e:
+                SLog.e(TAG, f"Write error: {e}")
+
+    async def _finish_transfer(self, transfer_id):
+        """处理传输完成逻辑"""
+        if transfer_id in self.incoming_transfers:
+            task = self.incoming_transfers.pop(transfer_id)
+            try:
+                task["file"].close()
+            except: pass
+            
+            # 重命名 .part 为正式文件
+            if task["part_path"].exists():
+                final_path = task["path"]
+                counter = 1
+                while final_path.exists():
+                    stem = final_path.stem
+                    suffix = final_path.suffix
+                    final_path = final_path.parent / f"{stem}_{counter}{suffix}"
+                    counter += 1
+                
+                # 重试机制解决 Windows 文件占用
+                for i in range(5):
+                    try:
+                        task["part_path"].rename(final_path)
+                        SLog.i(TAG, f"File transfer complete: {final_path}")
+                        break
+                    except OSError:
+                        if i == 4: SLog.e(TAG, f"Failed to rename {task['part_path']} (Locked?)")
+                        await asyncio.sleep(0.5)
+
     async def _zip_folder(self, folder_path, output_path):
         """在 Executor 中压缩文件夹，避免阻塞"""
         loop = asyncio.get_running_loop()
@@ -288,6 +364,9 @@ class FileTransferManager:
                 last_report_time = 0
                 total_sent = 0
                 
+                pending_futures = set() # 存储正在发送的 Future
+                MAX_PENDING = 8 # 允许并发 8 个分片 (8 * 512KB = 4MB 缓冲区)，跑满带宽的关键
+                
                 index = int(offset / self.CHUNK_SIZE)
                 while True:
                     chunk = f.read(self.CHUNK_SIZE)
@@ -308,15 +387,30 @@ class FileTransferManager:
                         }
                     }
                     # 检查连接状态，避免死循环
-                    if not self.client.websocket or self.client.websocket.closed:
+                    if not self.client.websocket:
                         raise ConnectionError("WebSocket disconnected during transfer")
 
-                    asyncio.run_coroutine_threadsafe(
+                    future = asyncio.run_coroutine_threadsafe(
                         self.client.websocket.send(json.dumps(payload)), 
                         self.client.loop
                     )
+                    
+                    # [修复] 流水线发送：不立即等待，而是放入集合
+                    pending_futures.add(future)
+                    
+                    # 清理已完成的任务
+                    done_futures = {f for f in pending_futures if f.done()}
+                    pending_futures -= done_futures
+                    for f in done_futures: f.result() # 检查异常
+
+                    # 只有当积压过多时才等待，保证管道始终有数据在跑
+                    if len(pending_futures) >= MAX_PENDING:
+                        done, pending_futures = concurrent.futures.wait(
+                            pending_futures, 
+                            return_when=concurrent.futures.FIRST_COMPLETED
+                        )
+
                     index += 1
-                    time.sleep(0.005) # 简单流控
                     
                     # --- Progress Reporting ---
                     total_sent += len(chunk)
@@ -337,6 +431,10 @@ class FileTransferManager:
                         }
                         asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps(report_payload)), self.client.loop)
                         last_report_time = now
+
+            # 等待剩余分片发送完毕
+            if pending_futures:
+                concurrent.futures.wait(pending_futures)
 
             # 发送完成信号
             finish_payload = {
@@ -417,35 +515,12 @@ class FileTransferManager:
                 )
 
         elif msg_type == "chunk":
-            # [接收方] 写入数据
-            if transfer_id in self.incoming_transfers:
-                task = self.incoming_transfers[transfer_id]
-                try:
-                    chunk_data = base64.b64decode(data.get("data"))
-                    task["file"].write(chunk_data)
-                    task["received"] += len(chunk_data)
-                except Exception as e:
-                    SLog.e(TAG, f"Write error: {e}")
+            # [接收方] 写入数据 -> 放入队列，立即返回
+            await self.write_queue.put(("chunk", transfer_id, data.get("data")))
 
         elif msg_type == "finish":
-            # [接收方] 完成
-            if transfer_id in self.incoming_transfers:
-                task = self.incoming_transfers.pop(transfer_id)
-                task["file"].close()
-                
-                # 重命名 .part 为正式文件
-                if task["part_path"].exists():
-                    # 如果目标文件已存在，自动重命名
-                    final_path = task["path"]
-                    counter = 1
-                    while final_path.exists():
-                        stem = final_path.stem
-                        suffix = final_path.suffix
-                        final_path = final_path.parent / f"{stem}_{counter}{suffix}"
-                        counter += 1
-                    
-                    task["part_path"].rename(final_path)
-                    SLog.i(TAG, f"File transfer complete: {final_path}")
+            # [接收方] 完成 -> 放入队列
+            await self.write_queue.put(("finish", transfer_id, None))
 
 class DeviceClient:
     def __init__(self, server_url, sn, role="node", shared_responses=None):
@@ -486,12 +561,24 @@ class DeviceClient:
 
                     # 1. 发送注册包
                     if await self.register():
+                        # [新增] 启动文件传输后台消费者
+                        self.file_transfer.start()
+
                         # 2. 注册成功后，并发运行 心跳任务 和 消息监听任务
-                        await asyncio.gather(
-                            self.heartbeat_loop(),
-                            self.listen_loop(),
-                            self.queue_consumer_loop() # 新增队列消费循环
-                        )
+                        tasks = [
+                            asyncio.create_task(self.heartbeat_loop()),
+                            asyncio.create_task(self.listen_loop()),
+                            asyncio.create_task(self.queue_consumer_loop())
+                        ]
+                        # 只要有一个任务退出（如连接断开），就终止所有任务并重连
+                        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        
+                        # 确保所有任务都已清理
+                        await asyncio.gather(*tasks, return_exceptions=True)
             except (websockets.ConnectionClosed, ConnectionRefusedError, OSError) as e:
                 SLog.w(TAG, f"Connection lost or failed: {e}. Retrying in 5s...")
                 await asyncio.sleep(5)

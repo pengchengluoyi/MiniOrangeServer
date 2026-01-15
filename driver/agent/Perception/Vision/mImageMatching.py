@@ -15,14 +15,14 @@ class ImageVision:
     TAG = "ImageVision"
 
     @staticmethod
-    def get_template_match(interaction_id, current_screenshot_np, threshold=0.8):
+    def get_template_match(interaction_id, current_screenshot_np, threshold=0.85):
         query_func = getattr(builtins, "SERVER_QUERY", None)
         if not query_func:
             SLog.e(ImageVision.TAG, "SERVER_QUERY not available")
             return None
 
         comp_data = query_func("get_component", {"uid": interaction_id})
-        
+
         if not comp_data or not comp_data.get("screenshot_b64"):
             SLog.e(ImageVision.TAG, f"未找到热区或原始截图数据: {interaction_id}")
             return None
@@ -34,14 +34,14 @@ class ImageVision:
         except Exception as e:
             SLog.e(ImageVision.TAG, f"Base64 decode failed: {e}")
             return None
-        
+
         if orig_img is None:
             return None
 
         # 3. 实时裁剪模板
         x, y, w, h = int(comp_data["x"]), int(comp_data["y"]), int(comp_data["width"]), int(comp_data["height"])
         template = orig_img[y:y + h, x:x + w]
-        
+
         # 4. 智能搜索策略
         return ImageVision._smart_search(current_screenshot_np, template, (x, y, w, h), threshold)
 
@@ -59,7 +59,7 @@ class ImageVision:
             target_img = np.array(target_img)
             if len(target_img.shape) == 3:
                 target_img = cv2.cvtColor(target_img, cv2.COLOR_RGB2BGR)
-        
+
         if not isinstance(template, np.ndarray):
             template = np.array(template)
 
@@ -74,13 +74,13 @@ class ImageVision:
         # 在预期位置周围扩大范围搜索，排除全图干扰
         h_img, w_img = target_img.shape[:2]
         ex, ey, ew, eh = expected_rect
-        
-        margin = max(ew, eh, 200) # 扩大范围，增加容错
+
+        margin = max(ew, eh, 200)  # 扩大范围，增加容错
         x1 = max(0, ex - margin)
         y1 = max(0, ey - margin)
         x2 = min(w_img, ex + ew + margin)
         y2 = min(h_img, ey + eh + margin)
-        
+
         # 只有当 ROI 显著小于全图时才尝试，否则没意义
         if (x2 - x1) * (y2 - y1) < (w_img * h_img * 0.7):
             SLog.d(ImageVision.TAG, f"🔍 启用焦点搜索 ROI: ({x1},{y1}) -> ({x2},{y2})")
@@ -92,18 +92,17 @@ class ImageVision:
         # --- 策略 3: 滑动窗口搜索 (Sliding Window Search) ---
         # 替代原有的固定网格，使用滑动窗口覆盖全图，解决边界截断问题
         SLog.d(ImageVision.TAG, "⚠️ 全局及焦点搜索失败，启用滑动窗口搜索...")
-        
+
         h_tpl, w_tpl = template.shape[:2]
-        
+
         # 窗口大小：取屏幕的一半，或者模板的1.5倍，确保足够大能包含模板且有上下文
         win_w = max(int(w_img / 2), int(w_tpl * 1.5))
         win_h = max(int(h_img / 2), int(h_tpl * 1.5))
-        
+
         # 步长：窗口的一半 (50% 重叠)
         stride_x = max(1, int(win_w * 0.5))
         stride_y = max(1, int(win_h * 0.5))
 
-        best_sliding_res = None
         for y in range(0, h_img, stride_y):
             for x in range(0, w_img, stride_x):
                 # 计算当前窗口坐标 (处理边界：如果超出则向左/上回退，保持窗口大小)
@@ -111,42 +110,17 @@ class ImageVision:
                 y_end = min(y + win_h, h_img)
                 x_start = max(0, x_end - win_w)
                 y_start = max(0, y_end - win_h)
-                
+
                 sub_img = target_img[y_start:y_end, x_start:x_end]
                 # 滑动窗口时，稍微降低一点阈值，收集最佳候选
-                res = ImageVision._do_robust_match(sub_img, template, threshold, return_best=True)
-                
+                res = ImageVision._do_robust_match(sub_img, template, threshold, return_best=False)
+
                 if res:
-                    # res 可能是 (cx, cy) 或者 {"max_val": ...}
-                    if isinstance(res, tuple):
-                        SLog.i(ImageVision.TAG, f"✅ 滑动窗口搜索命中: Rect({x_start},{y_start},{x_end},{y_end})")
-                        return (res[0] + x_start, res[1] + y_start)
-                    elif isinstance(res, dict):
-                        # 记录滑动过程中的最高分
-                        if best_sliding_res is None or res["max_val"] > best_sliding_res["max_val"]:
-                            best_sliding_res = res
-                            best_sliding_res["offset"] = (x_start, y_start)
-                
+                    SLog.i(ImageVision.TAG, f"✅ 滑动窗口搜索命中: Rect({x_start},{y_start},{x_end},{y_end})")
+                    return (res[0] + x_start, res[1] + y_start)
+
                 if x_end == w_img: break
             if y_end == h_img: break
-
-        # --- 策略 4: 特征点匹配 (Feature Matching) ---
-        # 当模板匹配因光照、微小形变或背景干扰失败时，尝试特征点匹配
-        # 优先于"相对最佳"的模板匹配结果，因为特征匹配更抗干扰
-        feature_res = ImageVision._feature_match(target_img, template)
-        if feature_res:
-            return feature_res
-
-        # --- 策略 5: 兜底采纳 (Last Resort) ---
-        # 如果特征匹配也失败了，但滑动窗口有一个还不错的候选 (e.g. > 0.55)，则勉强采纳
-        if best_sliding_res and best_sliding_res["max_val"] > 0.55:
-             SLog.w(ImageVision.TAG, f"⚠️ 采纳相对最佳匹配: val={best_sliding_res['max_val']:.2f} (阈值 {threshold})")
-             ox, oy = best_sliding_res["offset"]
-             h, w = best_sliding_res["shape"][:2]
-             cx = best_sliding_res["max_loc"][0] + int(w / 2) + ox
-             cy = best_sliding_res["max_loc"][1] + int(h / 2) + oy
-             SLog.d(ImageVision.TAG, f"📍 Calculated Coords: ({cx}, {cy}) [Offset: {ox},{oy}]")
-             return (cx, cy)
 
         return None
 
@@ -167,16 +141,17 @@ class ImageVision:
         template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
         best_match = {"max_val": -1, "max_loc": None, "scale": 1.0, "shape": template_gray.shape}
-        
+
         # 扩大缩放搜索范围，应对不同分辨率和缩放比例
-        scales = [0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5] # 扩大范围
-        
+        # 优化: 移除 0.5/0.75/1.5 等极端缩放，减少误匹配 (False Positives)
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
+
         for scale in scales:
             if scale == 1.0:
                 resized_tpl = template_gray
             else:
                 resized_tpl = cv2.resize(template_gray, None, fx=scale, fy=scale)
-            
+
             if resized_tpl.shape[0] > target_gray.shape[0] or resized_tpl.shape[1] > target_gray.shape[1]:
                 continue
 
@@ -193,11 +168,11 @@ class ImageVision:
             h, w = best_match["shape"][:2]
             cx = best_match["max_loc"][0] + int(w / 2)
             cy = best_match["max_loc"][1] + int(h / 2)
-            SLog.i(ImageVision.TAG, f"Match found: val={best_match['max_val']:.2f}, scale={best_match['scale']}")
+            SLog.i(ImageVision.TAG, f"Match found: val={best_match['max_val']:.2f} (Threshold: {threshold}), scale={best_match['scale']}")
             return (cx, cy)
-            
+
         SLog.w(ImageVision.TAG, f"图像匹配失败，最高相似度仅为: {best_match['max_val']:.2f} (阈值: {threshold})")
-        
+
         if return_best:
             return best_match
         return None
@@ -240,7 +215,7 @@ class ImageVision:
                     h, w = template.shape[:2]
                     pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
                     dst = cv2.perspectiveTransform(pts, M)
-                    
+
                     # 计算中心点
                     M_moments = cv2.moments(dst)
                     if M_moments['m00'] != 0:
@@ -250,7 +225,7 @@ class ImageVision:
                         return (cx, cy)
         except Exception as e:
             SLog.w(ImageVision.TAG, f"特征匹配异常: {e}")
-        
+
         return None
 
     @staticmethod
