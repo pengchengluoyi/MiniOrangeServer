@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from server.core.database import get_db, APP_DATA_DIR
 # 请确保你的模型路径正确
-from server.models.AppGraph.app_structure import AppGraph, AppNode, AppEdge
+from server.models.AppGraph.app_structure import AppGraph, AppNode, AppEdge, AppSOP
 from server.models.AppGraph.app_component import AppComponent
 from server.models.AppGraph.app_types import NodeType
 
@@ -40,11 +40,11 @@ class NodeSaveDetail(BaseModel):
     type: str = NodeType.PAGE
     parent_node_id: Optional[str] = None
     label: str = "新节点"
-    workflow_id: Optional[str] = None
     screenshot: Optional[str] = None
     # 允许 dom_tree 为 None
     dom_tree: Optional[Any] = None
     components: List[ComponentItem] = []
+    is_blocking: bool = False # 🔥 新增
 
 
 class GraphLayoutSave(BaseModel):
@@ -57,7 +57,32 @@ class AppGraphCreate(BaseModel):
     name: str
     desc: Optional[str] = None
     app_id: str
+    variables: Optional[Dict] = {}
 
+class SOPCreate(BaseModel):
+    graph_id: int
+    name: str
+    type: str = "business"
+    desc: Optional[str] = None
+    priority: int = 0
+    variables: Optional[Dict] = {}
+    node_ids: List[str] = []  # 关联的节点 VueFlow ID 列表
+    logic_rules: Optional[Dict] = {} # 🔥 新增：触发规则 (诊断书)
+    workflows: Optional[List[str]] = None
+
+class SOPUpdate(BaseModel):
+    sop_id: int
+    name: Optional[str] = None
+    type: Optional[str] = None
+    desc: Optional[str] = None
+    priority: Optional[int] = None
+    variables: Optional[Dict] = None
+    node_ids: Optional[List[str]] = None
+    logic_rules: Optional[Dict] = None # 🔥 新增
+    workflows: Optional[List[str]] = None
+
+class SOPDelete(BaseModel):
+    sop_id: int
 
 # --- Routes ---
 
@@ -75,7 +100,8 @@ def create_app(item: AppGraphCreate, db: Session = Depends(get_db)):
     app = AppGraph(
         name=item.name,
         desc=item.desc,
-        app_id=item.app_id
+        app_id=item.app_id,
+        variables=item.variables
     )
     db.add(app)
     db.commit()
@@ -87,6 +113,7 @@ def create_app(item: AppGraphCreate, db: Session = Depends(get_db)):
 def get_graph_detail(graph_id: int, db: Session = Depends(get_db)):
     db_nodes = db.query(AppNode).filter(AppNode.graph_id == graph_id).all()
     db_comps = db.query(AppComponent).filter(AppComponent.graph_id == graph_id).all()
+    db_sops = db.query(AppSOP).filter(AppSOP.graph_id == graph_id).all()
 
     comp_map = {}
     for c in db_comps:
@@ -111,7 +138,6 @@ def get_graph_detail(graph_id: int, db: Session = Depends(get_db)):
             "position": {"x": n.x, "y": n.y},
             "data": {
                 "label": n.label,
-                "workflow_id": n.workflow_id,
                 "screenshot": n.screenshot,
                 "domTree": json.loads(n.dom_tree) if n.dom_tree else None,
                 "interactions": comp_map.get(n.id, [])
@@ -128,7 +154,23 @@ def get_graph_detail(graph_id: int, db: Session = Depends(get_db)):
             "data": {"trigger": e.trigger}
         })
 
-    return {"code": 200, "data": {"nodes": nodes_data, "edges": edges_data}}
+    sops_data = []
+    for s in db_sops:
+        sops_data.append({
+            "id": s.id,
+            "name": s.name,
+            "type": s.type,
+            "desc": s.desc,
+            "priority": s.priority,
+            "variables": s.variables,
+            "nodes": [n.node_id for n in s.nodes],
+            # 🔥 返回核心诊断信息
+            "logic_rules": s.logic_rules,
+            # 🔥 返回该 SOP 下可用的方案 (Workflows)
+            "workflows": [{"id": w.id, "name": w.name} for w in s.workflows]
+        })
+
+    return {"code": 200, "data": {"nodes": nodes_data, "edges": edges_data, "sops": sops_data}}
 
 
 # 🔥 核心修复：增加 Try/Except 捕获，防止 500 崩溃
@@ -149,7 +191,6 @@ def save_node_detail(item: NodeSaveDetail, db: Session = Depends(get_db)):
 
         # 2. 更新属性
         node.label = item.label
-        node.workflow_id = item.workflow_id
         node.screenshot = item.screenshot
 
         # 处理 dom_tree

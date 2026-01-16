@@ -1,5 +1,6 @@
 import json
 import time
+import struct
 import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from script.log import SLog
@@ -11,6 +12,29 @@ router = APIRouter()
 
 TAG = "rWebSocket"
 
+async def _handle_binary_forward(data: bytes):
+    """
+    处理二进制帧转发
+    协议: Magic(1)|Type(1)|SN_Len(1)|Target_SN|...
+    """
+    try:
+        if len(data) < 4: return
+        
+        # 1. 解析包头，提取 Target SN
+        magic, _, sn_len = struct.unpack_from('!BBB', data, 0)
+        if magic != 0xAA: return
+        
+        target_sn = data[3 : 3 + sn_len].decode('utf-8')
+        
+        # 2. 查找目标设备连接 (假设 DeviceManager 提供了 get_device_ws 方法)
+        # 注意：你需要确保 DeviceManager 中有类似 get_device_ws(sn) 的方法能返回 WebSocket 对象
+        target_ws = DeviceManager().get_device_ws(target_sn)
+        
+        if target_ws:
+            await target_ws.send_bytes(data)
+            
+    except Exception as e:
+        SLog.e(TAG, f"Binary forward error: {e}")
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -72,17 +96,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            text_data = await websocket.receive_text()
-            try:
-                payload = json.loads(text_data)
-            except json.JSONDecodeError:
-                async with send_lock:
-                    await websocket.send_json({"code": 400, "msg": "Invalid JSON format"})
-                continue
+            # [修改] 使用 receive() 接收原始消息，兼容 Text 和 Bytes
+            message = await websocket.receive()
             
-            # 使用 asyncio.create_task 将消息处理放入后台
-            # 这样即使 get_file 耗时，也不会阻塞后续的心跳或其他请求
-            asyncio.create_task(process_message(payload))
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect
+            
+            # 1. 处理文本消息 (JSON 信令)
+            if "text" in message and message["text"]:
+                try:
+                    payload = json.loads(message["text"])
+                    asyncio.create_task(process_message(payload))
+                except json.JSONDecodeError:
+                    pass
+            
+            # 2. 处理二进制消息 (文件流转发)
+            elif "bytes" in message and message["bytes"]:
+                await _handle_binary_forward(message["bytes"])
             
     except WebSocketDisconnect:
         SLog.i(TAG, "Client disconnected")

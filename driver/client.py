@@ -21,6 +21,7 @@ import tempfile
 import shutil
 import psutil
 import multiprocessing
+import struct
 import websockets
 import concurrent.futures
 import builtins # 用于注入全局变量
@@ -152,7 +153,7 @@ class FileTransferManager:
     管理设备间文件传输 (P2P via Server Relay)
     支持: 断点续传、文件夹自动压缩、自定义保存路径
     """
-    CHUNK_SIZE = 512 * 1024  # 512KB chunk size (Base64后约684KB，适配默认1MB限制)
+    CHUNK_SIZE = 1024 * 1024  # 1MB chunk size (Binary Frame)
 
     def __init__(self, client):
         self.client = client
@@ -304,12 +305,15 @@ class FileTransferManager:
             except Exception as e:
                 SLog.e(TAG, f"Write worker error: {e}")
 
-    def _write_chunk_sync(self, transfer_id, b64_data):
+    def _write_chunk_sync(self, transfer_id, data):
         """同步写入逻辑 (运行在 Executor 线程中)"""
         if transfer_id in self.incoming_transfers:
             task = self.incoming_transfers[transfer_id]
             try:
-                chunk_data = base64.b64decode(b64_data)
+                if isinstance(data, str):
+                    chunk_data = base64.b64decode(data)
+                else:
+                    chunk_data = data
                 task["file"].write(chunk_data)
                 task["received"] += len(chunk_data)
             except Exception as e:
@@ -373,25 +377,23 @@ class FileTransferManager:
                     if not chunk:
                         break
                     
-                    b64_data = base64.b64encode(chunk).decode('utf-8')
-                    payload = {
-                        "action": "p2p_signal",
-                        "data": {
-                            "target_sn": target_sn,
-                            "content": {
-                                "type": "chunk",
-                                "transfer_id": transfer_id,
-                                "index": index,
-                                "data": b64_data
-                            }
-                        }
-                    }
+                    # Binary Protocol: Magic(1)|Type(1)|SN_Len(1)|SN|TID_Len(1)|TID|Data
+                    sn_bytes = target_sn.encode('utf-8')
+                    tid_bytes = transfer_id.encode('utf-8')
+                    
+                    header = struct.pack(
+                        f'!BBB{len(sn_bytes)}sB{len(tid_bytes)}s',
+                        0xAA, 0x01, len(sn_bytes), sn_bytes, len(tid_bytes), tid_bytes
+                    )
+                    
+                    payload = header + chunk
+
                     # 检查连接状态，避免死循环
                     if not self.client.websocket:
                         raise ConnectionError("WebSocket disconnected during transfer")
 
                     future = asyncio.run_coroutine_threadsafe(
-                        self.client.websocket.send(json.dumps(payload)), 
+                        self.client.websocket.send(payload), 
                         self.client.loop
                     )
                     
@@ -521,6 +523,9 @@ class FileTransferManager:
         elif msg_type == "finish":
             # [接收方] 完成 -> 放入队列
             await self.write_queue.put(("finish", transfer_id, None))
+
+    async def handle_binary_chunk(self, transfer_id, data):
+        await self.write_queue.put(("chunk", transfer_id, data))
 
 class DeviceClient:
     def __init__(self, server_url, sn, role="node", shared_responses=None):
@@ -745,7 +750,10 @@ class DeviceClient:
         while self.websocket:
             try:
                 message = await self.websocket.recv()
-                await self.handle_message(message)
+                if isinstance(message, bytes):
+                    await self.handle_binary_message(message)
+                else:
+                    await self.handle_message(message)
             except websockets.ConnectionClosed:
                 SLog.i(TAG, "WebSocket connection closed.")
                 break
@@ -865,6 +873,31 @@ class DeviceClient:
 
         except json.JSONDecodeError:
             SLog.e(TAG, "Invalid JSON received")
+
+    async def handle_binary_message(self, message):
+        """处理二进制消息 (文件流)"""
+        try:
+            # Protocol: Magic(1)|Type(1)|SN_Len(1)|SN|TID_Len(1)|TID|Data
+            if len(message) < 5: return
+            
+            magic, mtype, sn_len = struct.unpack_from('!BBB', message, 0)
+            if magic != 0xAA: return
+            
+            offset = 3
+            # target_sn = message[offset:offset+sn_len].decode('utf-8') # Routing info
+            offset += sn_len
+            
+            tid_len = message[offset]
+            offset += 1
+            transfer_id = message[offset:offset+tid_len].decode('utf-8')
+            offset += tid_len
+            
+            data = message[offset:]
+            
+            if mtype == 0x01: # Chunk
+                await self.file_transfer.handle_binary_chunk(transfer_id, data)
+        except Exception as e:
+            SLog.e(TAG, f"Binary message error: {e}")
 
     def execute_task(self, params):
         """在独立进程中执行任务"""

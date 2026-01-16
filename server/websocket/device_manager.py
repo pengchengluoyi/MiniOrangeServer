@@ -30,6 +30,10 @@ class DeviceManager:
             cls._instance = super(DeviceManager, cls).__new__(cls)
         return cls._instance
 
+    def get_device_ws(self, sn: str) -> WebSocket:
+        """获取指定设备的 WebSocket 连接对象 (供二进制流转发使用)"""
+        return self.active_connections.get(sn)
+
     def _get_req_id(self, data: dict):
         """尝试从最外层或 data 层获取 req_id"""
         req_id = data.get("req_id")

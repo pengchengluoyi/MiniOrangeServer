@@ -12,7 +12,7 @@ from server.websocket.device_manager import DeviceManager, SessionLocal
 from server.models.mDevice import MDevice
 from server.models.workflow import Workflow
 from server.models.timeline import TaskTimeline
-from server.models.AppGraph.app_structure import AppGraph, AppNode
+from server.models.AppGraph.app_structure import AppGraph, AppNode, AppSOP
 from server.models.AppGraph.app_component import AppComponent
 from script.mPath import get_final_path
 from script.log import SLog
@@ -168,8 +168,9 @@ async def handle_get_app_graph(websocket, data: dict):
 
     session = SessionLocal()
     try:
-        # 修正：根据 AppNode 中的 workflow_id 反查对应的 AppGraph
-        graph = session.query(AppGraph).join(AppNode).filter(AppNode.workflow_id == str(flow_id)).options(
+        # 修正：根据 Workflow -> SOP -> AppGraph 反查
+        # AppNode.workflow_id 已废弃，现在 Workflow 挂载在 SOP 下
+        graph = session.query(AppGraph).join(AppSOP).join(Workflow).filter(Workflow.id == flow_id).options(
             joinedload(AppGraph.nodes).joinedload(AppNode.components),
             joinedload(AppGraph.edges)
         ).first()

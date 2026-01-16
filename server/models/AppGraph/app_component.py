@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, JSON, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from server.core.database import Base
-from server.models.AppGraph.app_types import ComponentCategory, InputType
+from server.models.AppGraph.app_types import ComponentCategory, InputType, ComponentStateType
 
 
 class AppComponent(Base):
@@ -37,3 +37,24 @@ class AppComponent(Base):
 
     graph = relationship("AppGraph", back_populates="components")
     node = relationship("AppNode", back_populates="components")
+    states = relationship("AppComponentState", back_populates="component", cascade="all, delete-orphan")
+
+
+class AppComponentState(Base):
+    """
+    组件的多态性存储：
+    同一个组件(AppComponent)在不同状态下(点击、悬浮、有消息)可能有不同的视觉表现
+    """
+    __tablename__ = "app_component_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    component_id = Column(Integer, ForeignKey("app_components.id"), index=True)
+
+    state_type = Column(String, default=ComponentStateType.DEFAULT) # 状态类型: hover, pressed, etc.
+    
+    image_url = Column(String, nullable=True)  # 该状态下的组件截图
+    attributes = Column(JSON, default={})      # 该状态下的特定属性 (如: {"color": "#FF0000", "text": "Loading..."})
+    
+    description = Column(String, nullable=True) # 描述: "点击后的红色高亮状态"
+
+    component = relationship("AppComponent", back_populates="states")

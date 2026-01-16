@@ -10,7 +10,8 @@ class DeviceDoctor:
     2. 如果检查不通过，你该按什么顺序执行哪些动作？(Recovery Plan)
     """
 
-    def get_health_check_sop(self):
+    @staticmethod
+    def get_health_check_sop():
         """
         生成设备自检 SOP
         """

@@ -17,7 +17,7 @@ class TaskDetails:
         }
     """
     def __init__(self, case_info: dict):
-        self.id = case_info["id"] if case_info.get("nodeCode") else "node_id_null"
+        self.id = case_info["id"] if case_info.get("id") else "node_id_null"
         self.nodeType = case_info["nodeType"] if case_info.get("nodeCode") else None
         self.nodeCode = case_info["nodeCode"] if case_info.get("nodeCode") else None
         self.platform = case_info["platform"] if case_info.get("platform") else platform.COMMON

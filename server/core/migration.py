@@ -39,10 +39,23 @@ def _check_and_migrate(db_path):
             'app_graph': [  # 注意：SQLAlchemy 模型定义的表名
                 ('app_id', 'TEXT', None),
                 ('created_at', 'DATETIME', None),
-                ('uid', 'TEXT', None)
+                ('uid', 'TEXT', None),
+                ('variables', 'JSON', '{}')  # 新增: Graph 全局变量
+            ],
+            'app_sops': [
+                ('variables', 'JSON', '{}'), # 新增: SOP 变量
+                ('priority', 'INTEGER', 0),  # 新增: SOP 优先级
+                ('logic_rules', 'JSON', '{}') # 新增: SOP 逻辑规则
+            ],
+            'workflows': [
+                ('variables', 'JSON', '{}'), # 新增: Workflow 变量
+                ('sop_id', 'INTEGER', None)  # 新增: 关联 SOP
+            ],
+            'app_components': [
+                ('uid', 'TEXT', None)        # 确保组件有 UID
             ],
             'app_nodes': [
-                ('workflow_id', 'TEXT', None)
+                ('is_blocking', 'BOOLEAN', '0') # 新增: 节点阻塞标记
             ],
             # 兼容旧表名 (防止表名修改导致旧数据无法迁移)
             'projects': [
@@ -98,6 +111,9 @@ def _check_and_migrate(db_path):
                     
                     elif col_name == 'role':
                         cursor.execute(f"UPDATE {table} SET {col_name} = 'node' WHERE {col_name} IS NULL")
+
+                    elif col_name == 'is_blocking':
+                        cursor.execute(f"UPDATE {table} SET {col_name} = 0 WHERE {col_name} IS NULL")
 
         conn.commit()
     finally:

@@ -1,7 +1,22 @@
 # 动作分发映射
 from server.websocket.wsFile import handle_upload, handle_get_file
 from server.websocket.device_manager import DeviceManager
-from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_list, handle_get_component, handle_get_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list
+from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_list, handle_get_component, \
+    handle_get_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, \
+    handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list
+from server.websocket.routers.wAppGraph import (
+    handle_app_graph_list,
+    handle_app_graph_create,
+    handle_app_graph_detail,
+    handle_save_node_detail,
+    handle_sync_layout,
+    handle_add_empty_node,
+    handle_sop_create,
+    handle_sop_update,
+    handle_sop_delete,
+    handle_match_solution
+)
+
 device_manager = DeviceManager()
 
 HANDLERS = {
@@ -27,4 +42,14 @@ HANDLERS = {
     "sync_timeline": handle_sync_timeline,
     "get_timeline": handle_get_timeline,
     "get_timeline_list": handle_get_timeline_list,
+    "app_graph/list": handle_app_graph_list,
+    "app_graph/create": handle_app_graph_create,
+    "app_graph/detail": handle_app_graph_detail,
+    "app_graph/save_node_detail": handle_save_node_detail,
+    "app_graph/sync_layout": handle_sync_layout,
+    "app_graph/add_empty_node": handle_add_empty_node,
+    "sop/create": handle_sop_create,
+    "sop/update": handle_sop_update,
+    "sop/delete": handle_sop_delete,
+    "app_graph/match_solution": handle_match_solution
 }

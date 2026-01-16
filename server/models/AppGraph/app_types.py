@@ -47,3 +47,24 @@ class NavigationType(str, Enum):
 
 class EditorType(str, Enum):
     CANVAS = "canvas"; RICH_TEXT = "rich_text"; CODE = "code_editor"
+
+class SnapshotType(str, Enum):
+    SCREENSHOT = "screenshot"   # 原始截图
+    SKELETON = "skeleton"       # 骨架图/线框图
+    WIREFRAME = "wireframe"     # 识别后的结构图
+
+class ComponentStateType(str, Enum):
+    DEFAULT = "default"         # 默认状态
+    HOVER = "hover"             # 悬浮
+    PRESSED = "pressed"         # 按下/点击
+    DISABLED = "disabled"       # 禁用
+    FOCUSED = "focused"         # 聚焦
+    CHECKED = "checked"         # 选中
+    BADGE = "badge"             # 带角标/消息
+
+class SOPType(str, Enum):
+    STARTUP = "startup"         # 启动逻辑 (Splash -> Home)
+    LOADING = "loading"         # 页面加载 (Skeleton -> Content)
+    INTERACTION = "interaction" # 交互逻辑 (Click A -> Show B)
+    SYSTEM = "system"           # 系统级 (System Popups, Permissions)
+    BUSINESS = "business"       # 业务流程
