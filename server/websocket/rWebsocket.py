@@ -2,10 +2,11 @@ import json
 import time
 import struct
 import asyncio
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from script.log import SLog
 from server.websocket.wsMap import HANDLERS
 from server.websocket.device_manager import DeviceManager
+from server.core.security import SecurityManager
 
 
 router = APIRouter()
@@ -37,8 +38,15 @@ async def _handle_binary_forward(data: bytes):
         SLog.e(TAG, f"Binary forward error: {e}")
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
     # 注意：monitor_heartbeats 建议在 main.py 的 lifespan 中启动，避免每个连接都启动
+
+    # [安全校验] 检查 Access Token
+    server_token = SecurityManager.get_token()
+    if server_token and token != server_token:
+        SLog.w(TAG, f"Connection rejected: Invalid token '{token}'")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
 
     await websocket.accept()
     SLog.i(TAG, "Client connected")

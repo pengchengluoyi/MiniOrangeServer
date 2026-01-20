@@ -2,16 +2,20 @@
 # -*-coding:utf-8 -*-
 
 import json
+import cv2
+import os
 import uuid
 import difflib
 from fastapi.encoders import jsonable_encoder
-from server.core.database import SessionLocal
+from sqlalchemy.orm import joinedload
+from server.core.database import SessionLocal, APP_DATA_DIR
 from server.models.AppGraph.app_structure import AppGraph, AppNode, AppEdge, AppSOP
-from server.models.AppGraph.app_component import AppComponent
+from server.models.AppGraph.app_component import AppComponent, AppComponentState
 from server.models.AppGraph.app_types import NodeType
 from server.models.workflow import Workflow
 # 复用 HTTP 路由中的 Pydantic 模型，确保参数一致性
 from server.routers.rAppGraph import AppGraphCreate, NodeSaveDetail, GraphLayoutSave, EmptyNodeCreate, SOPCreate, SOPUpdate, SOPDelete
+from server.core.vision.skeleton_algo import SkeletonAlgo
 from script.log import SLog
 
 
@@ -62,12 +66,26 @@ async def handle_app_graph_detail(websocket, data: dict):
         
         graph_id = int(graph_id)
         db_nodes = session.query(AppNode).filter(AppNode.graph_id == graph_id).all()
-        db_comps = session.query(AppComponent).filter(AppComponent.graph_id == graph_id).all()
+        # 使用 joinedload 预加载 states，避免 N+1 查询
+        db_comps = session.query(AppComponent).filter(AppComponent.graph_id == graph_id).options(
+            joinedload(AppComponent.states)).all()
         db_sops = session.query(AppSOP).filter(AppSOP.graph_id == graph_id).all()
 
         comp_map = {}
         for c in db_comps:
             if c.node_id not in comp_map: comp_map[c.node_id] = []
+            
+            # 序列化组件状态 (多态)
+            states_data = []
+            for s in c.states:
+                states_data.append({
+                    "state_type": s.state_type,
+                    "image_url": s.image_url,
+                    "attributes": s.attributes,
+                    "description": s.description,
+                    "skeleton_config": s.skeleton_config # 🔥 返回状态骨架配置
+                })
+
             comp_map[c.node_id].append({
                 "id": c.uid,
                 "label": c.label,
@@ -75,7 +93,9 @@ async def handle_app_graph_detail(websocket, data: dict):
                 "sub_type": c.sub_type,
                 "rules": c.rules,
                 "locators": c.locators,
-                "x": c.x, "y": c.y, "w": c.width, "h": c.height
+                "skeleton_config": c.skeleton_config, # 🔥 返回组件骨架配置
+                "x": c.x, "y": c.y, "w": c.width, "h": c.height,
+                "states": states_data  # 🔥 返回多态数据
             })
 
         nodes_data = []
@@ -95,6 +115,7 @@ async def handle_app_graph_detail(websocket, data: dict):
                     "domTree": dom_json,
                     "naturalSize": natural_size,
                     "isBlocking": n.is_blocking, # 🔥 返回给前端，用于可视化 (比如画个红框)
+                    "skeleton_config": n.skeleton_config, # 🔥 返回骨架配置
                     "interactions": comp_map.get(n.id, [])
                 },
                 "style": {"zIndex": 100} if n.type != NodeType.PAGE else {}
@@ -156,6 +177,7 @@ async def handle_save_node_detail(websocket, data: dict):
         node.label = item.label
         node.screenshot = item.screenshot
         node.is_blocking = item.is_blocking # 🔥 保存阻塞属性
+        node.skeleton_config = item.skeleton_config # 🔥 保存骨架配置
         
         # 🔥 修复：持久化存储 naturalSize (存入 dom_tree 字段)
         current_dom = {}
@@ -175,12 +197,20 @@ async def handle_save_node_detail(websocket, data: dict):
         node.dom_tree = json.dumps(current_dom, ensure_ascii=False)
 
         # 3. 更新组件
-        session.query(AppComponent).filter(AppComponent.node_id == node.id).delete()
+        # 优化：先查询再删除，确保触发 ORM 的级联删除 (cascade) 清理关联的 states
+        existing_comps = session.query(AppComponent).filter(AppComponent.node_id == node.id).all()
+        for ec in existing_comps:
+            session.delete(ec)
+        session.flush()
+            
         new_comps = []
-        for c in item.components:
+        raw_components = data.get("components", [])
+        
+        for i, c in enumerate(item.components):
             uid = c.uid if c.uid else f"c-{uuid.uuid4()}"
             r = c.rect if c.rect else {"x": 0, "y": 0, "w": 0, "h": 0}
-            new_comps.append(AppComponent(
+            
+            comp = AppComponent(
                 graph_id=item.graph_id,
                 node_id=node.id,
                 uid=uid,
@@ -189,8 +219,50 @@ async def handle_save_node_detail(websocket, data: dict):
                 sub_type=c.sub_type,
                 rules=c.rules,
                 locators=c.locators,
-                x=r.get('x', 0), y=r.get('y', 0), width=r.get('w', 0), height=r.get('h', 0)
-            ))
+                x=r.get('x', 0), y=r.get('y', 0), width=r.get('w', 0), height=r.get('h', 0),
+                skeleton_config=c.skeleton_config # 🔥 保存组件骨架配置
+            )
+            
+            # 🔥 保存组件多态 (States)
+            # 增强鲁棒性：如果 Pydantic 模型 ComponentItem 缺少 states 字段，尝试从 raw data 获取
+            states_data = []
+            if hasattr(c, 'states') and c.states:
+                states_data = c.states
+            elif i < len(raw_components) and isinstance(raw_components[i], dict):
+                states_data = raw_components[i].get('states', [])
+
+            for s in states_data:
+                # 统一处理对象或字典
+                if isinstance(s, dict):
+                    s_type = s.get('state_type')
+                    s_img = s.get('image_url')
+                    s_attr = s.get('attributes')
+                    s_desc = s.get('description')
+                    s_skeleton = s.get('skeleton_config', {})
+                else:
+                    s_type = s.state_type
+                    s_img = s.image_url
+                    s_attr = s.attributes
+                    s_desc = s.description
+                    s_skeleton = s.skeleton_config
+                
+                # 处理 attributes 可能是 JSON 字符串的情况
+                if isinstance(s_attr, str):
+                    try:
+                        s_attr = json.loads(s_attr)
+                    except:
+                        pass # 解析失败则保持原样或设为 {}
+
+                comp.states.append(AppComponentState(
+                    state_type=s_type,
+                    image_url=s_img,
+                    attributes=s_attr,
+                    description=s_desc,
+                    skeleton_config=s_skeleton # 🔥 保存状态骨架配置
+                ))
+            
+            new_comps.append(comp)
+            
         if new_comps:
             session.add_all(new_comps)
         session.commit()
@@ -219,13 +291,22 @@ async def handle_sync_layout(websocket, data: dict):
             
         # 更新坐标
         for n in item.nodes:
+            update_values = {
+                "x": n['position']['x'],
+                "y": n['position']['y']
+            }
+            
+            # 🔥 同时也更新 data 中的关键配置，防止 sync_layout 覆盖或丢失数据
+            if 'data' in n:
+                if 'is_blocking' in n['data']:
+                    update_values['is_blocking'] = n['data']['is_blocking']
+                if 'skeleton_config' in n['data']:
+                    update_values['skeleton_config'] = n['data']['skeleton_config']
+
             session.query(AppNode).filter(
                 AppNode.graph_id == item.graph_id,
                 AppNode.node_id == n['id']
-            ).update({
-                "x": n['position']['x'],
-                "y": n['position']['y']
-            }, synchronize_session=False)
+            ).update(update_values, synchronize_session=False)
             
         # 重建连线
         session.query(AppEdge).filter(AppEdge.graph_id == item.graph_id).delete()
@@ -242,6 +323,41 @@ async def handle_sync_layout(websocket, data: dict):
     except Exception as e:
         session.rollback()
         SLog.e("WAppGraph", f"Sync layout error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_get_component_states(websocket, data: dict):
+    """
+    获取组件的所有多态截图 (热区内的小截图)
+    Payload: {"component_id": "c-xxxx"}
+    """
+    session = SessionLocal()
+    try:
+        component_id = data.get("component_id")
+        if not component_id:
+            return {"code": 400, "msg": "Missing component_id"}
+
+        comp = session.query(AppComponent).filter(AppComponent.uid == component_id).options(
+            joinedload(AppComponent.states)
+        ).first()
+
+        if not comp:
+            return {"code": 404, "msg": "Component not found"}
+
+        states_data = []
+        for s in comp.states:
+            if s.image_url:
+                states_data.append({
+                    "state_type": s.state_type,
+                    "image_url": s.image_url
+                })
+
+        return {"code": 200, "data": states_data}
+
+    except Exception as e:
+        SLog.e("WAppGraph", f"Get component states error: {e}")
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()
@@ -355,6 +471,129 @@ async def handle_sop_delete(websocket, data: dict):
     except Exception as e:
         session.rollback()
         SLog.e("WAppGraph", f"SOP delete error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_train_skeleton(websocket, data: dict):
+    """
+    触发骨骼识别
+    Payload: {
+        "image_names": ["1.png", "2.png"], 
+        "threshold": 10,
+        "graph_id": 1,      # 可选：提供ID则自动保存和合并旧图片
+        "node_id": "node-1", # 可选
+        "component_id": "c-1", # 可选：提供组件ID则针对组件训练
+        "state_type": "hover" # 可选：如果提供了组件ID，还可以指定针对哪个状态训练
+    }
+    """
+    session = SessionLocal()
+    try:
+        image_names = data.get("image_names", [])
+        threshold = data.get("threshold", 10)
+        graph_id = data.get("graph_id")
+        node_id = data.get("node_id")
+        component_id = data.get("component_id")
+        state_type = data.get("state_type")
+        
+        all_images = image_names
+        node = None
+        comp = None
+        target_state = None
+
+        # 1. 如果提供了节点信息，尝试从数据库获取历史图片并合并
+        if component_id:
+            comp = session.query(AppComponent).filter(AppComponent.uid == component_id).first()
+            if comp:
+                # 如果指定了 state_type，则针对特定状态训练
+                if state_type:
+                    target_state = session.query(AppComponentState).filter(
+                        AppComponentState.component_id == comp.id,
+                        AppComponentState.state_type == state_type
+                    ).first()
+                    if target_state:
+                        config = target_state.skeleton_config or {}
+                    else:
+                        # 状态不存在，可能需要前端先保存状态，或者这里暂不处理历史图片
+                        config = {}
+                else:
+                    # 针对组件本身 (默认状态)
+                    config = comp.skeleton_config or {}
+
+                existing_images = config.get("images", [])
+                
+                for img in image_names:
+                    if img not in existing_images:
+                        existing_images.append(img)
+                
+                all_images = existing_images
+        elif graph_id and node_id:
+            node = session.query(AppNode).filter(
+                AppNode.graph_id == graph_id,
+                AppNode.node_id == node_id
+            ).first()
+            
+            if node:
+                config = node.skeleton_config or {}
+                existing_images = config.get("images", [])
+                
+                # 合并新旧图片 (保持顺序，去重)
+                for img in image_names:
+                    if img not in existing_images:
+                        existing_images.append(img)
+                
+                all_images = existing_images
+
+        mask, err = SkeletonAlgo.train_skeleton(all_images, threshold)
+        if err:
+            return {"code": 500, "msg": err}
+        
+        # 保存 Mask 图片
+        filename = f"skeleton_{uuid.uuid4().hex}.png"
+        upload_dir = os.path.join(APP_DATA_DIR, "uploads")
+        if not os.path.exists(upload_dir):
+            os.makedirs(upload_dir)
+            
+        save_path = os.path.join(upload_dir, filename)
+        cv2.imwrite(save_path, mask)
+        
+        mask_url = f"/static/{filename}"
+
+        # 2. 持久化保存到节点配置中
+        if target_state:
+            # 保存到组件状态
+            config = target_state.skeleton_config or {}
+            config["mask_url"] = mask_url
+            config["images"] = all_images
+            target_state.skeleton_config = dict(config)
+            session.commit()
+        elif comp:
+            # 保存到组件
+            config = comp.skeleton_config or {}
+            config["mask_url"] = mask_url
+            config["images"] = all_images
+            comp.skeleton_config = dict(config)
+            session.commit()
+        elif node:
+            config = node.skeleton_config or {}
+            config["mask_url"] = mask_url
+            config["images"] = all_images
+            node.skeleton_config = dict(config) # 触发更新
+            session.commit()
+
+        return {
+            "code": 200, 
+            "msg": "Skeleton generated", 
+            "data": {
+                "filename": filename,
+                "url": mask_url,
+                "images": all_images # 返回全量图片列表供前端更新
+            }
+        }
+    except Exception as e:
+        session.rollback()
+        SLog.e("WAppGraph", f"Train skeleton error: {e}")
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()

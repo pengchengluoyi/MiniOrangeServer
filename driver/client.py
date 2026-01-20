@@ -32,35 +32,86 @@ from driver.tentacle.common.mPath import get_adb_path
 # 服务端 WebSocket 地址 (根据实际部署修改)
 DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
 
+# [新增] 获取本机 IP (优先 Tailscale 100.x, 然后局域网 IP)
+def get_local_ip():
+    lan_ip = None
+    try:
+        # 优先使用 psutil
+        for interface, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                if snic.family == socket.AF_INET:
+                    ip = snic.address
+                    if ip == "127.0.0.1": continue
+                    if ip.startswith("198.18."): continue # 过滤 Clash 虚拟 IP
+                    
+                    if ip.startswith("100."):
+                        return ip # 🚀 发现 Tailscale IP 立即返回，防止被后续网卡覆盖
+                    elif ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
+                        if not lan_ip:
+                            lan_ip = ip
+        
+        if lan_ip: return lan_ip
+
+        # 回退方案
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip.startswith("198.18."): return "127.0.0.1"
+        return ip
+    except:
+        return "127.0.0.1"
+
+# [新增] 统一配置文件路径
+CONFIG_DIR = Path.home() / ".miniorange"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+def load_config():
+    """加载配置文件"""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_config(config):
+    """保存配置文件"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4)
+
 def get_persistent_device_sn():
     """获取持久化的设备 SN，防止重启后 MAC 漂移导致识别为新设备"""
-    # 将 SN 文件保存在用户主目录下，防止程序更新/重新解压导致文件丢失
-    save_dir = Path.home() / ".miniorange"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    sn_file = save_dir / "device_id.txt"
+    config = load_config()
     
-    # 1. 尝试从文件读取
-    if sn_file.exists():
-        try:
-            with open(sn_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    return content
-        except Exception as e:
-            SLog.w("DeviceClient", f"Error reading device_id.txt: {e}")
+    # 1. 尝试从 Config 读取
+    if "device_sn" in config and config["device_sn"]:
+        return config["device_sn"]
 
-    # 2. 如果文件不存在或读取失败，生成新的 SN
+    # 2. 兼容旧版: 尝试从 device_id.txt 迁移
+    old_sn_file = CONFIG_DIR / "device_id.txt"
+    if old_sn_file.exists():
+        try:
+            with open(old_sn_file, "r", encoding="utf-8") as f:
+                sn = f.read().strip()
+                if sn:
+                    config["device_sn"] = sn
+                    save_config(config)
+                    SLog.i("DeviceClient", f"Migrated Device SN from txt: {sn}")
+                    return sn
+        except Exception: pass
+
+    # 3. 生成新的 SN
     mac = uuid.getnode()
     mac_str = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
     sn = f"device_{mac_str}"
 
-    # 3. 保存到文件
-    try:
-        with open(sn_file, "w", encoding="utf-8") as f:
-            f.write(sn)
-            SLog.i("DeviceClient", f"Generated and saved new Device SN: {sn}")
-    except Exception as e:
-        SLog.w("DeviceClient", f"Failed to save device_id.txt: {e}")
+    # 4. 保存到 Config
+    config["device_sn"] = sn
+    save_config(config)
+    SLog.i("DeviceClient", f"Generated and saved new Device SN: {sn}")
     
     return sn
 
@@ -527,11 +578,114 @@ class FileTransferManager:
     async def handle_binary_chunk(self, transfer_id, data):
         await self.write_queue.put(("chunk", transfer_id, data))
 
+class StreamManager:
+    """
+    [新增] 流媒体管理器
+    负责将连接在 PC 上的 Android 设备屏幕画面，通过 WebSocket 推流给远程控制端 (Launcher)
+    """
+    def __init__(self, client):
+        self.client = client
+        # { target_sn (viewer): subprocess }
+        self.active_streams = {}
+
+    async def start_stream(self, device_sn, viewer_sn):
+        """
+        启动投屏推流
+        :param device_sn: 本地 USB 连接的 Android 设备 SN
+        :param viewer_sn: 想要观看屏幕的远程设备 SN (扫码的手机)
+        """
+        if viewer_sn in self.active_streams:
+            SLog.w(TAG, f"Stream to {viewer_sn} already exists.")
+            return
+
+        SLog.i(TAG, f"Starting screen stream: {device_sn} -> {viewer_sn}")
+        
+        # 启动后台线程读取视频流
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._start_stream_sync, device_sn, viewer_sn)
+
+    def _start_stream_sync(self, device_sn, viewer_sn):
+        """
+        同步方法：启动 ADB 录屏并持续读取 stdout 发送
+        注意：这里使用简单的 screenrecord 演示，生产环境通常使用 scrcpy-server
+        """
+        adb_path = get_adb_path().strip('"')
+        # 限制分辨率和比特率以保证实时性
+        cmd = [
+            adb_path, "-s", device_sn, "shell", 
+            "screenrecord", "--output-format=h264", "--size", "720x1280", "--bit-rate", "2M", "--time-limit", "180", "-"
+        ]
+        
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1024*10
+            )
+            self.active_streams[viewer_sn] = process
+            
+            # 准备协议头: Magic(1)|Type(2=Stream)|SN_Len(1)|Target_SN
+            sn_bytes = viewer_sn.encode('utf-8')
+            header = struct.pack(f'!BBB{len(sn_bytes)}s', 0xAA, 0x02, len(sn_bytes), sn_bytes)
+            
+            SLog.i(TAG, f"Stream process started for {viewer_sn}, PID: {process.pid}")
+
+            while viewer_sn in self.active_streams:
+                # 读取视频流数据
+                data = process.stdout.read(4096) 
+                if not data:
+                    break
+                
+                # 封装并发送
+                payload = header + data
+                
+                if self.client.websocket:
+                    # 使用 run_coroutine_threadsafe 跨线程发送
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.client.websocket.send(payload), 
+                        self.client.loop
+                    )
+                    # 简单的背压控制：如果积压太多则不等待，防止阻塞读取
+                    # 实际生产中需要更复杂的丢帧逻辑
+                else:
+                    break
+            
+            SLog.i(TAG, f"Stream to {viewer_sn} ended.")
+            
+        except Exception as e:
+            SLog.e(TAG, f"Stream error: {e}")
+        finally:
+            self.stop_stream(viewer_sn)
+
+    def stop_stream(self, viewer_sn):
+        """停止推流"""
+        if viewer_sn in self.active_streams:
+            proc = self.active_streams.pop(viewer_sn)
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            SLog.i(TAG, f"Stopped stream for {viewer_sn}")
+
+    async def handle_command(self, command, params):
+        """处理流媒体相关指令"""
+        if command == "start_stream":
+            # 远程 Launcher 请求看某个设备的屏幕
+            device_sn = params.get("device_sn") # PC 上插着的手机
+            viewer_sn = params.get("viewer_sn") # 发起请求的 Launcher
+            if device_sn and viewer_sn:
+                await self.start_stream(device_sn, viewer_sn)
+        
+        elif command == "stop_stream":
+            viewer_sn = params.get("viewer_sn")
+            if viewer_sn:
+                self.stop_stream(viewer_sn)
+
 class DeviceClient:
-    def __init__(self, server_url, sn, role="node", shared_responses=None):
+    def __init__(self, server_url, sn, role="node", shared_responses=None, token=None):
         self.server_url = server_url
         self.sn = sn
         self.role = role
+        self.token = token
 
         # 如果外部未传入 shared_responses，则内部自动初始化 Manager
         self._internal_manager = None
@@ -550,6 +704,8 @@ class DeviceClient:
         
         # 初始化文件传输管理器
         self.file_transfer = FileTransferManager(self)
+        # [新增] 初始化流媒体管理器
+        self.stream_manager = StreamManager(self)
 
     async def start(self):
         """启动客户端主循环"""
@@ -559,8 +715,16 @@ class DeviceClient:
         while self.is_running:
             try:
                 self.loop = asyncio.get_running_loop() # 捕获当前 loop 供线程使用
-                SLog.i(TAG, f"Connecting to {self.server_url}...")
-                async with websockets.connect(self.server_url) as ws:
+                
+                # 构造连接 URL，自动附加 Token
+                connect_url = self.server_url
+                if self.token and "token=" not in connect_url:
+                    sep = "&" if "?" in connect_url else "?"
+                    connect_url = f"{connect_url}{sep}token={self.token}"
+
+                SLog.i(TAG, f"Connecting to {connect_url.split('?')[0]}...") # 日志隐藏 token
+                
+                async with websockets.connect(connect_url) as ws:
                     self.websocket = ws
                     SLog.i(TAG, "Connected to server.")
 
@@ -815,6 +979,14 @@ class DeviceClient:
                     transfer_id = params.get("transfer_id")
                     save_path = params.get("save_path")
                     await self.file_transfer.accept_transfer(transfer_id, save_path)
+                
+                # --- 新增流媒体指令 ---
+                elif command in ["start_stream", "stop_stream"]:
+                    await self.stream_manager.handle_command(command, params)
+
+                elif command == "exit_node_mode":
+                    # [新增] 退出 Node 模式，恢复为独立 Server
+                    self.reset_to_server_mode()
 
                 elif command == "list_dir":
                     # 处理文件列表请求
@@ -920,6 +1092,22 @@ class DeviceClient:
         )
         p.start()
 
+    def reset_to_server_mode(self):
+        """退出 Node 模式，移除 target_url 配置并重启"""
+        try:
+            config = load_config()
+            if "target_url" in config:
+                del config["target_url"]
+                save_config(config)
+                SLog.i(TAG, "Removed target_url from config, switching back to Server Mode.")
+        except Exception as e:
+            SLog.e(TAG, f"Failed to update config: {e}")
+        
+        SLog.i(TAG, "Restarting application to restore Server Mode...")
+        time.sleep(1)
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+
     def _get_device_info(self):
         """收集设备信息"""
         return {
@@ -927,40 +1115,17 @@ class DeviceClient:
             "type": "pc",  # 默认为 PC 节点
             "role": self.role,
             "model": platform.node(),
-            "ip": self._get_ip(),
+            "ip": get_local_ip(),
             "os_version": f"{platform.system()} {platform.release()}",
             "mac": self.sn.replace("device_", "")
         }
-
-    def _get_ip(self):
-        """获取本机 IP (过滤代理虚拟 IP)"""
-        try:
-            # 优先使用 psutil
-            for interface, snics in psutil.net_if_addrs().items():
-                for snic in snics:
-                    if snic.family == socket.AF_INET:
-                        ip = snic.address
-                        if ip == "127.0.0.1": continue
-                        if ip.startswith("198.18."): continue # 过滤 Clash 虚拟 IP
-                        if ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
-                            return ip
-            
-            # 回退方案
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            if ip.startswith("198.18."): return "127.0.0.1"
-            return ip
-        except:
-            return "127.0.0.1"
 
 if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
     multiprocessing.freeze_support()
 
     # 配置代理绕过 (防止连接 ws://miniorange.local 时走代理)
-    os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",localhost,127.0.0.1,::1,miniorange.local,0.0.0.0"
+    os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",localhost,127.0.0.1,::1,miniorange.local,0.0.0.0,100.*"
     os.environ["NO_PROXY"] = os.environ["no_proxy"]
 
     # 自动选择连接地址: 优先尝试本地，失败则使用 mDNS 域名
@@ -980,7 +1145,13 @@ if __name__ == "__main__":
     from multiprocessing import Manager as SyncManager
     with SyncManager() as manager:
         shared_responses = manager.dict()
-        client = DeviceClient(target_url, DEVICE_SN, role="node", shared_responses=shared_responses)
+        
+        # 尝试从 URL 中提取 token (如果是 Node 模式，token 可能已经在 target_url 里了)
+        # 或者可以从 config 中单独读取 token 字段
+        token = None
+        # if "token=" in target_url: ... (DeviceClient 内部已处理 URL 拼接，这里主要处理显式传入)
+        
+        client = DeviceClient(target_url, DEVICE_SN, role="node", shared_responses=shared_responses, token=token)
         try:
             asyncio.run(client.start())
         except KeyboardInterrupt:

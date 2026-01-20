@@ -3,6 +3,14 @@ from driver.agent.Common.bridge import ServerBridge
 
 class WS:
     @staticmethod
+    def fetch_get_file(filename):
+        return ServerBridge.query("get_file", {"name": filename})
+
+    @staticmethod
+    def fetch_upload_file(filename, b64_str):
+        return ServerBridge.query("upload", {"name": filename, "content": b64_str}, timeout=60)
+
+    @staticmethod
     def fetch_app_graph(flow_id):
         return ServerBridge.query("get_app_graph", {"flow_id": flow_id})
 

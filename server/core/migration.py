@@ -52,10 +52,19 @@ def _check_and_migrate(db_path):
                 ('sop_id', 'INTEGER', None)  # 新增: 关联 SOP
             ],
             'app_components': [
-                ('uid', 'TEXT', None)        # 确保组件有 UID
+                ('uid', 'TEXT', None),       # 确保组件有 UID
+                ('skeleton_config', 'JSON', '{}') # 新增: 组件骨架配置
+            ],
+            'app_component_states': [
+                ('skeleton_config', 'JSON', '{}') # 新增: 状态骨架配置
             ],
             'app_nodes': [
-                ('is_blocking', 'BOOLEAN', '0') # 新增: 节点阻塞标记
+                ('is_blocking', 'BOOLEAN', '0'), # 新增: 节点阻塞标记
+                ('skeleton_config', 'JSON', '{}')  # 新增: 骨架配置
+            ],
+            'app_node_snapshots': [
+                ('image_url', 'TEXT', None),
+                ('node_id', 'INTEGER', None)
             ],
             # 兼容旧表名 (防止表名修改导致旧数据无法迁移)
             'projects': [

@@ -35,6 +35,9 @@ class AppComponent(Base):
     width = Column(Float)
     height = Column(Float)
 
+    # 🔥 新增：组件骨架识别配置 (e.g. {"mask_url": "...", "images": [...]})
+    skeleton_config = Column(JSON, default={})
+
     graph = relationship("AppGraph", back_populates="components")
     node = relationship("AppNode", back_populates="components")
     states = relationship("AppComponentState", back_populates="component", cascade="all, delete-orphan")
@@ -54,6 +57,9 @@ class AppComponentState(Base):
     
     image_url = Column(String, nullable=True)  # 该状态下的组件截图
     attributes = Column(JSON, default={})      # 该状态下的特定属性 (如: {"color": "#FF0000", "text": "Loading..."})
+    
+    # 🔥 新增：该状态下的骨架配置 (支持多态骨架)
+    skeleton_config = Column(JSON, default={})
     
     description = Column(String, nullable=True) # 描述: "点击后的红色高亮状态"
 

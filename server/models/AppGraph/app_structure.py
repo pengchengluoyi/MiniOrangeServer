@@ -61,6 +61,10 @@ class AppNode(Base):
     # 语义：如果匹配到此节点，Driver 应暂停主线，优先寻找"出边"将其关闭
     is_blocking = Column(Boolean, default=False)
 
+    # 🔥 新增：骨架识别配置
+    # 存储由多张快照计算出的蒙版数据或忽略区域 (e.g. {"ignore_rects": [[0, 100, 500, 800]], "threshold": 0.8})
+    skeleton_config = Column(JSON, default={})
+
     dom_tree = Column(Text, nullable=True)  # 完整 DOM 结构
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 

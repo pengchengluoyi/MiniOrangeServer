@@ -23,6 +23,13 @@ UPLOAD_DIR = os.path.join(APP_DATA_DIR, "uploads")
 
 # --- Pydantic Models (🔥 核心修复：宽容模式) ---
 
+class ComponentStateItem(BaseModel):
+    state_type: str = "default"
+    image_url: Optional[str] = None
+    attributes: Optional[Any] = {} # 允许 dict 或 str
+    description: Optional[str] = None
+    skeleton_config: Optional[Dict] = {} # 🔥 新增
+
 class ComponentItem(BaseModel):
     uid: Optional[str] = None
     label: Optional[str] = "New Component"
@@ -32,6 +39,8 @@ class ComponentItem(BaseModel):
     locators: Optional[Dict] = {}
     # 允许 rect 为空，提供默认值
     rect: Optional[Dict] = {"x": 0, "y": 0, "w": 0, "h": 0}
+    skeleton_config: Optional[Dict] = {} # 🔥 新增
+    states: List[ComponentStateItem] = [] # 🔥 明确定义 states 结构
 
 
 class NodeSaveDetail(BaseModel):
@@ -45,6 +54,7 @@ class NodeSaveDetail(BaseModel):
     dom_tree: Optional[Any] = None
     components: List[ComponentItem] = []
     is_blocking: bool = False # 🔥 新增
+    skeleton_config: Optional[Dict] = {}
 
 
 class GraphLayoutSave(BaseModel):

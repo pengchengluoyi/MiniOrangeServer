@@ -14,7 +14,8 @@ from server.websocket.routers.wAppGraph import (
     handle_sop_create,
     handle_sop_update,
     handle_sop_delete,
-    handle_match_solution
+    handle_match_solution,
+    handle_train_skeleton
 )
 
 device_manager = DeviceManager()
@@ -51,5 +52,6 @@ HANDLERS = {
     "sop/create": handle_sop_create,
     "sop/update": handle_sop_update,
     "sop/delete": handle_sop_delete,
-    "app_graph/match_solution": handle_match_solution
+    "app_graph/match_solution": handle_match_solution,
+    "app_graph/train_skeleton": handle_train_skeleton
 }
