@@ -175,10 +175,20 @@ async def lifespan(app: FastAPI):
     SchedulerService().start()
 
     # 启动 Client (服务端内置 Client)
-    from driver.client import DeviceClient, DEVICE_SN
-    
-    # 本地 Client 也需要带上 Token
-    client = DeviceClient("ws://127.0.0.1:10104/ws", DEVICE_SN, role="client", token=SecurityManager.get_token())
+    from driver.client import DeviceClient, DEVICE_SN, load_config
+
+    config = load_config()
+    target_url = config.get("target_url")
+
+    if target_url:
+        print(f"--- [System] Node Mode Active. Connecting to Cluster: {target_url} ---")
+        # Node 模式：连接到远程 Server，但本地 Web 服务依然启动，方便管理
+        client = DeviceClient(target_url, DEVICE_SN, role="node")
+    else:
+        # Server 模式：连接到本地
+        client = DeviceClient("ws://127.0.0.1:10104/ws", DEVICE_SN, role="client", token=SecurityManager.get_token())
+
+
     bg_task = asyncio.create_task(client.start())
 
     # 只有主进程才打印这个 Ready
@@ -225,7 +235,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "version": "0.0.85",
+        "version": "0.0.86",
         "ip": get_local_ip(),
         "mdns": f"http://miniorange-{safe_hostname}.local:10104",
         "port": 10104,
@@ -381,6 +391,32 @@ def join_cluster(req: JoinClusterRequest):
     threading.Thread(target=restart_server).start()
 
     return {"code": 200, "message": "Switching to Node Mode..."}
+
+
+@app.post("/sys/leave_cluster")
+def leave_cluster():
+    """
+    [新增] 退出集群模式 (恢复为独立 Server)
+    """
+    from driver.client import load_config, save_config
+    try:
+        config = load_config()
+        if "target_url" in config:
+            del config["target_url"]
+            save_config(config)
+    except Exception as e:
+        return {"code": 500, "message": f"Failed to update config: {e}"}
+
+    def restart_server():
+        time.sleep(1)
+        print("--- [System] Restarting to restore Server Mode... ---")
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+
+    import threading
+    threading.Thread(target=restart_server).start()
+
+    return {"code": 200, "message": "Leaving cluster and restarting..."}
 
 
 # -------------------------------------------------------------

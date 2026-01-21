@@ -17,3 +17,9 @@ def get_adb_path():
         os.chmod(full_path, 0o755)
 
     return f'"{full_path}"'  # 加引号防止路径中有空格
+
+def get_scrcpy_server_path():
+    """获取 scrcpy-server.jar 路径"""
+    base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    path = os.path.join(base_path, 'resource', 'scrcpy-server-v3.3.3.jar')
+    return f'"{path}"'

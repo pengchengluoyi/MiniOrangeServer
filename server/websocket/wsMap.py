@@ -53,5 +53,7 @@ HANDLERS = {
     "sop/update": handle_sop_update,
     "sop/delete": handle_sop_delete,
     "app_graph/match_solution": handle_match_solution,
-    "app_graph/train_skeleton": handle_train_skeleton
+    "app_graph/train_skeleton": handle_train_skeleton,
+    "start_stream": device_manager.handle_start_stream,
+    "stop_stream": device_manager.handle_stop_stream
 }

@@ -1,7 +1,7 @@
 # driver/client.py
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-
+import threading
 import asyncio
 import json
 import time
@@ -12,6 +12,7 @@ import re
 import socket
 import os
 import sys
+import random
 from pathlib import Path
 import traceback
 import subprocess
@@ -24,13 +25,15 @@ import multiprocessing
 import struct
 import websockets
 import concurrent.futures
-import builtins # 用于注入全局变量
+import builtins  # 用于注入全局变量
 from script.log import SLog, current_run_id, current_flow_id
+import adbutils
 from driver.agent.Core.orchestrator import Orchestrator
-from driver.tentacle.common.mPath import get_adb_path
+from driver.tentacle.common.mPath import get_adb_path, get_scrcpy_server_path
 
 # 服务端 WebSocket 地址 (根据实际部署修改)
 DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
+
 
 # [新增] 获取本机 IP (优先 Tailscale 100.x, 然后局域网 IP)
 def get_local_ip():
@@ -42,14 +45,14 @@ def get_local_ip():
                 if snic.family == socket.AF_INET:
                     ip = snic.address
                     if ip == "127.0.0.1": continue
-                    if ip.startswith("198.18."): continue # 过滤 Clash 虚拟 IP
-                    
+                    if ip.startswith("198.18."): continue  # 过滤 Clash 虚拟 IP
+
                     if ip.startswith("100."):
-                        return ip # 🚀 发现 Tailscale IP 立即返回，防止被后续网卡覆盖
+                        return ip  # 🚀 发现 Tailscale IP 立即返回，防止被后续网卡覆盖
                     elif ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
                         if not lan_ip:
                             lan_ip = ip
-        
+
         if lan_ip: return lan_ip
 
         # 回退方案
@@ -62,9 +65,11 @@ def get_local_ip():
     except:
         return "127.0.0.1"
 
+
 # [新增] 统一配置文件路径
 CONFIG_DIR = Path.home() / ".miniorange"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
 
 def load_config():
     """加载配置文件"""
@@ -76,16 +81,18 @@ def load_config():
             pass
     return {}
 
+
 def save_config(config):
     """保存配置文件"""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
 
+
 def get_persistent_device_sn():
     """获取持久化的设备 SN，防止重启后 MAC 漂移导致识别为新设备"""
     config = load_config()
-    
+
     # 1. 尝试从 Config 读取
     if "device_sn" in config and config["device_sn"]:
         return config["device_sn"]
@@ -101,22 +108,25 @@ def get_persistent_device_sn():
                     save_config(config)
                     SLog.i("DeviceClient", f"Migrated Device SN from txt: {sn}")
                     return sn
-        except Exception: pass
+        except Exception:
+            pass
 
     # 3. 生成新的 SN
     mac = uuid.getnode()
-    mac_str = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+    mac_str = ':'.join(('%012X' % mac)[i:i + 2] for i in range(0, 12, 2))
     sn = f"device_{mac_str}"
 
     # 4. 保存到 Config
     config["device_sn"] = sn
     save_config(config)
     SLog.i("DeviceClient", f"Generated and saved new Device SN: {sn}")
-    
+
     return sn
+
 
 DEVICE_SN = get_persistent_device_sn()
 TAG = "DeviceClient"
+
 
 # --- 本地任务执行器 (替代 driver.agent.actuator) ---
 
@@ -199,6 +209,7 @@ def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_r
         current_run_id.reset(token_run)
         current_flow_id.reset(token_flow)
 
+
 class FileTransferManager:
     """
     管理设备间文件传输 (P2P via Server Relay)
@@ -226,7 +237,7 @@ class FileTransferManager:
             return False
 
         transfer_id = str(uuid.uuid4())
-        
+
         # 1. 如果是文件夹，先压缩
         is_zip = False
         send_path = path
@@ -259,8 +270,8 @@ class FileTransferManager:
                     "transfer_id": transfer_id,
                     "filename": filename,
                     "size": file_size,
-                    "is_folder": path.is_dir(), # 原始是否为文件夹
-                    "save_path": save_path # 目标保存路径(用于自动接收)
+                    "is_folder": path.is_dir(),  # 原始是否为文件夹
+                    "save_path": save_path  # 目标保存路径(用于自动接收)
                 }
             }
         }
@@ -287,7 +298,8 @@ class FileTransferManager:
                 SLog.w(TAG, f"Found stale transfer {tid} for {filename}, cleaning up...")
                 try:
                     task["file"].close()
-                except: pass
+                except:
+                    pass
                 del self.incoming_transfers[tid]
 
         # 断点续传检查
@@ -297,7 +309,7 @@ class FileTransferManager:
             # 如果本地文件比远程还大，说明出错了，重新下载
             if offset > total_size:
                 offset = 0
-                open(part_path, 'wb').close() # 清空
+                open(part_path, 'wb').close()  # 清空
             elif offset == total_size:
                 SLog.i(TAG, "File already downloaded.")
                 return
@@ -344,14 +356,14 @@ class FileTransferManager:
             try:
                 task = await self.write_queue.get()
                 msg_type, transfer_id, data = task
-                
+
                 if msg_type == "chunk":
                     # 将耗时的解码和写入放入线程池，释放 EventLoop 接收网络包
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, self._write_chunk_sync, transfer_id, data)
                 elif msg_type == "finish":
                     await self._finish_transfer(transfer_id)
-                
+
                 self.write_queue.task_done()
             except Exception as e:
                 SLog.e(TAG, f"Write worker error: {e}")
@@ -376,8 +388,9 @@ class FileTransferManager:
             task = self.incoming_transfers.pop(transfer_id)
             try:
                 task["file"].close()
-            except: pass
-            
+            except:
+                pass
+
             # 重命名 .part 为正式文件
             if task["part_path"].exists():
                 final_path = task["path"]
@@ -387,7 +400,7 @@ class FileTransferManager:
                     suffix = final_path.suffix
                     final_path = final_path.parent / f"{stem}_{counter}{suffix}"
                     counter += 1
-                
+
                 # 重试机制解决 Windows 文件占用
                 for i in range(5):
                     try:
@@ -414,29 +427,29 @@ class FileTransferManager:
                 if offset > 0:
                     f.seek(offset)
                     SLog.i(TAG, f"Resuming transfer {transfer_id} from offset {offset}")
-                
+
                 start_time = time.time()
                 last_report_time = 0
                 total_sent = 0
-                
-                pending_futures = set() # 存储正在发送的 Future
-                MAX_PENDING = 8 # 允许并发 8 个分片 (8 * 512KB = 4MB 缓冲区)，跑满带宽的关键
-                
+
+                pending_futures = set()  # 存储正在发送的 Future
+                MAX_PENDING = 8  # 允许并发 8 个分片 (8 * 512KB = 4MB 缓冲区)，跑满带宽的关键
+
                 index = int(offset / self.CHUNK_SIZE)
                 while True:
                     chunk = f.read(self.CHUNK_SIZE)
                     if not chunk:
                         break
-                    
+
                     # Binary Protocol: Magic(1)|Type(1)|SN_Len(1)|SN|TID_Len(1)|TID|Data
                     sn_bytes = target_sn.encode('utf-8')
                     tid_bytes = transfer_id.encode('utf-8')
-                    
+
                     header = struct.pack(
                         f'!BBB{len(sn_bytes)}sB{len(tid_bytes)}s',
                         0xAA, 0x01, len(sn_bytes), sn_bytes, len(tid_bytes), tid_bytes
                     )
-                    
+
                     payload = header + chunk
 
                     # 检查连接状态，避免死循环
@@ -444,45 +457,46 @@ class FileTransferManager:
                         raise ConnectionError("WebSocket disconnected during transfer")
 
                     future = asyncio.run_coroutine_threadsafe(
-                        self.client.websocket.send(payload), 
+                        self.client.websocket.send(payload),
                         self.client.loop
                     )
-                    
+
                     # [修复] 流水线发送：不立即等待，而是放入集合
                     pending_futures.add(future)
-                    
+
                     # 清理已完成的任务
                     done_futures = {f for f in pending_futures if f.done()}
                     pending_futures -= done_futures
-                    for f in done_futures: f.result() # 检查异常
+                    for f in done_futures: f.result()  # 检查异常
 
                     # 只有当积压过多时才等待，保证管道始终有数据在跑
                     if len(pending_futures) >= MAX_PENDING:
                         done, pending_futures = concurrent.futures.wait(
-                            pending_futures, 
+                            pending_futures,
                             return_when=concurrent.futures.FIRST_COMPLETED
                         )
 
                     index += 1
-                    
+
                     # --- Progress Reporting ---
                     total_sent += len(chunk)
                     now = time.time()
-                    if now - last_report_time > 1.0: # Report every 1s
+                    if now - last_report_time > 1.0:  # Report every 1s
                         duration = now - start_time
                         speed = total_sent / duration if duration > 0 else 0
                         progress = ((offset + total_sent) / file_size * 100) if file_size > 0 else 0
-                        
+
                         report_payload = {
                             "action": "transfer_progress",
                             "data": {
                                 "transfer_id": transfer_id,
                                 "progress": round(progress, 1),
-                                "speed": int(speed), # bytes/s
+                                "speed": int(speed),  # bytes/s
                                 "status": "transferring"
                             }
                         }
-                        asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps(report_payload)), self.client.loop)
+                        asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps(report_payload)),
+                                                         self.client.loop)
                         last_report_time = now
 
             # 等待剩余分片发送完毕
@@ -498,11 +512,11 @@ class FileTransferManager:
                 }
             }
             asyncio.run_coroutine_threadsafe(
-                self.client.websocket.send(json.dumps(finish_payload)), 
+                self.client.websocket.send(json.dumps(finish_payload)),
                 self.client.loop
             )
             SLog.i(TAG, f"Transfer {transfer_id} finished.")
-            
+
             # Report 100%
             asyncio.run_coroutine_threadsafe(self.client.websocket.send(json.dumps({
                 "action": "transfer_progress",
@@ -513,7 +527,7 @@ class FileTransferManager:
                     "status": "completed"
                 }
             })), self.client.loop)
-            
+
             # 清理发送端的临时文件
             if transfer_id in self.outgoing_transfers:
                 task = self.outgoing_transfers[transfer_id]
@@ -521,7 +535,8 @@ class FileTransferManager:
                     try:
                         os.remove(task["path"])
                         SLog.i(TAG, "Cleaned up temp zip file")
-                    except: pass
+                    except:
+                        pass
                 del self.outgoing_transfers[transfer_id]
 
         except Exception as e:
@@ -537,7 +552,7 @@ class FileTransferManager:
             SLog.i(TAG, f"Received file offer from {source_sn}: {data}")
             # 暂存请求，等待前端/用户调用 accept_transfer
             data['source_sn'] = source_sn
-            
+
             # Check for auto-accept
             save_path = data.get("save_path")
             if save_path:
@@ -555,14 +570,14 @@ class FileTransferManager:
             if transfer_id in self.outgoing_transfers:
                 task = self.outgoing_transfers[transfer_id]
                 SLog.i(TAG, f"Starting transmission for {transfer_id} from offset {offset}")
-                
+
                 loop = asyncio.get_running_loop()
                 # 启动后台发送线程
                 loop.run_in_executor(
-                    None, 
-                    self._send_chunks_sync, 
-                    source_sn, # 这里的 source_sn 其实是 target (信号来源是接收方)
-                    transfer_id, 
+                    None,
+                    self._send_chunks_sync,
+                    source_sn,  # 这里的 source_sn 其实是 target (信号来源是接收方)
+                    transfer_id,
                     task["path"],
                     offset
                 )
@@ -578,11 +593,13 @@ class FileTransferManager:
     async def handle_binary_chunk(self, transfer_id, data):
         await self.write_queue.put(("chunk", transfer_id, data))
 
+
 class StreamManager:
     """
     [新增] 流媒体管理器
     负责将连接在 PC 上的 Android 设备屏幕画面，通过 WebSocket 推流给远程控制端 (Launcher)
     """
+
     def __init__(self, client):
         self.client = client
         # { target_sn (viewer): subprocess }
@@ -590,95 +607,290 @@ class StreamManager:
 
     async def start_stream(self, device_sn, viewer_sn):
         """
-        启动投屏推流
-        :param device_sn: 本地 USB 连接的 Android 设备 SN
-        :param viewer_sn: 想要观看屏幕的远程设备 SN (扫码的手机)
+        [修复] 改为 async 方法，解决 'NoneType can't be used in await' 报错。
+        处理推流请求。如果目标已经在推流，则强制清理旧进程并重启。
         """
         if viewer_sn in self.active_streams:
-            SLog.w(TAG, f"Stream to {viewer_sn} already exists.")
-            return
+            SLog.w(TAG, f"Stream to {viewer_sn} already exists. Force restarting...")
 
+            # 1. 获取旧的进程对象
+            old_process = self.active_streams.get(viewer_sn)
+
+            # 2. 尝试终止旧进程
+            if old_process:
+                try:
+                    # 这是一个同步阻塞操作，但在清理场景下通常很快，可以直接执行
+                    old_process.terminate()
+                    try:
+                        old_process.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        SLog.w(TAG, "Old process is stuck, force killing...")
+                        old_process.kill()
+                except Exception as e:
+                    SLog.e(TAG, f"Error killing old stream: {e}")
+
+            # 3. 从字典中移除
+            self.active_streams.pop(viewer_sn, None)
+
+            # 4. [修改] 使用异步等待，释放端口且不阻塞 EventLoop
+            await asyncio.sleep(0.5)
+
+        # --- 以下是正常的启动逻辑 ---
         SLog.i(TAG, f"Starting screen stream: {device_sn} -> {viewer_sn}")
-        
-        # 启动后台线程读取视频流
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._start_stream_sync, device_sn, viewer_sn)
+
+        # 启动后台线程 (Thread 依然是同步启动的，这没问题)
+        thread = threading.Thread(target=self._start_stream_sync, args=(device_sn, viewer_sn))
+        thread.daemon = True
+        thread.start()
 
     def _start_stream_sync(self, device_sn, viewer_sn):
         """
         同步方法：启动 ADB 录屏并持续读取 stdout 发送
-        注意：这里使用简单的 screenrecord 演示，生产环境通常使用 scrcpy-server
+        [最终方案 v5] 针对 Android 12 + 华为设备的终极救砖配置：
+                     1. 使用 c2.android.avc.encoder (更现代的软编)
+                     2. 限制码率 500kbps (防止软编过载卡死)
+                     3. 保持 Hex SCID 和版本号参数
         """
         adb_path = get_adb_path().strip('"')
-        # 限制分辨率和比特率以保证实时性
-        cmd = [
-            adb_path, "-s", device_sn, "shell", 
-            "screenrecord", "--output-format=h264", "--size", "720x1280", "--bit-rate", "2M", "--time-limit", "180", "-"
-        ]
-        
-        try:
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1024*10
-            )
-            self.active_streams[viewer_sn] = process
-            
-            # 准备协议头: Magic(1)|Type(2=Stream)|SN_Len(1)|Target_SN
-            sn_bytes = viewer_sn.encode('utf-8')
-            header = struct.pack(f'!BBB{len(sn_bytes)}s', 0xAA, 0x02, len(sn_bytes), sn_bytes)
-            
-            SLog.i(TAG, f"Stream process started for {viewer_sn}, PID: {process.pid}")
+        scrcpy_server_path = get_scrcpy_server_path().strip('"')
 
+        if not os.path.exists(scrcpy_server_path):
+            SLog.e(TAG, f"Scrcpy server file not found: {scrcpy_server_path}")
+            return
+
+        # 协议头
+        sn_bytes = viewer_sn.encode('utf-8')
+        header = struct.pack(f'!BBB{len(sn_bytes)}s', 0xAA, 0x02, len(sn_bytes), sn_bytes)
+
+        SLog.i(TAG, f"Stream thread started for {viewer_sn}")
+
+        def _recv_exact(sock, n):
+            data = b''
+            while len(data) < n:
+                chunk = sock.recv(n - len(data))
+                if not chunk: raise ConnectionError(f"Socket closed")
+                data += chunk
+            return data
+
+        def _get_free_port():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', 0))
+                return s.getsockname()[1]
+
+        def _fetch_logcat_error():
+            try:
+                cmd = [adb_path, "-s", device_sn, "shell", "logcat -d -t 200"]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                return res.stdout.strip()
+            except:
+                return "Failed to fetch logcat."
+
+        # 在推流开始前，强制 Android 屏幕常亮 (Stay On when Plugged in)
+        # 3 = Charging via USB, 7 = Any power source
+        SLog.i(TAG, f"Enable Stay-Awake for {device_sn}")
+        subprocess.run([adb_path, "-s", device_sn, "shell", "svc power stayon true"], stdout=subprocess.DEVNULL)
+
+        # 1. 初始化
+        device_server_path = "/data/local/tmp/scrcpy-server.jar"
+        local_port = _get_free_port()
+
+        # Hex SCID
+        scid_int = random.randint(10000000, 99999999) & 0x7FFFFFFF
+        scid_hex = f"{scid_int:08x}"
+
+        socket_name = f"scrcpy_{scid_int:08x}"
+        SLog.i(TAG, f"Generated SCID: {scid_hex} -> Local Port: {local_port}")
+
+        process = None
+        video_socket = None
+        forward_created = False
+
+        try:
+            # 推送 & 清理
+            subprocess.run([adb_path, "-s", device_sn, "push", scrcpy_server_path, device_server_path],
+                           stdout=subprocess.DEVNULL)
+            subprocess.run([adb_path, "-s", device_sn, "shell", "logcat -c"], stdout=subprocess.DEVNULL)
+
+            # 转发
+            subprocess.run([adb_path, "-s", device_sn, "forward", f"tcp:{local_port}", f"localabstract:{socket_name}"],
+                           check=True)
+            forward_created = True
+
+            # 2. 启动 Server (高稳定性配置)
+            server_args = [
+                f"scid={scid_hex}",
+                "log_level=debug",
+                "video=true", "audio=false", "control=false",
+                "max_size=640",  # 分辨率 640 (够用且流畅)
+                "video_codec=h264",
+                "video_bit_rate=500000",  # 🔥 关键修改: 限制 500Kbps，防止 CPU 软解卡死
+                "video_encoder=c2.android.avc.encoder",  # 🔥 关键修改: 换用 Codec2 软编码器 (Android 12+ 标准)
+                "tunnel_forward=true",
+                "send_frame_meta=true", "send_device_meta=true", "send_codec_meta=false", "send_dummy_byte=true"
+            ]
+
+            # 保持 "3.3.3" 版本号参数
+            shell_cmd = f"CLASSPATH={device_server_path} app_process / com.genymobile.scrcpy.Server 3.3.3 {' '.join(server_args)}"
+            full_cmd = [adb_path, "-s", device_sn, "shell", shell_cmd]
+
+            SLog.i(TAG, f"Launching: {full_cmd}")
+            process = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.active_streams[viewer_sn] = process
+
+            time.sleep(1.5)
+
+            # 3. 连接
+            connected = False
+            for i in range(10):
+                if viewer_sn not in self.active_streams: break
+
+                if process.poll() is not None:
+                    SLog.e(TAG, "🔥 Scrcpy Died Early")
+                    SLog.e(TAG, f"👉 LOGCAT:\n{_fetch_logcat_error()}")
+                    break
+
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2.0)
+                    sock.connect(('127.0.0.1', local_port))
+
+                    dummy = sock.recv(1)
+                    if not dummy:
+                        SLog.e(TAG, "Socket closed immediately.")
+                        sock.close()
+                        SLog.e(TAG, f"👉 LOGCAT:\n{_fetch_logcat_error()}")
+                        return
+
+                    name = _recv_exact(sock, 64)
+                    sock.settimeout(None)
+                    video_socket = sock
+                    connected = True
+                    SLog.i(TAG, f"Connected! Device Name: {name.decode('utf-8', 'ignore').strip()}")
+                    break
+
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    if 'sock' in locals() and sock: sock.close()
+                    time.sleep(0.5)
+
+            if not connected:
+                if process.poll() is None:
+                    SLog.e(TAG, f"Timeout. Logs:\n{_fetch_logcat_error()}")
+                return
+
+            # 4. 转发循环
             while viewer_sn in self.active_streams:
-                # 读取视频流数据
-                data = process.stdout.read(4096) 
-                if not data:
+                try:
+                    # 读取 Meta
+                    meta = _recv_exact(video_socket, 12)
+                    pts, packet_size = struct.unpack("!QI", meta)
+
+                    if packet_size > 10 * 1024 * 1024:
+                        SLog.w(TAG, f"Packet too large: {packet_size}")
+                        break
+
+                    # 读取数据
+                    data = _recv_exact(video_socket, packet_size)
+                    payload = header + data
+
+                    # 发送
+                    if self.client.websocket:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.client.websocket.send(payload),
+                            self.client.loop
+                        )
+                        # 可选：不等待结果以提高吞吐量，或等待以捕获错误
+                    else:
+                        break
+                except Exception as e:
+                    SLog.e(TAG, f"Forward Loop Error: {e}")
                     break
-                
-                # 封装并发送
-                payload = header + data
-                
-                if self.client.websocket:
-                    # 使用 run_coroutine_threadsafe 跨线程发送
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.client.websocket.send(payload), 
-                        self.client.loop
-                    )
-                    # 简单的背压控制：如果积压太多则不等待，防止阻塞读取
-                    # 实际生产中需要更复杂的丢帧逻辑
-                else:
-                    break
-            
-            SLog.i(TAG, f"Stream to {viewer_sn} ended.")
-            
+
         except Exception as e:
-            SLog.e(TAG, f"Stream error: {e}")
+            SLog.e(TAG, f"Stream Error: {e}")
+
         finally:
-            self.stop_stream(viewer_sn)
+            # [恢复] 允许屏幕休眠
+            subprocess.run([adb_path, "-s", device_sn, "shell", "svc power stayon false"], stdout=subprocess.DEVNULL)
+            if video_socket: video_socket.close()
+            if forward_created:
+                try:
+                    subprocess.run([adb_path, "-s", device_sn, "forward", "--remove", f"tcp:{local_port}"],
+                                   stderr=subprocess.DEVNULL)
+                except:
+                    pass
+            if process:
+                try:
+                    process.terminate(); process.wait(timeout=1)
+                except:
+                    pass
+            if viewer_sn in self.active_streams: self.active_streams.pop(viewer_sn, None)
+            SLog.i(TAG, f"Stream ended: {viewer_sn}")
 
     def stop_stream(self, viewer_sn):
         """停止推流"""
         if viewer_sn in self.active_streams:
             proc = self.active_streams.pop(viewer_sn)
-            try:
-                proc.terminate()
-                proc.wait(timeout=1)
-            except Exception:
-                pass
+            if proc:
+                try:
+                    proc.terminate()
+                    # 不在此处 wait，由 _start_stream_sync 线程负责 wait，避免阻塞主线程
+                except Exception:
+                    pass
             SLog.i(TAG, f"Stopped stream for {viewer_sn}")
 
     async def handle_command(self, command, params):
         """处理流媒体相关指令"""
         if command == "start_stream":
             # 远程 Launcher 请求看某个设备的屏幕
-            device_sn = params.get("device_sn") # PC 上插着的手机
-            viewer_sn = params.get("viewer_sn") # 发起请求的 Launcher
+            device_sn = params.get("device_sn")  # PC 上插着的手机
+            viewer_sn = params.get("viewer_sn")  # 发起请求的 Launcher
             if device_sn and viewer_sn:
                 await self.start_stream(device_sn, viewer_sn)
-        
+
         elif command == "stop_stream":
             viewer_sn = params.get("viewer_sn")
             if viewer_sn:
                 self.stop_stream(viewer_sn)
+
+    # [解决 Point 5: 控制接口]
+    def handle_control(self, params):
+        """
+        处理来自 iOS 的控制指令，通过 ADB 执行
+        params: { "target_sn": "...", "action": "click/swipe", "x": 100, "y": 200, ... }
+        """
+        device_sn = params.get("target_sn")
+        action = params.get("action")
+        adb_path = get_adb_path().strip('"')
+
+        if not device_sn: return
+
+        # 使用 asyncio.create_task 或 线程池执行，避免阻塞主线程
+        threading.Thread(target=self._exec_adb_input, args=(adb_path, device_sn, action, params)).start()
+
+    def _exec_adb_input(self, adb, sn, action, params):
+        try:
+            if action == "click" or action == "tap":
+                x, y = params.get("x"), params.get("y")
+                # ADB 命令: input tap <x> <y>
+                subprocess.run([adb, "-s", sn, "shell", "input", "tap", str(x), str(y)])
+
+            elif action == "swipe":
+                x1, y1 = params.get("x1"), params.get("y1")
+                x2, y2 = params.get("x2"), params.get("y2")
+                duration = params.get("duration", 300)  # ms
+                # ADB 命令: input swipe <x1> <y1> <x2> <y2> <duration>
+                subprocess.run(
+                    [adb, "-s", sn, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)])
+
+            elif action == "home":
+                subprocess.run([adb, "-s", sn, "shell", "input", "keyevent", "3"])
+
+            elif action == "back":
+                subprocess.run([adb, "-s", sn, "shell", "input", "keyevent", "4"])
+
+        except Exception as e:
+            SLog.e(TAG, f"Control error: {e}")
+
 
 class DeviceClient:
     def __init__(self, server_url, sn, role="node", shared_responses=None, token=None):
@@ -700,8 +912,8 @@ class DeviceClient:
         if self.shared_responses is None:
             SLog.w(TAG, "Warning: shared_responses is None. IPC queries will fail.")
         self.is_running = False
-        self.msg_queue = multiprocessing.Queue() # 进程间通信队列
-        
+        self.msg_queue = multiprocessing.Queue()  # 进程间通信队列
+
         # 初始化文件传输管理器
         self.file_transfer = FileTransferManager(self)
         # [新增] 初始化流媒体管理器
@@ -714,16 +926,16 @@ class DeviceClient:
 
         while self.is_running:
             try:
-                self.loop = asyncio.get_running_loop() # 捕获当前 loop 供线程使用
-                
+                self.loop = asyncio.get_running_loop()  # 捕获当前 loop 供线程使用
+
                 # 构造连接 URL，自动附加 Token
                 connect_url = self.server_url
                 if self.token and "token=" not in connect_url:
                     sep = "&" if "?" in connect_url else "?"
                     connect_url = f"{connect_url}{sep}token={self.token}"
 
-                SLog.i(TAG, f"Connecting to {connect_url.split('?')[0]}...") # 日志隐藏 token
-                
+                SLog.i(TAG, f"Connecting to {connect_url.split('?')[0]}...")  # 日志隐藏 token
+
                 async with websockets.connect(connect_url) as ws:
                     self.websocket = ws
                     SLog.i(TAG, "Connected to server.")
@@ -741,11 +953,11 @@ class DeviceClient:
                         ]
                         # 只要有一个任务退出（如连接断开），就终止所有任务并重连
                         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                        
+
                         for task in tasks:
                             if not task.done():
                                 task.cancel()
-                        
+
                         # 确保所有任务都已清理
                         await asyncio.gather(*tasks, return_exceptions=True)
             except (websockets.ConnectionClosed, ConnectionRefusedError, OSError) as e:
@@ -805,7 +1017,7 @@ class DeviceClient:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
-                for line in lines[1:]: # 跳过第一行 List of devices attached
+                for line in lines[1:]:  # 跳过第一行 List of devices attached
                     if not line.strip(): continue
                     parts = line.split()
                     if len(parts) >= 2 and parts[1] == 'device':
@@ -852,7 +1064,7 @@ class DeviceClient:
                             "mac": udid
                         })
         except Exception:
-            pass # tidevice 可能未安装，忽略
+            pass  # tidevice 可能未安装，忽略
 
         return devices
 
@@ -973,13 +1185,13 @@ class DeviceClient:
                     file_path = params.get("file_path")
                     save_path = params.get("save_path")
                     await self.file_transfer.initiate_transfer(target_sn, file_path, save_path)
-                
+
                 elif command == "accept_file":
                     # 服务端/前端控制此设备接受文件
                     transfer_id = params.get("transfer_id")
                     save_path = params.get("save_path")
                     await self.file_transfer.accept_transfer(transfer_id, save_path)
-                
+
                 # --- 新增流媒体指令 ---
                 elif command in ["start_stream", "stop_stream"]:
                     await self.stream_manager.handle_command(command, params)
@@ -1023,7 +1235,9 @@ class DeviceClient:
                         }
                     }
                     await self.websocket.send(json.dumps(resp))
-
+                elif command == "control":
+                    # 服务端转发来的控制指令 -> 交给 StreamManager 处理
+                    self.stream_manager.handle_control(params)
                 else:
                     SLog.w(TAG, f"Unknown command: {command}")
 
@@ -1051,22 +1265,22 @@ class DeviceClient:
         try:
             # Protocol: Magic(1)|Type(1)|SN_Len(1)|SN|TID_Len(1)|TID|Data
             if len(message) < 5: return
-            
+
             magic, mtype, sn_len = struct.unpack_from('!BBB', message, 0)
             if magic != 0xAA: return
-            
+
             offset = 3
             # target_sn = message[offset:offset+sn_len].decode('utf-8') # Routing info
             offset += sn_len
-            
+
             tid_len = message[offset]
             offset += 1
-            transfer_id = message[offset:offset+tid_len].decode('utf-8')
+            transfer_id = message[offset:offset + tid_len].decode('utf-8')
             offset += tid_len
-            
+
             data = message[offset:]
-            
-            if mtype == 0x01: # Chunk
+
+            if mtype == 0x01:  # Chunk
                 await self.file_transfer.handle_binary_chunk(transfer_id, data)
         except Exception as e:
             SLog.e(TAG, f"Binary message error: {e}")
@@ -1102,7 +1316,7 @@ class DeviceClient:
                 SLog.i(TAG, "Removed target_url from config, switching back to Server Mode.")
         except Exception as e:
             SLog.e(TAG, f"Failed to update config: {e}")
-        
+
         SLog.i(TAG, "Restarting application to restore Server Mode...")
         time.sleep(1)
         python = sys.executable
@@ -1119,6 +1333,7 @@ class DeviceClient:
             "os_version": f"{platform.system()} {platform.release()}",
             "mac": self.sn.replace("device_", "")
         }
+
 
 if __name__ == "__main__":
     # 确保 multiprocessing 在 Windows/macOS 上正常工作
@@ -1143,14 +1358,15 @@ if __name__ == "__main__":
 
     # 使用 Manager 创建跨进程共享字典
     from multiprocessing import Manager as SyncManager
+
     with SyncManager() as manager:
         shared_responses = manager.dict()
-        
+
         # 尝试从 URL 中提取 token (如果是 Node 模式，token 可能已经在 target_url 里了)
         # 或者可以从 config 中单独读取 token 字段
         token = None
         # if "token=" in target_url: ... (DeviceClient 内部已处理 URL 拼接，这里主要处理显式传入)
-        
+
         client = DeviceClient(target_url, DEVICE_SN, role="node", shared_responses=shared_responses, token=token)
         try:
             asyncio.run(client.start())

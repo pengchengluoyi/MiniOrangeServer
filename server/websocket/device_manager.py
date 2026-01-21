@@ -25,6 +25,10 @@ class DeviceManager:
     # 维护观察者连接 (如前端页面)
     observers: set = set()
 
+    # [新增] 维护流会话映射: { "sender_sn": "viewer_sn" }
+    # 用于在一方断开时通知另一方
+    stream_sessions: Dict[str, str] = {}
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DeviceManager, cls).__new__(cls)
@@ -74,20 +78,74 @@ class DeviceManager:
         return None  # 心跳通常不需要回复内容，或者回复简单的 ack
 
     async def disconnect(self, websocket: WebSocket, data: dict):
-        """处理断开连接 (对应 wsMap 中的 disconnect)"""
-        # 因为 disconnect 事件传来的 data 通常为空，我们需要反查 websocket 对应的 SN
-        target_sns = []
-        for sn, ws in self.active_connections.items():
-            if ws == websocket:
-                target_sns.append(sn)
-        
+        # 找出断开的连接对应的 SN
+        target_sns = [sn for sn, ws in self.active_connections.items() if ws == websocket]
+
         for sn in target_sns:
-            del self.active_connections[sn]
+            # 🚨 关键修复: iOS 离线时，清理流会话
+            await self._cleanup_on_disconnect(sn)
+
+            if sn in self.active_connections:
+                del self.active_connections[sn]
             self._update_device_status(sn, "offline")
             SLog.i("DeviceManager", f"Device disconnected: {sn}")
-        
-        if websocket in self.observers:
-            self.observers.remove(websocket)
+
+    async def _cleanup_on_disconnect(self, disconnected_sn: str):
+        """
+        处理设备断开时的流清理
+        """
+        # 情况 1: 断开的是 iOS (接收端) -> 通知 Android 停止推流
+        # 查找所有正在给这个 iOS 推流的设备
+        senders_to_stop = [s for s, v in self.stream_sessions.items() if v == disconnected_sn]
+        for sender_sn in senders_to_stop:
+            SLog.i("DeviceManager", f"Viewer {disconnected_sn} left. Stopping stream on {sender_sn}")
+            del self.stream_sessions[sender_sn]  # 移除记录
+
+            sender_ws = self.active_connections.get(sender_sn)
+            if sender_ws:
+                # 发送停止指令给 client.py
+                await self._safe_send(sender_ws, {
+                    "type": "command",
+                    "command": "stop_stream",
+                    "params": {"reason": "viewer_disconnected"}
+                })
+
+        # 情况 2: 断开的是 Android (发送端) -> 通知 iOS 画面断了
+        if disconnected_sn in self.stream_sessions:
+            viewer_sn = self.stream_sessions.pop(disconnected_sn)
+            viewer_ws = self.active_connections.get(viewer_sn)
+            if viewer_ws:
+                await self._safe_send(viewer_ws, {
+                    "type": "command",
+                    "command": "stream_ended",
+                    "params": {"reason": "device_lost"}
+                })
+
+    async def handle_control_event(self, websocket: WebSocket, data: dict):
+        """
+        [解决 Point 5] 转发控制指令 (iOS -> Android)
+        data: { "target_sn": "Android_SN", "action": "click", "x": 100, "y": 200 }
+        """
+        target_sn = data.get("target_sn")
+        target_ws = self.active_connections.get(target_sn)
+
+        if target_ws:
+            # 直接转发给 Android 所在的 client.py
+            cmd = {
+                "type": "command",
+                "command": "control",
+                "params": data
+            }
+            await target_ws.send_text(json.dumps(cmd))
+            return {"code": 200, "msg": "forwarded"}
+        return {"code": 404, "msg": "device offline"}
+
+    # [新增] 安全发送辅助方法
+    async def _safe_send(self, ws: WebSocket, msg: dict):
+        try:
+            await ws.send_text(json.dumps(msg))
+        except:
+            pass
 
     async def send_command(self, sn: str, command: str, params: dict = None):
         """给设备发送指令"""
@@ -228,6 +286,142 @@ class DeviceManager:
 
         return {"code": 200, "msg": "ack", "req_id": req_id}
 
+    async def handle_start_stream(self, websocket: WebSocket, data: dict):
+        """
+        处理开始投屏请求
+        data: { "device_sn": "...", "viewer_sn": "..." }
+        """
+        # [修复] 兼容 iOS 端发送的 target 字段
+        device_sn = data.get("device_sn") or data.get("target")
+        
+        # [修复] 如果未传 viewer_sn，默认为当前请求的 WebSocket (即 iOS 端自己)
+        viewer_sn = data.get("viewer_sn")
+        if not viewer_sn:
+            viewer_sn = self._get_sn_by_ws(websocket)
+            
+        req_id = self._get_req_id(data)
+
+        if not device_sn or not viewer_sn:
+            return {"code": 400, "msg": "Missing device_sn or viewer_sn"}
+
+        # 找到目标设备（Android）所属的连接（PC Node）
+        # 注意：如果是 USB 连接的手机，device_sn 对应的 WebSocket 其实是宿主 PC 的连接
+        target_ws = self.active_connections.get(device_sn)
+        if not target_ws:
+            return {"code": 404, "msg": "Target device offline"}
+
+        # 发送指令给 PC Node，让它开始推流
+        cmd = {
+            "type": "command",
+            "command": "start_stream",
+            "params": {
+                "device_sn": device_sn,
+                "viewer_sn": viewer_sn
+            }
+        }
+        
+        try:
+            await target_ws.send_text(json.dumps(cmd))
+            return {"code": 200, "msg": "Stream command sent", "req_id": req_id}
+        except Exception as e:
+            return {"code": 500, "msg": str(e), "req_id": req_id}
+
+    async def handle_stop_stream(self, websocket: WebSocket, data: dict):
+        """
+        处理停止投屏请求
+        """
+        # [修复] 兼容 target 和自动获取 viewer_sn
+        device_sn = data.get("device_sn") or data.get("target")
+        viewer_sn = data.get("viewer_sn")
+        if not viewer_sn:
+            viewer_sn = self._get_sn_by_ws(websocket)
+            
+        req_id = self._get_req_id(data)
+
+        target_ws = self.active_connections.get(device_sn)
+        if target_ws:
+            cmd = {"type": "command", "command": "stop_stream", "params": {"viewer_sn": viewer_sn}}
+            try:
+                await target_ws.send_text(json.dumps(cmd))
+            except: pass
+        
+        return {"code": 200, "msg": "Stop command sent", "req_id": req_id}
+
+    async def handle_binary_stream(self, websocket: WebSocket, data: bytes):
+        """
+        处理二进制流转发
+        协议: Magic(1)|Type(1)|SN_Len(1)|Target_SN(N)|Payload(...)
+        """
+        if len(data) < 4:
+            return
+        
+        # 1. 解析协议头
+        magic = data[0]
+        if magic != 0xAA:
+            return
+            
+        msg_type = data[1]
+        sn_len = data[2]
+        
+        if len(data) < 3 + sn_len:
+            return
+            
+        # 2. 获取目标 SN
+        try:
+            target_sn_bytes = data[3 : 3 + sn_len]
+            target_sn = target_sn_bytes.decode('utf-8')
+        except:
+            return
+
+        # 3. 转发给目标
+        # 注意：这里我们直接转发原始二进制数据，保留协议头，
+        # 这样接收端(iOS/Web)可以校验 Magic 并解析 Payload
+        target_ws = self.active_connections.get(target_sn)
+        if target_ws:
+            try:
+                await target_ws.send_bytes(data)
+            except Exception as e:
+                # 网络波动时可能会发送失败，忽略即可，避免阻塞
+                SLog.w("DeviceManager", f"Stream forward error to {target_sn}: {e}")
+        else:
+            # [关键修复] 目标不存在时，通知发送端停止，防止无限 Log 刷屏
+            # SLog.w("DeviceManager", f"Target {target_sn} offline. Stopping stream.") # 可降低日志级别
+
+            # 既然目标都没了，告诉发送者 (iOS) 别发了
+            sender_ws = websocket
+            await self._safe_send(sender_ws, {
+                "type": "command",
+                "command": "stop_stream",
+                "params": {"reason": "target_not_found"}
+            })
+
+            # 同时清理可能的残留会话记录
+            sender_sn = self._get_sn_by_ws(websocket)
+            if sender_sn in self.stream_sessions:
+                del self.stream_sessions[sender_sn]
+
+    # 修改点 4: 在 handle_message 分发逻辑中增加 control 类型支持
+    # 你需要在 listen_loop 或 handle_message 的 if/else 里增加对 type="control" 的处理
+    # 或者直接复用 command 通道，但我建议分开
+    async def handle_control(self, websocket: WebSocket, data: dict):
+        """
+        处理控制信号 (Touch, Swipe, Home)
+        前端发来: { "type": "control", "target_sn": "...", "data": { "action": "touch", "x": 100, "y": 200 } }
+        """
+        target_sn = data.get("target_sn")
+        payload = data.get("data")
+
+        target_ws = self.active_connections.get(target_sn)
+        if not target_ws:
+            return {"code": 404, "msg": "Device offline"}
+
+        # 转发给设备 (iOS/Android)
+        msg = {
+            "type": "control",
+            "data": payload
+        }
+        await self._safe_send(target_ws, msg)
+        return {"code": 200, "msg": "ack"}
 
     # --- 数据库操作 ---
     def _update_device_status(self, sn: str, status: str):
