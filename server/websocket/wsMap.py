@@ -2,7 +2,7 @@
 from server.websocket.wsFile import handle_upload, handle_get_file
 from server.websocket.device_manager import DeviceManager
 from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_list, handle_get_component, \
-    handle_get_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, \
+    handle_get_device_password, handle_set_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, \
     handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list
 from server.websocket.routers.wAppGraph import (
     handle_app_graph_list,
@@ -27,6 +27,7 @@ HANDLERS = {
     "get_device_list": handle_get_device_list,
     "get_component": handle_get_component,
     "get_device_password": handle_get_device_password,
+    "set_device_password": handle_set_device_password,
     "register": device_manager.register,
     "heartbeat": device_manager.heartbeat,
     "disconnect": device_manager.disconnect,
@@ -55,5 +56,6 @@ HANDLERS = {
     "app_graph/match_solution": handle_match_solution,
     "app_graph/train_skeleton": handle_train_skeleton,
     "start_stream": device_manager.handle_start_stream,
-    "stop_stream": device_manager.handle_stop_stream
+    "stop_stream": device_manager.handle_stop_stream,
+    "device/control": device_manager.handle_control,
 }

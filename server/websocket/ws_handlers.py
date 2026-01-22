@@ -332,6 +332,27 @@ async def handle_get_device_password(websocket, data: dict):
         session.close()
 
 
+async def handle_set_device_password(websocket, data: dict):
+    """设置设备解锁密码"""
+    sn = data.get("sn")
+    password = data.get("password")
+    if not sn: return {"code": 400, "msg": "Missing SN"}
+    session = SessionLocal()
+    try:
+        device = session.query(MDevice).filter(MDevice.sn == sn).first()
+        if not device:
+            return {"code": 404, "msg": "Device not found"}
+
+        device.password = password
+        session.commit()
+        return {"code": 200, "msg": "Password updated"}
+    except Exception as e:
+        SLog.e("rDevice", f"Set password error: {e}")
+        return {"code": 500, "msg": f"Error: {e}"}
+    finally:
+        session.close()
+
+
 async def handle_get_timeline(websocket, data: dict):
     run_id = data.get("run_id")
 

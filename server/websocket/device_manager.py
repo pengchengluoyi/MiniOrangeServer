@@ -28,6 +28,7 @@ class DeviceManager:
     # [新增] 维护流会话映射: { "sender_sn": "viewer_sn" }
     # 用于在一方断开时通知另一方
     stream_sessions: Dict[str, str] = {}
+    _stop_command_sent: set = set()
 
     def __new__(cls):
         if cls._instance is None:
@@ -84,7 +85,8 @@ class DeviceManager:
         for sn in target_sns:
             # 🚨 关键修复: iOS 离线时，清理流会话
             await self._cleanup_on_disconnect(sn)
-
+            if sn in self._stop_command_sent:
+                self._stop_command_sent.remove(sn)  # 清理标记
             if sn in self.active_connections:
                 del self.active_connections[sn]
             self._update_device_status(sn, "offline")
@@ -386,14 +388,25 @@ class DeviceManager:
         else:
             # [关键修复] 目标不存在时，通知发送端停止，防止无限 Log 刷屏
             # SLog.w("DeviceManager", f"Target {target_sn} offline. Stopping stream.") # 可降低日志级别
+            # [修复刷屏] 只有没发过指令才发
+            sender_sn = self._get_sn_by_ws(websocket)
+            if sender_sn and sender_sn not in self._stop_command_sent:
+                SLog.w("DeviceManager", f"Target {target_sn} offline. Stopping stream on {sender_sn}.")
 
-            # 既然目标都没了，告诉发送者 (iOS) 别发了
-            sender_ws = websocket
-            await self._safe_send(sender_ws, {
-                "type": "command",
-                "command": "stop_stream",
-                "params": {"reason": "target_not_found"}
-            })
+                self._stop_command_sent.add(sender_sn)  # 标记已发送
+
+                await self._safe_send(websocket, {
+                    "type": "command",
+                    "command": "stop_stream",
+                    "params": {"reason": "target_not_found"}
+                })
+            # # 既然目标都没了，告诉发送者 (iOS) 别发了
+            # sender_ws = websocket
+            # await self._safe_send(sender_ws, {
+            #     "type": "command",
+            #     "command": "stop_stream",
+            #     "params": {"reason": "target_not_found"}
+            # })
 
             # 同时清理可能的残留会话记录
             sender_sn = self._get_sn_by_ws(websocket)
@@ -408,7 +421,7 @@ class DeviceManager:
         处理控制信号 (Touch, Swipe, Home)
         前端发来: { "type": "control", "target_sn": "...", "data": { "action": "touch", "x": 100, "y": 200 } }
         """
-        target_sn = data.get("target_sn")
+        target_sn = data.get("device_sn") or data.get("target_sn")
         payload = data.get("data")
 
         target_ws = self.active_connections.get(target_sn)
@@ -417,8 +430,9 @@ class DeviceManager:
 
         # 转发给设备 (iOS/Android)
         msg = {
-            "type": "control",
-            "data": payload
+            "type": "command",
+            "command": "control",
+            "params": payload
         }
         await self._safe_send(target_ws, msg)
         return {"code": 200, "msg": "ack"}

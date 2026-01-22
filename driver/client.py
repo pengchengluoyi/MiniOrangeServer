@@ -594,6 +594,39 @@ class FileTransferManager:
         await self.write_queue.put(("chunk", transfer_id, data))
 
 
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class StreamConfig:
+    resolution: int = 0  # 0 = 原生分辨率 (不限制), 2560 = 2K, 3840 = 4K
+    bitrate: int = 4000000  # 默认 8Mbps (适合 1080p/2K)
+    fps: int = 5  # 帧率
+    encoder: Optional[str] = None  # None = 自动选择 (推荐), 指定字符串则强制使用
+
+    @classmethod
+    def preset_native_smooth(cls):
+        """原生分辨率，高码率，流畅"""
+        # return cls(resolution=0, bitrate=10000000, fps=60)
+        return cls(resolution=1080, bitrate=4000000, fps=15)
+
+    @classmethod
+    def preset_2k_quality(cls):
+        """2K 分辨率，画质优先"""
+        return cls(resolution=2560, bitrate=12000000, fps=30)
+
+    @classmethod
+    def preset_4k_ultra(cls):
+        """4K 超高清 (需手机硬件支持)"""
+        return cls(resolution=3840, bitrate=20000000, fps=30)
+
+    @classmethod
+    def preset_compatibility(cls):
+        """兼容模式 (类似你之前的救砖配置)"""
+        return cls(resolution=1024, bitrate=1000000, fps=30, encoder="c2.android.avc.encoder")
+
+
 class StreamManager:
     """
     [新增] 流媒体管理器
@@ -604,46 +637,39 @@ class StreamManager:
         self.client = client
         # { target_sn (viewer): subprocess }
         self.active_streams = {}
+        self.is_streaming = False  # [新增] 全局流状态标志
 
-    async def start_stream(self, device_sn, viewer_sn):
+    async def start_stream(self, device_sn, viewer_sn, config: StreamConfig = None):
         """
-        [修复] 改为 async 方法，解决 'NoneType can't be used in await' 报错。
-        处理推流请求。如果目标已经在推流，则强制清理旧进程并重启。
+        [修复 & 增强] 支持高清、低延迟配置
         """
+        # 如果没有传入配置，使用默认的高清配置
+        if config is None:
+            config = StreamConfig.preset_native_smooth()
+
         if viewer_sn in self.active_streams:
             SLog.w(TAG, f"Stream to {viewer_sn} already exists. Force restarting...")
-
-            # 1. 获取旧的进程对象
             old_process = self.active_streams.get(viewer_sn)
-
-            # 2. 尝试终止旧进程
             if old_process:
                 try:
-                    # 这是一个同步阻塞操作，但在清理场景下通常很快，可以直接执行
                     old_process.terminate()
                     try:
                         old_process.wait(timeout=1.0)
                     except subprocess.TimeoutExpired:
-                        SLog.w(TAG, "Old process is stuck, force killing...")
                         old_process.kill()
                 except Exception as e:
                     SLog.e(TAG, f"Error killing old stream: {e}")
-
-            # 3. 从字典中移除
             self.active_streams.pop(viewer_sn, None)
-
-            # 4. [修改] 使用异步等待，释放端口且不阻塞 EventLoop
             await asyncio.sleep(0.5)
 
-        # --- 以下是正常的启动逻辑 ---
-        SLog.i(TAG, f"Starting screen stream: {device_sn} -> {viewer_sn}")
+        SLog.i(TAG, f"Starting stream: {device_sn} -> {viewer_sn} | Config: {config}")
 
-        # 启动后台线程 (Thread 依然是同步启动的，这没问题)
-        thread = threading.Thread(target=self._start_stream_sync, args=(device_sn, viewer_sn))
+        # 将 config 传给线程
+        thread = threading.Thread(target=self._start_stream_sync, args=(device_sn, viewer_sn, config))
         thread.daemon = True
         thread.start()
 
-    def _start_stream_sync(self, device_sn, viewer_sn):
+    def _start_stream_sync(self, device_sn, viewer_sn, config: StreamConfig):
         """
         同步方法：启动 ADB 录屏并持续读取 stdout 发送
         [最终方案 v5] 针对 Android 12 + 华为设备的终极救砖配置：
@@ -651,6 +677,7 @@ class StreamManager:
                      2. 限制码率 500kbps (防止软编过载卡死)
                      3. 保持 Hex SCID 和版本号参数
         """
+        self.is_streaming = True  # 开始时置为 True
         adb_path = get_adb_path().strip('"')
         scrcpy_server_path = get_scrcpy_server_path().strip('"')
 
@@ -719,15 +746,27 @@ class StreamManager:
             # 2. 启动 Server (高稳定性配置)
             server_args = [
                 f"scid={scid_hex}",
-                "log_level=debug",
+                "log_level=info",
                 "video=true", "audio=false", "control=false",
-                "max_size=640",  # 分辨率 640 (够用且流畅)
                 "video_codec=h264",
-                "video_bit_rate=500000",  # 🔥 关键修改: 限制 500Kbps，防止 CPU 软解卡死
-                "video_encoder=c2.android.avc.encoder",  # 🔥 关键修改: 换用 Codec2 软编码器 (Android 12+ 标准)
+                # "video_bit_rate=500000",  # 🔥 关键修改: 限制 500Kbps，防止 CPU 软解卡死
+                f"video_bit_rate={config.bitrate}",
+                f"max_fps={config.fps}",
                 "tunnel_forward=true",
-                "send_frame_meta=true", "send_device_meta=true", "send_codec_meta=false", "send_dummy_byte=true"
+                "send_frame_meta=true", "send_device_meta=true", "send_codec_meta=false", "send_dummy_byte=true",
+                "i_frame_interval=2",
             ]
+            # 3. 动态分辨率 (解决模糊问题)
+            # 如果 config.resolution 为 0，则不传 max_size，scrcpy 默认使用原生分辨率
+            if config.resolution > 0:
+                server_args.append(f"max_size={config.resolution}")
+
+            # 4. 编码器选择 (解决延迟/卡顿问题)
+            # 除非 config 明确指定了 encoder (比如为了救砖)，否则不要传 video_encoder 参数
+            # scrcpy-server 会自动寻找最佳的硬件编码器 (如 OMX.qcom.video.encoder.avc)
+            if config.encoder:
+                SLog.w(TAG, f"Force using encoder: {config.encoder}")
+                server_args.append(f"video_encoder={config.encoder}")
 
             # 保持 "3.3.3" 版本号参数
             shell_cmd = f"CLASSPATH={device_server_path} app_process / com.genymobile.scrcpy.Server 3.3.3 {' '.join(server_args)}"
@@ -778,14 +817,14 @@ class StreamManager:
                 return
 
             # 4. 转发循环
-            while viewer_sn in self.active_streams:
+            while viewer_sn in self.active_streams and self.is_streaming:
                 try:
                     # 读取 Meta
                     meta = _recv_exact(video_socket, 12)
                     pts, packet_size = struct.unpack("!QI", meta)
 
-                    if packet_size > 10 * 1024 * 1024:
-                        SLog.w(TAG, f"Packet too large: {packet_size}")
+                    if packet_size > 30 * 1024 * 1024:
+                        SLog.w(TAG, f"Packet too large: {packet_size}, potential error.")
                         break
 
                     # 读取数据
@@ -810,6 +849,7 @@ class StreamManager:
 
         finally:
             # [恢复] 允许屏幕休眠
+            self.is_streaming = False  # 确保退出
             subprocess.run([adb_path, "-s", device_sn, "shell", "svc power stayon false"], stdout=subprocess.DEVNULL)
             if video_socket: video_socket.close()
             if forward_created:
@@ -828,6 +868,7 @@ class StreamManager:
 
     def stop_stream(self, viewer_sn):
         """停止推流"""
+        self.is_streaming = False  # [关键] 立即置为 False
         if viewer_sn in self.active_streams:
             proc = self.active_streams.pop(viewer_sn)
             if proc:
@@ -858,6 +899,7 @@ class StreamManager:
         处理来自 iOS 的控制指令，通过 ADB 执行
         params: { "target_sn": "...", "action": "click/swipe", "x": 100, "y": 200, ... }
         """
+        SLog.i("handle_control", params)
         device_sn = params.get("target_sn")
         action = params.get("action")
         adb_path = get_adb_path().strip('"')
@@ -871,6 +913,8 @@ class StreamManager:
         try:
             if action == "click" or action == "tap":
                 x, y = params.get("x"), params.get("y")
+                SLog.i("", f"{x} {y}")
+                SLog.i("", f"{x} {y}")
                 # ADB 命令: input tap <x> <y>
                 subprocess.run([adb, "-s", sn, "shell", "input", "tap", str(x), str(y)])
 
@@ -882,11 +926,17 @@ class StreamManager:
                 subprocess.run(
                     [adb, "-s", sn, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)])
 
-            elif action == "home":
-                subprocess.run([adb, "-s", sn, "shell", "input", "keyevent", "3"])
+            elif action == "text":
+                context = params.get("text")
+                # ADB 命令: input text <text>
+                subprocess.run(
+                    [adb, "-s", sn, "shell", "input", "text", str(context)])
 
-            elif action == "back":
-                subprocess.run([adb, "-s", sn, "shell", "input", "keyevent", "4"])
+            elif action == "keyevent":
+                keyevent = params.get("keyevent")
+                # ADB 命令: input text <text>
+                subprocess.run(
+                    [adb, "-s", sn, "shell", "input", "keyevent", str(keyevent)])
 
         except Exception as e:
             SLog.e(TAG, f"Control error: {e}")
