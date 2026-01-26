@@ -18,13 +18,23 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
 
     # [安全校验] 检查 Access Token
     server_token = SecurityManager.get_token()
-    if server_token and token != server_token:
-        SLog.w(TAG, f"Connection rejected: Invalid token '{token}'")
+    SLog.i(TAG, f"⚡ [WS] New connection attempt. Client token: {token}. Server token (from get_token): {server_token}")
+    if server_token is None:
+        # Case 1: 初始化模式 (Setup Mode)
+        # 服务端还没配置 Token，允许前端连接以获取二维码
+        SLog.i(TAG, "⚠️ [Setup Mode] No server token configured. Accepting connection.")
+        await websocket.accept()
+    elif token == server_token:
+        # Case 2: 正常鉴权通过
+        # SLog.i(TAG, "✅ Client authenticated.")
+        await websocket.accept()
+
+    else:
+        # Case 3: 鉴权失败
+        # 服务端有 Token，但客户端没传或者传错了
+        SLog.w(TAG, f"⛔ Connection rejected. Server Token: {str(server_token)[:6]}... Client Sent: {token}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-
-    await websocket.accept()
-    SLog.i(TAG, "Client connected")
     
     # 发送锁，防止并发任务同时写入 WebSocket 导致协议错误
     send_lock = asyncio.Lock()
@@ -44,6 +54,37 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
         }
         
         try:
+            # 🔥 [Fix] 动态获取当前 Token，而不是使用连接时的 server_token 快照
+            # 因为 join_cluster 后 Token 会变化，但 WebSocket 连接保持不变
+            current_token = SecurityManager.get_token()
+            
+            if current_token is None:
+                allowed_actions = ["get_server_info", "join_cluster", "get_node_status", "register", "heartbeat"]
+                if action not in allowed_actions:
+                    response.update({"code": 403, "msg": "Server not initialized. Please scan QR code first."})
+                    async with send_lock:
+                        await websocket.send_text(json.dumps(response))
+                    return
+            
+            # 🔥 [新增] 节点离线检测 (Node Mode Offline Check)
+            # 如果本机是 Node 模式且与集群断开，拒绝大部分业务请求，并通知移动端
+            client = getattr(websocket.app.state, "device_client", None)
+            is_node_offline = False
+            if client and client.role == 'node':
+                # 检查 DeviceClient 内部的 WebSocket 连接状态
+                if not client.websocket or not getattr(client.websocket, "open", False):
+                    is_node_offline = True
+            
+            # 1. 所有接口都返回当前节点状态，通知移动端
+            response["node_status"] = "offline" if is_node_offline else "online"
+
+            # 2. [新增接口] 专门用于查询离线状态
+            if action == "get_offline_status":
+                response.update({"code": 200, "data": {"is_offline": is_node_offline}})
+                async with send_lock:
+                    await websocket.send_text(json.dumps(response))
+                return
+
             if action in HANDLERS:
                 handler = HANDLERS[action]
                 result = None

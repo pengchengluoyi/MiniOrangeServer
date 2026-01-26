@@ -1,6 +1,13 @@
 # 动作分发映射
 from server.websocket.wsFile import handle_upload, handle_get_file
 from server.websocket.device_manager import DeviceManager
+from server.websocket.routers.wNode import (
+    handle_get_node_status,
+    handle_get_server_info,
+    handle_join_cluster,
+    handle_leave_cluster,
+    handle_update_server_config
+)
 from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_list, handle_get_component, \
     handle_get_device_password, handle_set_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, \
     handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list
@@ -21,7 +28,14 @@ from server.websocket.routers.wAppGraph import (
 device_manager = DeviceManager()
 
 HANDLERS = {
-    "upload": handle_upload,
+    # 登录态
+    "get_node_status": handle_get_node_status,
+    "get_server_info": handle_get_server_info,
+    "join_cluster": handle_join_cluster,
+    "leave_cluster": handle_leave_cluster,
+    "update_server_config": handle_update_server_config,
+
+
     "get_file": handle_get_file,
     "run_workflow": handle_run_workflow,
     "get_device_list": handle_get_device_list,

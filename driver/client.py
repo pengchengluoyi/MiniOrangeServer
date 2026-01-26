@@ -26,12 +26,16 @@ import struct
 import websockets
 import concurrent.futures
 import builtins  # 用于注入全局变量
+from urllib.parse import urlparse
 from script.log import SLog, current_run_id, current_flow_id
 import adbutils
 from driver.agent.Core.orchestrator import Orchestrator
 from driver.tentacle.common.mPath import get_adb_path, get_scrcpy_server_path
 
-# 服务端 WebSocket 地址 (根据实际部署修改)
+# 🔥 [新增] 引入 SecurityManager，实现配置大一统
+from server.core.security import SecurityManager
+
+# 服务端 WebSocket 地址
 DEFAULT_SERVER_URL = "ws://miniorange.local:10104/ws"
 
 
@@ -45,10 +49,11 @@ def get_local_ip():
                 if snic.family == socket.AF_INET:
                     ip = snic.address
                     if ip == "127.0.0.1": continue
+                    if ip.startswith("169.254."): continue
                     if ip.startswith("198.18."): continue  # 过滤 Clash 虚拟 IP
 
                     if ip.startswith("100."):
-                        return ip  # 🚀 发现 Tailscale IP 立即返回，防止被后续网卡覆盖
+                        return ip  # 🚀 发现 Tailscale IP 立即返回
                     elif ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
                         if not lan_ip:
                             lan_ip = ip
@@ -66,50 +71,17 @@ def get_local_ip():
         return "127.0.0.1"
 
 
-# [新增] 统一配置文件路径
-CONFIG_DIR = Path.home() / ".miniorange"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-
-
-def load_config():
-    """加载配置文件"""
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def save_config(config):
-    """保存配置文件"""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4)
-
-
 def get_persistent_device_sn():
     """获取持久化的设备 SN，防止重启后 MAC 漂移导致识别为新设备"""
-    config = load_config()
+    # 🔥 [统一] 直接使用 SecurityManager
+    if not SecurityManager._config:
+        SecurityManager.load()
+    
+    config = SecurityManager._config
 
     # 1. 尝试从 Config 读取
     if "device_sn" in config and config["device_sn"]:
         return config["device_sn"]
-
-    # 2. 兼容旧版: 尝试从 device_id.txt 迁移
-    old_sn_file = CONFIG_DIR / "device_id.txt"
-    if old_sn_file.exists():
-        try:
-            with open(old_sn_file, "r", encoding="utf-8") as f:
-                sn = f.read().strip()
-                if sn:
-                    config["device_sn"] = sn
-                    save_config(config)
-                    SLog.i("DeviceClient", f"Migrated Device SN from txt: {sn}")
-                    return sn
-        except Exception:
-            pass
 
     # 3. 生成新的 SN
     mac = uuid.getnode()
@@ -118,7 +90,7 @@ def get_persistent_device_sn():
 
     # 4. 保存到 Config
     config["device_sn"] = sn
-    save_config(config)
+    SecurityManager.save()
     SLog.i("DeviceClient", f"Generated and saved new Device SN: {sn}")
 
     return sn
@@ -942,10 +914,69 @@ class StreamManager:
             SLog.e(TAG, f"Control error: {e}")
 
 
+class NetworkSelector:
+    """网络竞速器：并发测试多个节点，返回最快的一个"""
+
+    @staticmethod
+    async def measure_latency(url, timeout=2.0):
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == 'wss' else 80)
+
+            start_time = time.time()
+            # 建立 TCP 连接 (比 WS 握手更轻量)
+            waiter = asyncio.open_connection(host, port)
+            # 分离 reader, writer，设置超时
+            reader, writer = await asyncio.wait_for(waiter, timeout)
+
+            # 🔥 [修复核心] 只要连上就算成功，立即计算耗时
+            latency = (time.time() - start_time) * 1000
+
+            # 2. 独立的清理块 (即使这里报错也不影响结果)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                # Uvicorn 可能会因为非法 HTTP 请求主动断开，忽略此错误
+                pass
+
+            # SLog.d("NetworkSelector", f"Ping {host}: {latency:.1f}ms")
+            return url, latency
+        except Exception:
+            return url, 99999
+
+    @staticmethod
+    async def select_best_url(urls: list):
+        if not urls: return None
+        SLog.i("NetworkSelector", f"{urls}")
+        # 如果只有一个地址，直接返回，不浪费时间测速
+        if len(urls) == 1: return urls[0]
+
+        SLog.i("NetworkSelector", f"Racing {len(urls)} candidates...")
+        tasks = [NetworkSelector.measure_latency(url) for url in urls]
+        results = await asyncio.gather(*tasks)
+
+        # 过滤超时 (99999) 的地址
+        valid = [r for r in results if r[1] < 90000]
+        if not valid:
+            return None
+
+        # 按延迟排序
+        valid.sort(key=lambda x: x[1])
+        best_url, best_latency = valid[0]
+        SLog.i("NetworkSelector", f"🏆 Winner: {best_url} ({best_latency:.1f}ms)")
+        return best_url
+
+
 class DeviceClient:
-    def __init__(self, server_url, sn, role="node", shared_responses=None, token=None):
-        self.server_url = server_url
+    def __init__(self, candidates, sn, role="node", shared_responses=None, token=None):
+        if isinstance(candidates, str):
+            self.candidate_urls = [candidates]
+        else:
+            self.candidate_urls = candidates or []
         self.sn = sn
+        
         self.role = role
         self.token = token
 
@@ -968,6 +999,38 @@ class DeviceClient:
         self.file_transfer = FileTransferManager(self)
         # [新增] 初始化流媒体管理器
         self.stream_manager = StreamManager(self)
+        self.current_connected_url = None
+        self.connected_event = asyncio.Event()  # 🔥 [新增] 连接状态事件
+
+    def stop(self):
+        """停止客户端，清理所有子进程和任务 (线程安全版)"""
+        SLog.i(TAG, "Stopping DeviceClient...")
+        self.is_running = False
+        self.connected_event.clear()  # 🔥 [新增] 重置状态
+
+        # 1. 安全关闭 WebSocket
+        if self.websocket:
+            try:
+                # 方案 A: 如果当前就在异步线程里 (比如被 async 函数调用)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.websocket.close())
+                except RuntimeError:
+                    # 方案 B: 如果当前在同步线程里 (比如 Restart 线程)
+                    # 我们需要把它"抛"回 start() 所在的那个 loop 去执行
+                    if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                        asyncio.run_coroutine_threadsafe(self.websocket.close(), self.loop)
+                    else:
+                        SLog.w(TAG, "Cannot close websocket gracefully: No running loop found.")
+            except Exception as e:
+                SLog.w(TAG, f"Error closing websocket: {e}")
+
+        # 2. 停止所有流媒体进程
+        if hasattr(self, 'stream_manager'):
+            for viewer_sn in list(self.stream_manager.active_streams.keys()):
+                self.stream_manager.stop_stream(viewer_sn)
+
+        SLog.i(TAG, "DeviceClient stopped.")
 
     async def start(self):
         """启动客户端主循环"""
@@ -978,16 +1041,35 @@ class DeviceClient:
             try:
                 self.loop = asyncio.get_running_loop()  # 捕获当前 loop 供线程使用
 
-                # 构造连接 URL，自动附加 Token
-                connect_url = self.server_url
+                if not self.candidate_urls:
+                    SLog.w(TAG, "No candidate URLs provided. Sleeping...")
+                    await asyncio.sleep(5)
+                    continue
+
+                target_url = await NetworkSelector.select_best_url(self.candidate_urls)
+
+                if not target_url:
+                    SLog.w(TAG, "All networks unreachable. Retrying in 5s...")
+                    self.current_connected_url = None  # 更新状态
+                    await asyncio.sleep(5)
+                    continue
+
+                # 构造带 Token 的最终 URL
+                connect_url = target_url
                 if self.token and "token=" not in connect_url:
                     sep = "&" if "?" in connect_url else "?"
                     connect_url = f"{connect_url}{sep}token={self.token}"
 
-                SLog.i(TAG, f"Connecting to {connect_url.split('?')[0]}...")  # 日志隐藏 token
+                # ---------------------------------------------------------
+                # Step 2: 建立连接
+                # ---------------------------------------------------------
+                SLog.i(TAG, f"Connecting to {target_url}...")
 
                 async with websockets.connect(connect_url) as ws:
                     self.websocket = ws
+                    self.current_connected_url = target_url  # 更新状态给 UI 看
+                    self.connected_event.set()  # 🔥 [新增] 标记为已连接
+
                     SLog.i(TAG, "Connected to server.")
 
                     # 1. 发送注册包
@@ -1010,14 +1092,21 @@ class DeviceClient:
 
                         # 确保所有任务都已清理
                         await asyncio.gather(*tasks, return_exceptions=True)
+            # ---------------------------------------------------------
+            # Step 3: 异常处理与重试
+            # ---------------------------------------------------------
             except (websockets.ConnectionClosed, ConnectionRefusedError, OSError) as e:
-                SLog.w(TAG, f"Connection lost or failed: {e}. Retrying in 5s...")
-                await asyncio.sleep(5)
+                SLog.w(TAG, f"❌ Connection lost ({type(e).__name__}). Switching network...")
+                self.websocket = None
+                self.current_connected_url = None
+                # 这里不 sleep 太久，立即尝试寻找下一个可用网络
+                await asyncio.sleep(1)
             except Exception as e:
                 SLog.e(TAG, f"Unexpected error: {e}")
                 await asyncio.sleep(5)
             finally:
                 self.websocket = None
+                self.connected_event.clear()  # 🔥 [新增] 标记为断开
 
     async def register(self):
         """向服务端注册设备信息"""
@@ -1359,11 +1448,9 @@ class DeviceClient:
     def reset_to_server_mode(self):
         """退出 Node 模式，移除 target_url 配置并重启"""
         try:
-            config = load_config()
-            if "target_url" in config:
-                del config["target_url"]
-                save_config(config)
-                SLog.i(TAG, "Removed target_url from config, switching back to Server Mode.")
+            # 使用 SecurityManager 的原子清除方法，确保彻底清除
+            SecurityManager.clear_cluster_config()
+            SLog.i(TAG, "Cluster config cleared, switching back to Server Mode.")
         except Exception as e:
             SLog.e(TAG, f"Failed to update config: {e}")
 
@@ -1393,6 +1480,35 @@ if __name__ == "__main__":
     os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",localhost,127.0.0.1,::1,miniorange.local,0.0.0.0,100.*"
     os.environ["NO_PROXY"] = os.environ["no_proxy"]
 
+    # 1. 加载配置
+    # 🔥 [统一] 直接使用 SecurityManager
+    if not SecurityManager._config:
+        SecurityManager.load()
+    config = SecurityManager._config
+
+    # 获取候选列表：优先读取 'candidate_urls'，如果没有则回退到 'target_url'
+    candidate_urls = config.get("candidate_urls", [])
+
+    # 🔥🔥🔥 [修复] 强制类型检查 🔥🔥🔥
+    if isinstance(candidate_urls, str):
+        candidate_urls = [candidate_urls]
+
+    if not candidate_urls and config.get("target_url"):
+        candidate_urls = [config.get("target_url")]
+
+    # 如果配置为空，且本地开启了 Server，则添加本地回环地址作为保底
+    if not candidate_urls:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.2)
+            if sock.connect_ex(('127.0.0.1', 10104)) == 0:
+                # 注意：本地连接通常不需要 token，或者使用默认机制
+                candidate_urls.append("ws://127.0.0.1:10104/ws")
+            sock.close()
+        except:
+            pass
+
+
     # 自动选择连接地址: 优先尝试本地，失败则使用 mDNS 域名
     target_url = DEFAULT_SERVER_URL
     try:
@@ -1412,13 +1528,36 @@ if __name__ == "__main__":
     with SyncManager() as manager:
         shared_responses = manager.dict()
 
-        # 尝试从 URL 中提取 token (如果是 Node 模式，token 可能已经在 target_url 里了)
-        # 或者可以从 config 中单独读取 token 字段
-        token = None
-        # if "token=" in target_url: ... (DeviceClient 内部已处理 URL 拼接，这里主要处理显式传入)
+        # 3. 循环重试逻辑 (包含自动选路)
+        # 如果连接断开，我们希望重新进行一次 "选路"，因为网络环境可能变了
+        while True:
+            if not candidate_urls:
+                SLog.w(TAG, "No target URLs configured. Waiting...")
+                time.sleep(5)
+                # 重新加载配置，也许用户通过 API 更新了配置
+                SecurityManager.load()
+                config = SecurityManager._config
+                
+                candidate_urls = config.get("candidate_urls", [])
+                continue
 
-        client = DeviceClient(target_url, DEVICE_SN, role="node", shared_responses=shared_responses, token=token)
-        try:
-            asyncio.run(client.start())
-        except KeyboardInterrupt:
-            SLog.i(TAG, "Stopped by user")
+            # 🔥 4. 运行竞速选择 (使用 asyncio 运行异步函数)
+            SLog.i(TAG, "Starting Network Selection...")
+            best_url = asyncio.run(NetworkSelector.select_best_url(candidate_urls))
+
+            if not best_url:
+                SLog.e(TAG, "All connection attempts failed. Retrying in 5s...")
+                time.sleep(5)
+                continue
+
+            # 5. 启动 Client
+            # 注意：DeviceClient 内部如果断开连接，会退出 start()
+            # 退出后，外层的 while True 会再次触发 NetworkSelector，从而实现环境切换自适应
+            client = DeviceClient(best_url, DEVICE_SN, role="node", shared_responses=shared_responses)
+            try:
+                asyncio.run(client.start())
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                SLog.e(TAG, f"Client crashed: {e}. Rebooting client logic...")
+                time.sleep(3)
