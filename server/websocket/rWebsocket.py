@@ -43,9 +43,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
         """独立处理每条消息的任务函数"""
         action = payload.get("action")
         req_id = payload.get("req_id")
-        data = payload.get("data", {})
         if action != "heartbeat" and action != "upload":
             SLog.i(TAG, payload)
+
+        data = payload.get("data", {}).copy()
+
+        # 2. 找出“其他”参数
+        # 排除 action, req_id, 以及原本的 "data" key 本身
+        extra_params = {
+            k: v for k, v in payload.items()
+            if k not in ["action", "req_id", "data"]
+        }
+
+        # 3. 将这些额外参数合并进 data
+        data.update(extra_params)
         
         response = {
             "action": action,

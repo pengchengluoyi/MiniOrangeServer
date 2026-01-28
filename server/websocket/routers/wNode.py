@@ -133,6 +133,10 @@ async def handle_get_server_info(websocket, data: dict):
         hostname = platform.node()
         token = SecurityManager.get_token()
 
+        # 🔥 [新增] 获取当前设备角色，供 App 扫码时判断
+        client = getattr(websocket.app.state, "device_client", None)
+        role = client.role if client else "server"
+
         candidate_urls = _get_all_server_urls(port, token)
 
         qr_payload = json.dumps({
@@ -149,7 +153,8 @@ async def handle_get_server_info(websocket, data: dict):
                 "hostname": hostname,
                 "candidate_urls": candidate_urls,
                 "token": token,
-                "qr_payload": qr_payload
+                "qr_payload": qr_payload,
+                "role": role  # 🔥 返回角色，App 看到是 "server"/ "client" 才会显示"加入集群"按钮
             }
         }
     except Exception as e:
@@ -209,13 +214,17 @@ async def handle_get_node_status(websocket, data: dict):
 
 async def handle_join_cluster(websocket, data: dict):
     """
-    [WS版] 扫码登录/加入集群
+    [WS版] 接收移动端扫码后下发的 Master 信息，将本机绑定为 Node 节点
+    此接口由移动端 App 调用，告诉本机："这是 Master 的地址，你现在是 Node，去连它！"
     """
     target_urls = data.get("target_urls")
     token = data.get("token")
-    SLog.i(TAG + "handle_join_cluster", token)
+    
+    SLog.i(TAG, f"🔗 [Join] Received Master Info from App. URL: {target_urls}")
 
-    SLog.i(TAG, f"🔗 [Join] Received token: {token[:6]}...")
+    if not target_urls:
+        return {"code": 400, "msg": "Missing target_urls (Master Address)"}
+
     if not token:
         return {"code": 400, "msg": "Missing token"}
 
