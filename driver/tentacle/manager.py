@@ -54,15 +54,63 @@ class Manager(metaclass=SingletonMeta):
             raise e
         return result
 
+    @staticmethod
+    def _mobile_test_subject(info) -> str | None:
+        """节点级覆盖（少见）；正常运行设备由前端 run_workflow 的 sn 决定。"""
+        data = getattr(info, "data", None)
+        if not isinstance(data, dict):
+            return None
+        return (
+            data.get("udid")
+            or data.get("ios_udid")
+            or data.get("android_udid")
+            or data.get("device_sn")
+            or data.get("sn")
+        )
+
+    @staticmethod
+    def _resolve_run_device(info) -> str | None:
+        """方案 A：运行级设备 > 配置文件兜底。"""
+        subject = Manager._mobile_test_subject(info)
+        if subject:
+            return subject
+
+        import builtins
+
+        run_sn = getattr(builtins, "TARGET_DEVICE_SN", None)
+        if run_sn:
+            return str(run_sn)
+
+        try:
+            from driver.agent.Memory import memory_manager
+
+            mem_sn = memory_manager.short_term.get_global("run_device_sn")
+            if mem_sn:
+                return str(mem_sn)
+        except Exception:
+            pass
+
+        return None
+
     def apply_engine(self, info):
         if info.platform in platform_code.MMOBILE:
-            if self.MobileEngine: return True
+            if self.MobileEngine:
+                return True
+            test_subject = self._resolve_run_device(info)
+            if not test_subject and info.platform in (platform_code.IOS, platform_code.ANDROID):
+                from server.services.device_service import DeviceService
+
+                test_subject = DeviceService.pick_sn(device_type=info.platform)
             if info.platform == platform_code.IOS:
                 from driver.tentacle.engine.mobile.mIOS import IOSEngine
-                self.MobileEngine = IOSEngine()
+
+                engine = IOSEngine()
             else:
                 from driver.tentacle.engine.mobile.mAdb import MAdbEngine
-                self.MobileEngine = MAdbEngine()
+
+                engine = MAdbEngine()
+            engine._test_subject = test_subject
+            self.MobileEngine = engine
 
         elif info.platform in platform_code.MWEB:
             if self.WebEngine: return True

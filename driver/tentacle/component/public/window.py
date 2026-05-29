@@ -86,7 +86,7 @@ class Window(Template):
     def execute(self):
         self.get_engine()
         operation = self.get_param_value("operation")
-        platform = self.get_param_value("platform")
+        platform = self.get_param_value("platform") or self.info.platform
         restart = self.get_param_value("restart")
         target = None
         if platform in platform_code.MMOBILE:

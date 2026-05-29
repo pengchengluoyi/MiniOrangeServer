@@ -25,7 +25,7 @@ class Flac(Template):
         mIsSwipe = self.get_param_value("is_swipe")
         mIndex = self.get_param_value("index")
 
-        self.engine.driver.screen_on()
+        self.engine.screen_on()
 
         for i in range(0, mIndex):
             if mListLocatorChain:
@@ -47,7 +47,7 @@ class Flac(Template):
                                 bounds = input_current.info['bounds']
                                 center_x = (bounds['left'] + bounds['right']) // 2
                                 center_y = (bounds['top'] + bounds['bottom']) // 2
-                                self.engine.driver.click(center_x, center_y)
+                                self.engine.click(None, position=(center_x, center_y))
                                 input_current.set_text(mInputLocatorChain["text"])
                             else:
                                 mSleep(0.5)
@@ -60,7 +60,13 @@ class Flac(Template):
                         SLog.i("flac - locator_chain: ", locator_chain)
 
                     if mIsSwipe:
-                        self.engine.driver.swipe(mIsSwipe[0], mIsSwipe[1], mIsSwipe[2], mIsSwipe[3], mIsSwipe[4])
+                        self.engine.swipe_norm(
+                            float(mIsSwipe[0]),
+                            float(mIsSwipe[1]),
+                            float(mIsSwipe[2]),
+                            float(mIsSwipe[3]),
+                            float(mIsSwipe[4]),
+                        )
                     mSleep(0.5)
 
         return None

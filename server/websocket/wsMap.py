@@ -37,6 +37,7 @@ HANDLERS = {
 
 
     "get_file": handle_get_file,
+    "upload": handle_upload,
     "run_workflow": handle_run_workflow,
     "get_device_list": handle_get_device_list,
     "get_component": handle_get_component,

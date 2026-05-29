@@ -20,14 +20,13 @@ class SetText(Template):
         mLocatorChain = self.get_param_value("locator_chain")
         mContent = self.get_param_value("content")
 
-        self.engine.driver.screen_on()
+        self.engine.screen_on()
         if mLocatorChain:
             build_chain = self.engine.build_chain(mLocatorChain)
-            # self.wait_display
-            bounds = build_chain.info['bounds']
-            center_x = (bounds['left'] + bounds['right']) // 2
-            center_y = (bounds['top'] + bounds['bottom']) // 2
-            self.engine.driver.click(center_x, center_y)
+            bounds = build_chain.info["bounds"]
+            center_x = (bounds["left"] + bounds["right"]) // 2
+            center_y = (bounds["top"] + bounds["bottom"]) // 2
+            self.engine.click(None, position=(center_x, center_y))
             build_chain.set_text(mContent)
             mSleep(1)
             return None

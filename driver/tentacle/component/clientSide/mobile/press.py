@@ -56,8 +56,8 @@ class Press(Template):
         self.get_engine()
         mEvent = self.get_param_value("event")
 
-        self.engine.driver.screen_on()
-        self.engine.driver.press(str(mEvent))
+        self.engine.screen_on()
+        self.engine.press_key(str(mEvent))
 
         self.result.success()
         return self.result

@@ -21,7 +21,7 @@ class Find(Template):
         self.get_engine()
         mLocatorChain = self.get_param_value("locator_chain")
 
-        self.engine.driver.screen_on()
+        self.engine.screen_on()
         if mLocatorChain:
             build_chain = self.engine.build_chain(mLocatorChain)
             mResult = {

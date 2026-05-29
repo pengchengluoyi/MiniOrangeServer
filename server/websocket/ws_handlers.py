@@ -20,11 +20,11 @@ from server.core.local_brain import LocalBrain
 
 
 async def handle_get_device_list(websocket, data: dict):
-    session = SessionLocal()
+    from server.services.device_service import DeviceService
+
     try:
-        devices = session.query(MDevice).all()
         result = []
-        for d in devices:
+        for d in DeviceService.list_all():
             result.append({
                 "sn": d.sn,
                 "type": d.device_type,
@@ -37,8 +37,6 @@ async def handle_get_device_list(websocket, data: dict):
     except Exception as e:
         SLog.e("wsHandlers", f"Get device list error: {e}")
         return {"code": 500, "msg": str(e)}
-    finally:
-        session.close()
 
 
 async def handle_get_timeline_list(websocket, data: dict):
@@ -319,38 +317,30 @@ async def handle_sync_timeline(websocket, data: dict):
 
 async def handle_get_device_password(websocket, data: dict):
     sn = data.get("sn")
-    if not sn: return {"code": 400, "msg": "Missing SN"}
+    if not sn:
+        return {"code": 400, "msg": "Missing SN"}
+    from server.services.device_service import DeviceService
 
-    session = SessionLocal()
-    try:
-        device = session.query(MDevice).filter(MDevice.sn == sn).first()
-        if not device: return {"code": 404, "msg": "Device not found"}
-        return {"code": 200, "data": {"password": device.password}}
-    except Exception as e:
-        return {"code": 500, "msg": str(e)}
-    finally:
-        session.close()
+    if not DeviceService.get_by_sn(sn):
+        return {"code": 404, "msg": "Device not found"}
+    return {"code": 200, "data": {"password": DeviceService.get_password(sn)}}
 
 
 async def handle_set_device_password(websocket, data: dict):
     """设置设备解锁密码"""
     sn = data.get("sn")
     password = data.get("password")
-    if not sn: return {"code": 400, "msg": "Missing SN"}
-    session = SessionLocal()
-    try:
-        device = session.query(MDevice).filter(MDevice.sn == sn).first()
-        if not device:
-            return {"code": 404, "msg": "Device not found"}
+    if not sn:
+        return {"code": 400, "msg": "Missing SN"}
+    from server.services.device_service import DeviceService
 
-        device.password = password
-        session.commit()
+    try:
+        if not DeviceService.set_password(sn, password):
+            return {"code": 404, "msg": "Device not found"}
         return {"code": 200, "msg": "Password updated"}
     except Exception as e:
         SLog.e("rDevice", f"Set password error: {e}")
         return {"code": 500, "msg": f"Error: {e}"}
-    finally:
-        session.close()
 
 
 async def handle_get_timeline(websocket, data: dict):

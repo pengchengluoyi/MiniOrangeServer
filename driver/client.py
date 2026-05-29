@@ -1002,6 +1002,18 @@ class DeviceClient:
         self.current_connected_url = None
         self.connected_event = asyncio.Event()  # 🔥 [新增] 连接状态事件
 
+    def _resolve_server_http_url(self) -> str:
+        """子进程 REMOTE_API_URL：由当前 WS 地址推导 HTTP 根路径。"""
+        ws_url = self.current_connected_url
+        if not ws_url and self.candidate_urls:
+            ws_url = self.candidate_urls[0]
+        if not ws_url:
+            ws_url = "ws://127.0.0.1:10104/ws"
+        http_url = ws_url.replace("wss://", "https://").replace("ws://", "http://")
+        if http_url.endswith("/ws"):
+            http_url = http_url[:-3]
+        return http_url.rstrip("/")
+
     def stop(self):
         """停止客户端，清理所有子进程和任务 (线程安全版)"""
         SLog.i(TAG, "Stopping DeviceClient...")
@@ -1187,13 +1199,23 @@ class DeviceClient:
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
                 for line in lines:
-                    if not line.strip(): continue
-                    # tidevice list 输出格式: UDID Name
+                    if not line.strip():
+                        continue
+                    # tidevice list 首行常为表头: "UDID Name" / "UDID SerialNumber"
                     parts = line.split()
-                    if len(parts) >= 1:
-                        udid = parts[0]
-                        name = parts[1] if len(parts) > 1 else "iOS Device"
-                        devices.append({
+                    if len(parts) < 1:
+                        continue
+                    udid = parts[0]
+                    if udid.upper() in ("UDID", "NAME", "SERIALNUMBER"):
+                        continue
+                    from server.services.device_service import is_valid_sn
+
+                    if not is_valid_sn(udid):
+                        continue
+                    name = parts[1] if len(parts) > 1 else "iOS Device"
+                    if name.upper() in ("NAME", "SERIALNUMBER", "UDID"):
+                        name = "iOS Device"
+                    devices.append({
                             "sn": udid,
                             "type": "ios",
                             "role": "hub",  # 按照要求，USB连接的设备标记为 hub
@@ -1435,8 +1457,7 @@ class DeviceClient:
 
         SLog.i(TAG, f"Spawning process for task RunID: {run_id} TargetSN: {params.get('target_sn')}")
 
-        # 转换 WS URL 为 HTTP URL 供子进程使用 (简单替换)
-        http_url = self.server_url.replace("ws://", "http://").replace("/ws", "")
+        http_url = self._resolve_server_http_url()
 
         # 使用 multiprocessing 启动任务，避免阻塞 WebSocket 通信
         p = multiprocessing.Process(

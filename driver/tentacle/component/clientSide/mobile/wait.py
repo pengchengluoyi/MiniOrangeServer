@@ -96,7 +96,7 @@ class Wait(Template):
 
         try:
             build_chain = self.engine.build_chain(mLocatorChain)
-            self.engine.driver.screen_on()
+            self.engine.screen_on()
             element_exists = build_chain.exists(timeout=mTimeout)
             if element_exists:
                 self.result.success()

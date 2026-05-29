@@ -45,16 +45,22 @@ class Swipe(Template):
         mPosition = self.get_param_value("position")
         mShortcutKey = self.get_param_value("shortcutKey")
 
-        self.engine.driver.screen_on()
+        self.engine.screen_on()
         if mShortcutKey:
             if mShortcutKey == "home":
-                self.engine.driver.swipe(0.5, 0.99, 0.5, 0.5, 0.2)
+                self.engine.swipe_norm(0.5, 0.99, 0.5, 0.5, 0.2)
             elif mShortcutKey == "open_control_center":
-                self.engine.driver.swipe(0.7, 0.01, 0.7, 0.3, 0.2)
+                self.engine.swipe_norm(0.7, 0.01, 0.7, 0.3, 0.2)
             elif mShortcutKey == "open_the_backend":
-                self.engine.driver.swipe(0.5, 0.99, 0.5, 0.6, 0.1)
+                self.engine.swipe_norm(0.5, 0.99, 0.5, 0.6, 0.1)
         else:
-            self.engine.driver.swipe(float(mPosition[0]), float(mPosition[1]), float(mPosition[2]), float(mPosition[3]), float(mPosition[4]))
+            self.engine.swipe_norm(
+                float(mPosition[0]),
+                float(mPosition[1]),
+                float(mPosition[2]),
+                float(mPosition[3]),
+                float(mPosition[4]),
+            )
         mSleep(1)
 
         self.result.success()

@@ -564,6 +564,11 @@ class DeviceManager:
             SLog.i("DeviceManager", f"Received task report with {len(data)} items")
 
     def _register_device(self, sn: str, info: dict):
+        from server.services.device_service import is_valid_sn
+
+        if not is_valid_sn(sn):
+            SLog.d("DeviceManager", f"Skip invalid device registration sn={sn!r}")
+            return
         try:
             with SessionLocal() as db:
                 device = db.query(MDevice).filter(MDevice.sn == sn).first()

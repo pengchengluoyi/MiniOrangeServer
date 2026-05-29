@@ -1,7 +1,7 @@
 # app/routers/rWorkflow.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 import json
 from multiprocessing import Process
 import uuid
@@ -13,6 +13,7 @@ from server.schemas.workflow import WorkflowCreate, WorkflowItem, WorkflowDetail
 
 # 引入你的包装器
 from driver.agent.actuator import process_runner_wrapper
+from driver.agent.workflows.templates import ios_magicam_demo, ios_open_tap_close
 
 router = APIRouter(prefix="/workflow", tags=["Workflow"])
 
@@ -143,7 +144,12 @@ def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{workflow_id}/run")
-def run_workflow(workflow_id: str, db: Session = Depends(get_db)):
+def run_workflow(
+    workflow_id: str,
+    sn: Optional[str] = None,
+    target_sn: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     # 1. 生成本次运行的唯一 ID
     run_id = str(uuid.uuid4())
 
@@ -162,8 +168,11 @@ def run_workflow(workflow_id: str, db: Session = Depends(get_db)):
         "id": wf.id,
         "name": wf.name,
         "nodes": nodes_json,  #
-        "updated_at": wf.updated_at
+        "updated_at": wf.updated_at,
     }
+    device_sn = target_sn or sn
+    if device_sn:
+        data["target_sn"] = device_sn
     # 3. 创建子进程
     # target 指向包装器，args 把真正的脚本函数传进去
     p = Process(
@@ -182,6 +191,37 @@ def run_workflow(workflow_id: str, db: Session = Depends(get_db)):
         "pid": p.pid
     }
 
+
+
+@router.get("/template/ios-magicam")
+def template_ios_magicam():
+    """返回 Magicam 演示工作流 nodes；设备在运行前由前端选择，不写进节点。"""
+    return {
+        "code": 200,
+        "data": {
+            "name": "iOS Magicam 打开-点击-关闭",
+            "nodes": ios_magicam_demo(),
+        },
+    }
+
+
+@router.post("/seed/ios-magicam")
+def seed_ios_magicam(
+    bundle_id: str = "com.mathmagic.magicam",
+    db: Session = Depends(get_db),
+):
+    """将 Magicam 流程写入 Workflow 表；执行时在 MiniOrange 运行弹窗选设备即可。"""
+    nodes = ios_open_tap_close(bundle_id)
+    name = f"iOS {bundle_id} 打开-点击-关闭"
+    wf = Workflow(
+        name=name,
+        desc="自动生成：public/window → cfs/sleep → public/gesture → public/window",
+        nodes=json.dumps(nodes, ensure_ascii=False),
+    )
+    db.add(wf)
+    db.commit()
+    db.refresh(wf)
+    return {"code": 200, "id": wf.id, "name": wf.name, "msg": "已入库，请用 run_workflow 或 GET /workflow/{id}/run 执行"}
 
 
 @router.get("/dom")

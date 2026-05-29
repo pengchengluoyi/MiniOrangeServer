@@ -29,9 +29,38 @@ class Orchestrator:
         for employee in self.jobMarket:
             employee.offline()
 
+    def _load_workflow_nodes(self) -> dict:
+        """优先内联节点（HTTP /run 调试），否则经 WS 从 DB 拉取。"""
+        import builtins
+
+        inline = getattr(builtins, "WORKFLOW_INLINE_NODES", None)
+        if isinstance(inline, dict) and inline:
+            return inline
+
+        flow_id = current_flow_id.get()
+        detail = WS.get_workflow_detail(flow_id) if flow_id else None
+        if not isinstance(detail, dict):
+            SLog.e(TAG, f"无法加载工作流 nodes, flow_id={flow_id}")
+            return {}
+
+        if "nodes" in detail:
+            return detail["nodes"]
+        inner = detail.get("data")
+        if isinstance(inner, dict) and "nodes" in inner:
+            return inner["nodes"]
+        SLog.e(TAG, f"工作流详情缺少 nodes: {detail.keys()}")
+        return {}
+
     def run(self):
+        import builtins
+
         memory_manager.initialize()
-        memory_manager.checklist.create(WS.get_workflow_detail(current_flow_id.get())["nodes"])
+        run_sn = getattr(builtins, "TARGET_DEVICE_SN", None)
+        if run_sn:
+            memory_manager.short_term.set_global("run_device_sn", str(run_sn))
+            SLog.i(TAG, f"执行设备 sn/udid={run_sn}")
+
+        memory_manager.checklist.create(self._load_workflow_nodes())
 
         while True:
             employee = self.hiring()
@@ -43,25 +72,29 @@ class Orchestrator:
             accept_result = employee.accept_order(current_node)
             memory_manager.short_term.set_global("platform", current_node.platform)
 
-            interaction_id = current_node.data.get("interaction_id", "")
-            if interaction_id:
-                if "gesture" in current_node.id:
-                    # 委托给 Planner 进行视觉定位和异常处理
-                    self.planner.locate_visual_target(interaction_id)
+            node_data = current_node.data or {}
+            interaction_id = node_data.get("interaction_id", "")
+            has_explicit_position = node_data.get("position") is not None
+            # 仅「热区定位、无坐标」走 Planner；编排里写了 position 则走 public/gesture 组件
+            use_planner_gesture = bool(interaction_id) and not has_explicit_position
+            if use_planner_gesture and interaction_id:
+                self.planner.locate_visual_target(interaction_id)
 
             if accept_result:
                 dispatch_result = True
-                if "gesture" not in current_node.id:
-                    dispatch_result = employee.dispatch()
-                else:
-                    mtype = current_node.data.get("sub_type", "click")
+                if use_planner_gesture:
+                    mtype = node_data.get("sub_type", "click")
                     pos = memory_manager.short_term.get_global("position")
                     if pos:
-                        # 捕获执行结果，如果点击失败，dispatch_result 应为 False
                         dispatch_result = employee.tool.gesture(mtype, pos)
                     else:
-                        SLog.e(TAG, f"❌ Visual target not found for {interaction_id}, skipping gesture.")
+                        SLog.e(
+                            TAG,
+                            f"Visual target not found for {interaction_id}, skipping gesture.",
+                        )
                         dispatch_result = False
+                else:
+                    dispatch_result = employee.dispatch()
 
                 if dispatch_result:
                     self_check_result = employee.self_check(dispatch_result, self.planner, current_node)

@@ -24,4 +24,13 @@ class WS:
 
     @staticmethod
     def get_device_password(sn):
-        return ServerBridge.query("get_device_password", {"sn": sn})
+        """与 ws_handlers.handle_get_device_password 一致，统一为 ``{"password": "..."}``。"""
+        res = ServerBridge.query("get_device_password", {"sn": sn})
+        if not res:
+            return None
+        if isinstance(res.get("password"), str) or res.get("password") is None:
+            return {"password": res.get("password")}
+        data = res.get("data")
+        if isinstance(data, dict):
+            return {"password": data.get("password")}
+        return None

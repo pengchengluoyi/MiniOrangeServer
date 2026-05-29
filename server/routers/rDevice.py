@@ -4,8 +4,8 @@
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel
-from server.websocket.device_manager import DeviceManager, SessionLocal
-from server.models.mDevice import MDevice
+from server.websocket.device_manager import DeviceManager
+from server.services.device_service import DeviceService
 from script.log import SLog
 
 router = APIRouter(prefix="/device", tags=["Device"])
@@ -32,11 +32,9 @@ class SetPasswordReq(BaseModel):
 @router.get("/list", response_model=List[DeviceInfo])
 def get_device_list():
     """获取设备列表"""
-    session = SessionLocal()
     try:
-        devices = session.query(MDevice).all()
         result = []
-        for d in devices:
+        for d in DeviceService.list_all():
             result.append({
                 "sn": d.sn,
                 "type": d.device_type,
@@ -51,8 +49,6 @@ def get_device_list():
     except Exception as e:
         SLog.e("rDevice", f"Get list error: {e}")
         return []
-    finally:
-        session.close()
 
 @router.post("/command")
 async def send_command(req: CommandReq):
@@ -71,17 +67,10 @@ async def send_command(req: CommandReq):
 @router.post("/set_password")
 def set_device_password(req: SetPasswordReq):
     """设置设备解锁密码"""
-    session = SessionLocal()
     try:
-        device = session.query(MDevice).filter(MDevice.sn == req.sn).first()
-        if not device:
+        if not DeviceService.set_password(req.sn, req.password):
             return {"code": 404, "msg": "Device not found"}
-        
-        device.password = req.password
-        session.commit()
         return {"code": 200, "msg": "Password updated"}
     except Exception as e:
         SLog.e("rDevice", f"Set password error: {e}")
         return {"code": 500, "msg": f"Error: {e}"}
-    finally:
-        session.close()

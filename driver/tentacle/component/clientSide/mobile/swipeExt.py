@@ -43,8 +43,8 @@ class SwipeExt(Template):
     def execute(self):
         self.get_engine()
         mOrientation = self.get_param_value("orientation")
-        self.engine.driver.screen_on()
-        self.engine.driver.swipe_ext(mOrientation["value"], scale=0.8)
+        self.engine.screen_on()
+        self.engine.swipe_ext(mOrientation["value"], scale=0.8)
 
         self.result.success()
         return self.result
