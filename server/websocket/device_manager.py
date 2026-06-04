@@ -555,6 +555,15 @@ class DeviceManager:
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error save workflow log: {e}")
 
+    async def handle_crawl_complete(self, websocket: WebSocket, data: dict):
+        from server.services.crawl_job_manager import complete
+
+        req_id = data.get("req_id")
+        payload = data.get("payload") or data
+        if req_id:
+            complete(req_id, payload if isinstance(payload, dict) and "code" in payload else {"code": 200, "data": payload})
+        SLog.i("DeviceManager", f"Crawl complete req_id={req_id}")
+
     async def handle_task_report(self, websocket: WebSocket, data: dict):
         """处理客户端回传的任务报告"""
         # 更新服务端的全局 report 变量，以便前端轮询时能获取到结果

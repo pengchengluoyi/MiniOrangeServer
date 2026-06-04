@@ -60,8 +60,43 @@ def _handle_get_workflow_detail(params: dict) -> Optional[dict]:
             "id": wf.id,
             "name": wf.name,
             "nodes": nodes_json,
+            "variables": wf.variables or {},
+            "sop_id": wf.sop_id,
             "updated_at": str(wf.updated_at) if wf.updated_at else None,
         }
+    finally:
+        session.close()
+
+
+def _handle_get_run_context(params: dict) -> Optional[dict]:
+    flow_id = params.get("flow_id")
+    if not flow_id:
+        return None
+    sn = params.get("sn")
+    env_profile = params.get("env_profile")
+    from server.core.database import SessionLocal
+    from server.services.memory_context import build_run_context
+
+    session = SessionLocal()
+    try:
+        return build_run_context(session, int(flow_id), sn, env_profile)
+    finally:
+        session.close()
+
+
+def _handle_get_app_graph(params: dict) -> dict:
+    flow_id = params.get("flow_id")
+    if not flow_id:
+        return {"nodes": [], "edges": []}
+    from server.core.database import SessionLocal
+    from server.services.memory_context import build_run_context
+
+    session = SessionLocal()
+    try:
+        bundle = build_run_context(
+            session, int(flow_id), params.get("sn"), params.get("env_profile")
+        )
+        return bundle.get("app_graph") or {"nodes": [], "edges": []}
     finally:
         session.close()
 
@@ -120,11 +155,23 @@ def _handle_upload(params: dict) -> dict:
 
 
 def _handle_get_world_model(_params: dict) -> dict:
-    return {"data": {}}
+    from server.services.memory_context import _default_world_model
+    return {"data": _default_world_model()}
 
 
-def _handle_get_app_graph(_params: dict) -> dict:
-    return {"nodes": [], "edges": []}
+def _handle_get_file(params: dict) -> dict:
+    from server.websocket.wsFile import UPLOAD_DIR
+
+    file_name = params.get("name")
+    if not file_name:
+        return {"code": 400, "msg": "Missing name"}
+    file_name = os.path.basename(file_name)
+    file_path = os.path.join(UPLOAD_DIR, file_name)
+    if not os.path.exists(file_path):
+        return {"code": 404, "msg": f"File '{file_name}' not found"}
+    with open(file_path, "rb") as f:
+        b64_str = base64.b64encode(f.read()).decode("utf-8")
+    return {"code": 200, "msg": "Success", "data": {"name": file_name, "content": b64_str}}
 
 
 def in_process_server_query(action: str, params: dict | None = None, timeout: int = 10) -> Any:
@@ -134,6 +181,8 @@ def in_process_server_query(action: str, params: dict | None = None, timeout: in
             return _handle_get_device_password(params)
         if action == "get_workflow_detail":
             return _handle_get_workflow_detail(params)
+        if action == "get_run_context":
+            return _handle_get_run_context(params)
         if action == "sync_timeline":
             return _handle_sync_timeline(params)
         if action == "upload":
@@ -142,6 +191,8 @@ def in_process_server_query(action: str, params: dict | None = None, timeout: in
             return _handle_get_world_model(params)
         if action == "get_app_graph":
             return _handle_get_app_graph(params)
+        if action == "get_file":
+            return _handle_get_file(params)
     except Exception as e:
         SLog.e(TAG, f"{action} failed: {e}")
         return None

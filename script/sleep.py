@@ -1,13 +1,9 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
-import asyncio
-
+import time
 
 
 def mSleep(seconds):
-    async def _sleep(seconds):
-        await asyncio.sleep(seconds)  # 非阻塞等待
-
-    asyncio.run(_sleep(seconds))
-
+    """阻塞等待（兼容 WebSocket / 工作流等同步执行上下文）。"""
+    time.sleep(float(seconds))

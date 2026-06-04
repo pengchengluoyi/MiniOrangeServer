@@ -19,6 +19,18 @@ class WS:
         return ServerBridge.query("get_workflow_detail", {"flow_id": flow_id})
 
     @staticmethod
+    def fetch_run_context(flow_id, sn=None, env_profile=None):
+        import builtins
+
+        params = {"flow_id": flow_id}
+        if sn:
+            params["sn"] = sn
+        profile = env_profile or getattr(builtins, "RUN_ENV_PROFILE", None)
+        if profile:
+            params["env_profile"] = profile
+        return ServerBridge.query("get_run_context", params)
+
+    @staticmethod
     def fetch_world_model():
         return ServerBridge.query("get_world_model")
 

@@ -46,9 +46,10 @@ class MemoryManager(metaclass=SingletonMeta):
     # ================= 取数据接口 =================
     def recall(self, query):
         """
-        智能检索：支持 {{ node_id.key }} 或 {{ global_key }} 语法
+        智能检索：{{ node_id.key }} / {{ global_key }} / {{ app.xxx }} / {{ sop.xxx }} 等
         """
-        if not isinstance(query, str): return query
+        if not isinstance(query, str):
+            return query
 
         pattern = r'\{\{([^{}]+)\}\}'
         match = re.search(pattern, query)
@@ -56,22 +57,20 @@ class MemoryManager(metaclass=SingletonMeta):
         if match:
             path = match.group(1).strip()
             value = None
+            long_prefixes = ("app.", "graph.", "sop.", "workflow.", "device.", "world.")
 
             with self._lock:
-                # 1. 尝试解析 "node_id.key"
-                if "." in path:
-                    parts = path.split(".", 1)
-                    value = self.short_term.get_node_data(parts[0], parts[1])
+                if path.startswith(long_prefixes):
+                    value = self.long_term.get(path)
+                else:
+                    if "." in path:
+                        parts = path.split(".", 1)
+                        value = self.short_term.get_node_data(parts[0], parts[1])
+                    if value is None:
+                        value = self.short_term.get_global(path)
+                    if value is None:
+                        value = self.long_term.get(path)
 
-                # 2. 如果没找到，查全局短期记忆
-                if value is None:
-                    value = self.short_term.get_global(path)
-
-                # 3. 如果还没找到，查长期记忆 (配置)
-                if value is None:
-                    value = self.long_term.get_config(path)
-
-            # 替换逻辑
             if value is not None:
                 if query == match.group(0):
                     return value

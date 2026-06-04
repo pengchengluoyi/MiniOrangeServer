@@ -54,6 +54,17 @@ def _setup_run_target_sn(run_data) -> None:
     if sn:
         builtins.TARGET_DEVICE_SN = str(sn)
         SLog.i("System", f"Target Device SN set to: {sn}")
+
+    env_profile = None
+    if isinstance(run_data, dict):
+        env_profile = run_data.get("env_profile")
+    if not env_profile:
+        env_profile = os.environ.get("RUN_ENV_PROFILE")
+    if env_profile:
+        builtins.RUN_ENV_PROFILE = str(env_profile)
+        SLog.i("System", f"Run env profile: {env_profile}")
+
+    if sn:
         return
 
     device_type = _workflow_device_type(run_data)

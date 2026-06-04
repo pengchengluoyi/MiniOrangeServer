@@ -65,6 +65,10 @@ async def handle_app_graph_detail(websocket, data: dict):
             return {"code": 400, "msg": "Missing graph_id"}
         
         graph_id = int(graph_id)
+        graph = session.query(AppGraph).filter(AppGraph.id == graph_id).first()
+        if not graph:
+            return {"code": 404, "msg": "Graph not found"}
+
         db_nodes = session.query(AppNode).filter(AppNode.graph_id == graph_id).all()
         # 使用 joinedload 预加载 states，避免 N+1 查询
         db_comps = session.query(AppComponent).filter(AppComponent.graph_id == graph_id).options(
@@ -86,13 +90,18 @@ async def handle_app_graph_detail(websocket, data: dict):
                     "skeleton_config": s.skeleton_config # 🔥 返回状态骨架配置
                 })
 
+            rules = c.rules if isinstance(c.rules, dict) else {}
             comp_map[c.node_id].append({
                 "id": c.uid,
                 "label": c.label,
                 "category": c.category,
                 "sub_type": c.sub_type,
-                "rules": c.rules,
+                "rules": rules,
                 "locators": c.locators,
+                "component_type": rules.get("component_type", "custom"),
+                "shared_region": rules.get("shared_region", ""),
+                "needs_confirmation": rules.get("needs_confirmation", False),
+                "action": rules.get("action", "click"),
                 "skeleton_config": c.skeleton_config, # 🔥 返回组件骨架配置
                 "x": c.x, "y": c.y, "w": c.width, "h": c.height,
                 "states": states_data  # 🔥 返回多态数据
@@ -144,9 +153,44 @@ async def handle_app_graph_detail(websocket, data: dict):
                 "workflows": [{"id": w.id, "name": w.name} for w in s.workflows]
             })
 
-        return {"code": 200, "data": {"nodes": nodes_data, "edges": edges_data, "sops": sops_data}}
+        return {
+            "code": 200,
+            "data": {
+                "graph_id": graph.id,
+                "app_id": graph.app_id,
+                "variables": graph.variables or {},
+                "nodes": nodes_data,
+                "edges": edges_data,
+                "sops": sops_data,
+            },
+        }
     except Exception as e:
         SLog.e("WAppGraph", f"Detail error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_app_graph_update(websocket, data: dict):
+    session = SessionLocal()
+    try:
+        graph_id = data.get("graph_id")
+        if not graph_id:
+            return {"code": 400, "msg": "Missing graph_id"}
+        graph = session.query(AppGraph).filter(AppGraph.id == int(graph_id)).first()
+        if not graph:
+            return {"code": 404, "msg": "Graph not found"}
+        if "variables" in data and data["variables"] is not None:
+            graph.variables = data["variables"]
+        if data.get("name") is not None:
+            graph.name = data["name"]
+        if data.get("desc") is not None:
+            graph.desc = data["desc"]
+        session.commit()
+        return {"code": 200, "msg": "Graph updated", "data": {"variables": graph.variables or {}}}
+    except Exception as e:
+        session.rollback()
+        SLog.e("WAppGraph", f"Graph update error: {e}")
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()
@@ -209,6 +253,12 @@ async def handle_save_node_detail(websocket, data: dict):
         for i, c in enumerate(item.components):
             uid = c.uid if c.uid else f"c-{uuid.uuid4()}"
             r = c.rect if c.rect else {"x": 0, "y": 0, "w": 0, "h": 0}
+            rules = dict(c.rules or {}) if isinstance(c.rules, dict) else {}
+            if i < len(raw_components) and isinstance(raw_components[i], dict):
+                raw = raw_components[i]
+                for key in ("component_type", "shared_region", "needs_confirmation", "action"):
+                    if raw.get(key) is not None:
+                        rules[key] = raw[key]
             
             comp = AppComponent(
                 graph_id=item.graph_id,
@@ -217,7 +267,7 @@ async def handle_save_node_detail(websocket, data: dict):
                 label=c.label,
                 category=c.category,
                 sub_type=c.sub_type,
-                rules=c.rules,
+                rules=rules,
                 locators=c.locators,
                 x=r.get('x', 0), y=r.get('y', 0), width=r.get('w', 0), height=r.get('h', 0),
                 skeleton_config=c.skeleton_config # 🔥 保存组件骨架配置
@@ -545,7 +595,7 @@ async def handle_train_skeleton(websocket, data: dict):
                 
                 all_images = existing_images
 
-        mask, err = SkeletonAlgo.train_skeleton(all_images, threshold)
+        mask, err, system_bars = SkeletonAlgo.train_skeleton(all_images, threshold)
         if err:
             return {"code": 500, "msg": err}
         
@@ -559,28 +609,68 @@ async def handle_train_skeleton(websocket, data: dict):
         cv2.imwrite(save_path, mask)
         
         mask_url = f"/static/{filename}"
+        master_path = all_images[0] if all_images else None
+
+        def _persist_skeleton_config(config):
+            config = dict(config or {})
+            config["mask_url"] = mask_url
+            config["filename"] = filename
+            config["images"] = all_images
+            if master_path:
+                config["master_path"] = master_path
+            if system_bars:
+                config["system_bars"] = system_bars
+            return config
 
         # 2. 持久化保存到节点配置中
         if target_state:
             # 保存到组件状态
-            config = target_state.skeleton_config or {}
-            config["mask_url"] = mask_url
-            config["images"] = all_images
-            target_state.skeleton_config = dict(config)
+            target_state.skeleton_config = _persist_skeleton_config(target_state.skeleton_config)
             session.commit()
         elif comp:
             # 保存到组件
-            config = comp.skeleton_config or {}
-            config["mask_url"] = mask_url
-            config["images"] = all_images
-            comp.skeleton_config = dict(config)
+            comp.skeleton_config = _persist_skeleton_config(comp.skeleton_config)
             session.commit()
         elif node:
-            config = node.skeleton_config or {}
-            config["mask_url"] = mask_url
-            config["images"] = all_images
-            node.skeleton_config = dict(config) # 触发更新
+            node.skeleton_config = _persist_skeleton_config(node.skeleton_config)
+            if master_path:
+                node.screenshot = f"/static/{master_path}"
             session.commit()
+
+        from server.core.vision.component_detector import ComponentDetector
+
+        natural_w = natural_h = None
+        if node and node.dom_tree:
+            try:
+                dom_json = json.loads(node.dom_tree)
+                ns = dom_json.get("naturalSize") or {}
+                natural_w = ns.get("w")
+                natural_h = ns.get("h")
+            except Exception:
+                pass
+        if mask is not None:
+            mh, mw = mask.shape[:2]
+            if not natural_w or not natural_h:
+                natural_w, natural_h = mw, mh
+
+        screenshot_path = master_path or (all_images[0] if all_images else None)
+
+        shared_components: list = []
+        if graph_id and node:
+            graph = session.query(AppGraph).filter(AppGraph.id == int(graph_id)).first()
+            if graph and graph.variables:
+                shared_components = (graph.variables or {}).get("shared_components") or []
+
+        detected_components = ComponentDetector.detect_for_page(
+            mask_path=mask_url,
+            screenshot_path=screenshot_path,
+            img_w=natural_w,
+            img_h=natural_h,
+            system_bars=system_bars,
+            mask=mask,
+            node_id=node.node_id if node else None,
+            shared_components=shared_components,
+        )
 
         return {
             "code": 200, 
@@ -588,12 +678,326 @@ async def handle_train_skeleton(websocket, data: dict):
             "data": {
                 "filename": filename,
                 "url": mask_url,
-                "images": all_images # 返回全量图片列表供前端更新
+                "images": all_images,
+                "system_bars": system_bars,
+                "master_path": master_path,
+                "detected_components": detected_components,
+                "hotspots": detected_components,
             }
         }
     except Exception as e:
         session.rollback()
         SLog.e("WAppGraph", f"Train skeleton error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_crawl_save_page(websocket, data: dict):
+    from server.services import crawl_persistence as cp
+
+    try:
+        nid = cp.ensure_page_node(
+            int(data["graph_id"]),
+            data["node_id"],
+            data.get("label") or "新页面",
+            screenshot=data.get("screenshot"),
+            natural_size=data.get("natural_size"),
+            x=int(data.get("x") or 0),
+            y=int(data.get("y") or 0),
+        )
+        return {"code": 200, "data": {"id": nid}}
+    except Exception as e:
+        return {"code": 500, "msg": str(e)}
+
+
+async def handle_crawl_save_edge(websocket, data: dict):
+    from server.services import crawl_persistence as cp
+
+    try:
+        cp.ensure_edge(
+            int(data["graph_id"]),
+            data["source_id"],
+            data["target_id"],
+            data.get("trigger") or {},
+            source_handle=data.get("source_handle"),
+            label=data.get("label") or "",
+        )
+        return {"code": 200, "msg": "ok"}
+    except Exception as e:
+        return {"code": 500, "msg": str(e)}
+
+
+async def handle_crawl_train_skeleton(websocket, data: dict):
+    from server.services import crawl_persistence as cp
+
+    try:
+        sk = cp.train_skeleton_for_node(
+            int(data["graph_id"]),
+            data["node_id"],
+            data.get("images") or [],
+            threshold=int(data.get("threshold") or 10),
+        )
+        return {"code": 200, "data": sk}
+    except Exception as e:
+        return {"code": 500, "msg": str(e)}
+
+
+async def handle_crawl_app(websocket, data: dict):
+    """
+    跑图（前端触发）：下发到已连接的设备节点执行，自动写回图谱。
+    data: graph_id, sn/target_sn, package?, platform?, max_pages?, max_sim?, min_sim?
+    """
+    import uuid
+    from server.websocket.device_manager import DeviceManager
+    from server.services.crawl_job_manager import wait_result
+
+    graph_id = data.get("graph_id")
+    sn = data.get("sn") or data.get("target_sn")
+    if not graph_id or not sn:
+        return {"code": 400, "msg": "请选择设备节点"}
+
+    req_id = data.get("req_id") or f"crawl-{uuid.uuid4().hex[:12]}"
+    dm = DeviceManager()
+    if sn not in dm.active_connections:
+        return {
+            "code": 404,
+            "msg": "设备节点未在线。请打开「设备管理」确认节点已连接后再跑图。",
+        }
+
+    params = dict(data)
+    params["req_id"] = req_id
+    params["target_sn"] = sn
+    if not params.get("platform"):
+        params["platform"] = "android"
+    ok = await dm.send_command(str(sn), "crawl_app", params)
+    if not ok:
+        return {"code": 500, "msg": "指令下发失败"}
+
+    SLog.i("WAppGraph", f"Crawl dispatched req_id={req_id} sn={sn} graph={graph_id}")
+    result = await wait_result(req_id, timeout=float(data.get("timeout") or 3600))
+    return result
+
+
+async def handle_identify_page(websocket, data: dict):
+    """
+    根据骨架蒙版，判断上传/指定截图最像图谱中的哪个页面。
+    入参: graph_id, content(base64) 或 image_name/filename, min_score(可选), top_k(可选)
+    """
+    session = SessionLocal()
+    try:
+        graph_id = data.get("graph_id")
+        if not graph_id:
+            return {"code": 400, "msg": "Missing graph_id"}
+
+        target_gray, err = SkeletonAlgo.load_image_from_payload(data)
+        if target_gray is None:
+            return {"code": 400, "msg": err or "Failed to load image"}
+
+        min_score = float(data.get("min_score") or 0.55)
+        top_k = int(data.get("top_k") or 12)
+
+        graph = session.query(AppGraph).filter(AppGraph.id == int(graph_id)).first()
+        if not graph:
+            return {"code": 404, "msg": "Graph not found"}
+
+        db_nodes = session.query(AppNode).filter(
+            AppNode.graph_id == int(graph_id),
+            AppNode.type == NodeType.PAGE,
+        ).all()
+
+        candidates: list = []
+        skipped: list = []
+        for n in db_nodes:
+            sk = n.skeleton_config or {}
+            master_path, mask_path, ignored_areas = SkeletonAlgo.skeleton_config_paths(sk)
+            if not master_path or not mask_path:
+                skipped.append({
+                    "node_id": n.node_id,
+                    "label": n.label,
+                    "reason": "no_skeleton",
+                })
+                continue
+            candidates.append({
+                "node_id": n.node_id,
+                "label": n.label,
+                "master_path": master_path,
+                "mask_path": mask_path,
+                "ignored_areas": ignored_areas,
+                "screenshot": n.screenshot,
+            })
+
+        if not candidates:
+            return {
+                "code": 400,
+                "msg": "No page with trained skeleton in this graph. Train skeleton on pages first.",
+                "data": {"skipped_pages": skipped},
+            }
+
+        rankings = SkeletonAlgo.rank_page_candidates(target_gray, candidates, top_k=top_k)
+        best = rankings[0] if rankings else None
+        best_score = best.get("score", 0.0) if best else 0.0
+        matched = bool(best and best_score >= min_score)
+
+        SLog.i(
+            "WAppGraph",
+            f"Identify page graph={graph_id}: matched={matched} "
+            f"best={best.get('label') if best else '-'} score={best_score:.3f}",
+        )
+
+        return {
+            "code": 200,
+            "data": {
+                "matched": matched,
+                "node_id": best.get("node_id") if matched else None,
+                "label": best.get("label") if matched else None,
+                "score": best_score,
+                "min_score": min_score,
+                "rankings": [
+                    {
+                        "node_id": r.get("node_id"),
+                        "label": r.get("label"),
+                        "score": r.get("score"),
+                        "screenshot": r.get("screenshot"),
+                    }
+                    for r in rankings
+                ],
+                "skipped_pages": skipped,
+                "candidates_count": len(candidates),
+            },
+        }
+    except Exception as e:
+        SLog.e("WAppGraph", f"Identify page error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_detect_page_components(websocket, data: dict):
+    """从已有骨架蒙版识别页面组件候选。"""
+    from server.core.vision.component_detector import ComponentDetector
+
+    session = SessionLocal()
+    try:
+        graph_id = data.get("graph_id")
+        node_id = data.get("node_id")
+        if not graph_id or not node_id:
+            return {"code": 400, "msg": "Missing graph_id or node_id"}
+
+        node = session.query(AppNode).filter(
+            AppNode.graph_id == int(graph_id),
+            AppNode.node_id == node_id,
+        ).first()
+        if not node:
+            return {"code": 404, "msg": "Node not found"}
+
+        sk = node.skeleton_config or {}
+        mask_path = sk.get("mask_url") or sk.get("filename")
+        screenshot_path = node.screenshot
+        if not mask_path and not screenshot_path:
+            return {"code": 400, "msg": "No skeleton mask or screenshot on this page."}
+
+        graph = session.query(AppGraph).filter(AppGraph.id == int(graph_id)).first()
+        shared_components = []
+        if graph and graph.variables:
+            shared_components = (graph.variables or {}).get("shared_components") or []
+
+        natural_w = natural_h = None
+        if node.dom_tree:
+            try:
+                dom_json = json.loads(node.dom_tree)
+                ns = dom_json.get("naturalSize") or {}
+                natural_w = ns.get("w")
+                natural_h = ns.get("h")
+            except Exception:
+                pass
+        if (not natural_w or not natural_h) and mask_path:
+            from server.core.vision.skeleton_algo import SkeletonAlgo
+            probe = SkeletonAlgo._fetch_remote_image(mask_path)
+            if probe is not None:
+                natural_h, natural_w = probe.shape[:2]
+
+        detected = ComponentDetector.detect_for_page(
+            mask_path=mask_path,
+            screenshot_path=screenshot_path,
+            img_w=natural_w,
+            img_h=natural_h,
+            system_bars=sk.get("system_bars"),
+            node_id=node_id,
+            shared_components=shared_components,
+        )
+        return {
+            "code": 200,
+            "data": {
+                "detected_components": detected,
+                "hotspots": detected,
+            },
+        }
+    except Exception as e:
+        SLog.e("WAppGraph", f"Detect page components error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_detect_shared_components(websocket, data: dict):
+    """跨页面共有组件相似度检测。"""
+    from server.core.vision.shared_component_detector import SharedComponentDetector
+
+    session = SessionLocal()
+    try:
+        graph_id = data.get("graph_id")
+        if not graph_id:
+            return {"code": 400, "msg": "Missing graph_id"}
+
+        detail = await handle_app_graph_detail(websocket, {"graph_id": graph_id})
+        if detail.get("code") != 200:
+            return detail
+
+        graph_data = detail.get("data") or {}
+        nodes = graph_data.get("nodes") or []
+        variables = graph_data.get("variables") or {}
+        existing = variables.get("shared_components") or []
+
+        min_similarity = float(data.get("min_similarity") or 0.72)
+        region_hints = data.get("region_hints") or ["bottom_tab"]
+        result = SharedComponentDetector.detect(
+            nodes,
+            region_hints=region_hints,
+            min_similarity=min_similarity,
+        )
+        result["shared_components"] = SharedComponentDetector._merge_with_existing(
+            result.get("clusters") or [], existing
+        )
+        return {"code": 200, "data": result}
+    except Exception as e:
+        SLog.e("WAppGraph", f"Detect shared components error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
+
+
+async def handle_save_shared_components(websocket, data: dict):
+    """保存图谱级共有组件定义到 graph.variables.shared_components。"""
+    session = SessionLocal()
+    try:
+        graph_id = data.get("graph_id")
+        shared = data.get("shared_components")
+        if not graph_id or shared is None:
+            return {"code": 400, "msg": "Missing graph_id or shared_components"}
+
+        graph = session.query(AppGraph).filter(AppGraph.id == int(graph_id)).first()
+        if not graph:
+            return {"code": 404, "msg": "Graph not found"}
+
+        variables = dict(graph.variables or {})
+        variables["shared_components"] = shared
+        graph.variables = variables
+        session.commit()
+        return {"code": 200, "msg": "Saved", "data": {"shared_components": shared}}
+    except Exception as e:
+        session.rollback()
+        SLog.e("WAppGraph", f"Save shared components error: {e}")
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()

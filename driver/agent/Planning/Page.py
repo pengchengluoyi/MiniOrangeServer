@@ -70,7 +70,15 @@ class Page:
             is_match = feedback.verify_current_page(target_node)
 
             if not is_match:
-                SLog.w(TAG, f"⚠️ Visual verification failed! Expected: {target_node.get('label')}")
+                identified, id_score = feedback.identify_current_page(app_graph)
+                if identified:
+                    SLog.w(
+                        TAG,
+                        f"⚠️ Visual verification failed! Expected: {target_node.get('label')}, "
+                        f"but screen looks like: {identified.get('label')} ({id_score:.2f})",
+                    )
+                else:
+                    SLog.w(TAG, f"⚠️ Visual verification failed! Expected: {target_node.get('label')}")
                 
                 # 尝试自愈
                 solution = Page.find_solution(feedback, current_node.id)

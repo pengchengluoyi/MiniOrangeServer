@@ -38,6 +38,12 @@ MAP = {
                 "icon": "wallpaper",
                 "address": "public/wait",
             },
+            "ocr": {
+                "type": 200,
+                "name": "OCR",
+                "icon": "wallpaper",
+                "address": "public/ocr",
+            },
         }
     },
     "cfs": {

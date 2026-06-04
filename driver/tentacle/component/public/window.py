@@ -20,13 +20,14 @@ class Window(Template):
                 "type": "select",
                 "desc": "目标平台",
                 "options": [
+                    {"value": "mobile", "text": "移动端 (Android + iOS)"},
                     {"value": "android", "text": "Android"},
                     {"value": "ios", "text": "iOS"},
                     {"value": "windows", "text": "Windows"},
                     {"value": "mac", "text": "macOS"},
                     {"value": "web", "text": "Web"}
                 ],
-                "defaultValue": ""
+                "defaultValue": "mobile"
             },
             {
                 "name": "operation",
@@ -50,9 +51,9 @@ class Window(Template):
             {
                 "name": "target_mobile",
                 "type": "str",
-                "desc": "应用包名 (Package Name)",
+                "desc": "应用标识 (Android 包名 / iOS Bundle)",
                 "placeholder": "com.example.app",
-                "show_if": ["android", "ios"]
+                "show_if": ["mobile", "android", "ios"]
             },
             {
                 "name": "target_pc",
@@ -70,10 +71,10 @@ class Window(Template):
             }
         ],
         "defaultData": {
-            "platform": "",
+            "platform": "mobile",
             "operation": "start",
             "restart": False,
-            "target_mobile": "",
+            "target_mobile": "{{app.mobile.target}}",
             "target_pc": "",
             "target_web": ""
         },
@@ -91,6 +92,8 @@ class Window(Template):
         target = None
         if platform in platform_code.MMOBILE:
             target = self.get_param_value("target_mobile")
+            if platform == platform_code.MOBILE and not target:
+                target = self.memory.get("{{app.mobile.target}}")
         elif platform in platform_code.MPC:
             target = self.get_param_value("target_pc")
         elif platform in platform_code.MWEB:

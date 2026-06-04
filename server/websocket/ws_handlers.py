@@ -97,6 +97,7 @@ async def handle_run_workflow(websocket, data: dict):
     SLog.i("handle_run_workflow", data)
     sn = data.get("sn")
     flow_id = data.get("flow_id")
+    env_profile = data.get("env_profile")
 
     if not sn: return {"code": 400, "msg": "Missing SN"}
     if not flow_id: return {"code": 400, "msg": "Missing flow_id"}
@@ -116,8 +117,10 @@ async def handle_run_workflow(websocket, data: dict):
     params = {
         "run_id": data.get("run_id") or str(uuid.uuid4()),
         "flow_id": flow_id,
-        "target_sn": sn
+        "target_sn": sn,
     }
+    if env_profile:
+        params["env_profile"] = env_profile
 
     success = await DeviceManager().send_command(sn, "run_task", params)
 
@@ -147,6 +150,8 @@ async def handle_get_workflow_detail(websocket, data: dict):
             "id": wf.id,
             "name": wf.name,
             "nodes": nodes_json,
+            "variables": wf.variables or {},
+            "sop_id": wf.sop_id,
             "updated_at": str(wf.updated_at) if wf.updated_at else None
         }
 
@@ -157,6 +162,27 @@ async def handle_get_workflow_detail(websocket, data: dict):
         session.close()
 
     return {"code": 200, "msg": "Success", "data": run_data}
+
+
+async def handle_get_run_context(websocket, data: dict):
+    """Run 长期记忆：app.env / graph / sop / workflow / device + 图谱结构。"""
+    flow_id = data.get("flow_id")
+    sn = data.get("sn")
+    env_profile = data.get("env_profile")
+    if not flow_id:
+        return {"code": 400, "msg": "Missing flow_id"}
+
+    session = SessionLocal()
+    try:
+        from server.services.memory_context import build_run_context
+
+        bundle = build_run_context(session, int(flow_id), sn, env_profile)
+        return {"code": 200, "data": bundle}
+    except Exception as e:
+        SLog.e("WsHandlers", f"Get run context error: {e}")
+        return {"code": 500, "msg": str(e)}
+    finally:
+        session.close()
 
 
 async def handle_get_app_graph(websocket, data: dict):
@@ -177,32 +203,12 @@ async def handle_get_app_graph(websocket, data: dict):
             return {"code": 200, "data": {"nodes": [], "edges": []}}
 
         # 手动序列化以避免 SQLAlchemy 对象的循环引用 (Graph -> Node -> Component -> Graph)
+        from server.services.memory_context import _serialize_app_graph_node
+
         nodes_data = []
         for node in graph.nodes:
-            # 1. 序列化组件 (切断反向引用)
             if node.type != "case":
-                comps_list = []
-                for comp in node.components:
-                    comps_list.append({
-                        "uid": comp.uid,
-                        "label": comp.label,
-                        "category": comp.category,
-                        "sub_type": comp.sub_type,
-                        "rules": comp.rules,
-                        "x": comp.x, "y": comp.y, "width": comp.width, "height": comp.height
-                    })
-
-                node_payload = {
-                    "id": node.node_id,
-                    "label": node.label,
-                    "type": node.type,
-                    "screenshot": node.screenshot,
-                    "components": comps_list,
-                    # 兼容字段
-                    "anchors": [{"uid": c["uid"], "type": c["sub_type"], "value": c["label"], "rect": [c["x"], c["y"], c["width"], c["height"]]} for c in comps_list if c["category"] == "anchor"],
-                    "mask_areas": [{"rect": [c["x"], c["y"], c["width"], c["height"]]} for c in comps_list if c["category"] == "mask"]
-                }
-                nodes_data.append(node_payload)
+                nodes_data.append(_serialize_app_graph_node(node))
 
         return {
             "code": 200,

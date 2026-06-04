@@ -113,6 +113,9 @@ def process_runner_wrapper(run_id, flow_id, msg_queue, server_http_url, shared_r
     if task_params and "target_sn" in task_params:
         builtins.TARGET_DEVICE_SN = task_params["target_sn"]
         SLog.i("ProcessRunner", f"Target Device SN set to: {builtins.TARGET_DEVICE_SN}")
+    if task_params and task_params.get("env_profile"):
+        builtins.RUN_ENV_PROFILE = str(task_params["env_profile"])
+        SLog.i("ProcessRunner", f"Run env profile: {builtins.RUN_ENV_PROFILE}")
 
     # 注入通用查询函数 (通过 Queue -> WS -> Server -> WS -> SharedDict 获取数据)
     def query_server(action, params, timeout=10):
@@ -1309,6 +1312,15 @@ class DeviceClient:
                     elif msg["type"] == "report":
                         payload = {"action": "task_report", "data": msg["data"]}
                         await self.websocket.send(json.dumps(payload))
+                    elif msg["type"] == "crawl_complete":
+                        payload = {
+                            "action": "crawl_complete",
+                            "data": {
+                                "req_id": msg.get("req_id"),
+                                "payload": msg.get("data"),
+                            },
+                        }
+                        await self.websocket.send(json.dumps(payload))
                     elif msg["type"] == "query":
                         # 转发子进程的查询请求
                         params = msg["params"]
@@ -1339,6 +1351,8 @@ class DeviceClient:
 
                 if command == "run_task":
                     self.execute_task(params)
+                elif command == "crawl_app":
+                    self.execute_crawl(params)
                 # --- 新增文件传输指令 ---
                 elif command == "send_file":
                     # 服务端/前端控制此设备发送文件
@@ -1463,6 +1477,23 @@ class DeviceClient:
         p = multiprocessing.Process(
             target=process_runner_wrapper,
             args=(run_id, flow_id, self.msg_queue, http_url, self.shared_responses, params)
+        )
+        p.start()
+
+    def execute_crawl(self, params):
+        """在设备节点子进程中跑图（ADB 在本机）。"""
+        req_id = params.get("req_id")
+        if not req_id:
+            SLog.e(TAG, "crawl_app missing req_id")
+            return
+
+        SLog.i(TAG, f"Spawning crawl process req_id={req_id}")
+        http_url = self._resolve_server_http_url()
+        from driver.agent.Crawl.crawl_runner import crawl_runner_wrapper
+
+        p = multiprocessing.Process(
+            target=crawl_runner_wrapper,
+            args=(params, self.msg_queue, http_url, self.shared_responses),
         )
         p.start()
 

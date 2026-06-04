@@ -11,7 +11,7 @@ TAG = "OCR"
 
 
 
-@BaseRouter.route('tools/ocr')
+@BaseRouter.route("tools/ocr")
 class FastOCR(Template):
     META = {
         "inputs": [
@@ -58,4 +58,10 @@ class FastOCR(Template):
             traceback.print_exc()
             return self.result.to_dict()
 
+
+@BaseRouter.route("public/ocr")
+class PublicOCR(FastOCR):
+    """与 tools/ocr 相同；前端 ocrRecognition 使用 nodeCode=public/ocr。"""
+
+    pass
 

@@ -92,16 +92,41 @@ class Manager(metaclass=SingletonMeta):
 
         return None
 
+    def _resolve_node_platform(info) -> str:
+        data = getattr(info, "data", None)
+        if isinstance(data, dict) and data.get("platform"):
+            return str(data.get("platform")).strip().lower()
+        p = getattr(info, "platform", None)
+        return str(p).strip().lower() if p else platform_code.COMMON
+
+    @staticmethod
+    def _effective_mobile_kind(info) -> str:
+        """mobile 节点按运行设备解析为 android / ios。"""
+        from server.services.device_service import DeviceService
+
+        sn = Manager._resolve_run_device(info)
+        if sn:
+            dev = DeviceService.get_by_sn(str(sn))
+            if dev and dev.device_type:
+                dt = str(dev.device_type).strip().lower()
+                if dt in (platform_code.IOS, platform_code.ANDROID):
+                    return dt
+        return platform_code.ANDROID
+
     def apply_engine(self, info):
-        if info.platform in platform_code.MMOBILE:
+        plat = Manager._resolve_node_platform(info)
+        if plat in platform_code.MMOBILE:
             if self.MobileEngine:
                 return True
             test_subject = self._resolve_run_device(info)
-            if not test_subject and info.platform in (platform_code.IOS, platform_code.ANDROID):
+            effective = plat
+            if plat == platform_code.MOBILE:
+                effective = self._effective_mobile_kind(info)
+            if not test_subject and effective in (platform_code.IOS, platform_code.ANDROID):
                 from server.services.device_service import DeviceService
 
-                test_subject = DeviceService.pick_sn(device_type=info.platform)
-            if info.platform == platform_code.IOS:
+                test_subject = DeviceService.pick_sn(device_type=effective)
+            if effective == platform_code.IOS:
                 from driver.tentacle.engine.mobile.mIOS import IOSEngine
 
                 engine = IOSEngine()
@@ -112,17 +137,17 @@ class Manager(metaclass=SingletonMeta):
             engine._test_subject = test_subject
             self.MobileEngine = engine
 
-        elif info.platform in platform_code.MWEB:
+        elif plat in platform_code.MWEB:
             if self.WebEngine: return True
             from driver.tentacle.engine.web.mChrome import ChromeEngine
             self.WebEngine = ChromeEngine()
 
-        elif info.platform in platform_code.MPC:
+        elif plat in platform_code.MPC:
             if self.PCEngine: return True
-            if info.platform == platform_code.MACOS:
+            if plat == platform_code.MACOS:
                 from driver.tentacle.engine.pc.mMac import MacEngine
                 self.PCEngine = MacEngine()
-            elif info.platform == platform_code.WINDOWS:
+            elif plat == platform_code.WINDOWS:
                 from driver.tentacle.engine.pc.mWindows import WindowsEngine
                 self.PCEngine = WindowsEngine()
         return True

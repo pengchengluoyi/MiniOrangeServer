@@ -49,12 +49,18 @@ class Template:
         self.get_engine()
 
     def get_engine(self):
-        if self.info.platform in platform_code.MWEB:
+        plat = self._node_platform()
+        if plat in platform_code.MWEB:
             self.engine = Manager().WebEngine
-        elif self.info.platform in platform_code.MMOBILE:
+        elif plat in platform_code.MMOBILE:
             self.engine = Manager().MobileEngine
-        elif self.info.platform in platform_code.MPC:
+        elif plat in platform_code.MPC:
             self.engine = Manager().PCEngine
+
+    def _node_platform(self):
+        data = getattr(self.info, "data", None) or {}
+        p = data.get("platform") or getattr(self.info, "platform", None)
+        return str(p).strip().lower() if p else None
 
     def get_param_value(self, param_name):
         param_name = clean_invisible_chars(param_name)

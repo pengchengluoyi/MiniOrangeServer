@@ -37,5 +37,5 @@ class Sleep(Template):
 
     def execute(self):
         mSleep(float(self.get_param_value("seconds")))
-
-
+        self.result.success()
+        return self.result

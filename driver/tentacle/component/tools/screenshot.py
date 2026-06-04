@@ -26,6 +26,7 @@ class Screenshot(Template):
                 "type": "select",
                 "desc": "适用平台 (辅助筛选)",
                 "options": [
+                    {"value": "mobile", "text": "移动端 (Android + iOS)"},
                     {"value": "android", "text": "Android"},
                     {"value": "ios", "text": "iOS"},
                     {"value": "windows", "text": "Windows"},
