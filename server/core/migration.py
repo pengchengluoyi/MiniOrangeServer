@@ -85,7 +85,12 @@ def _check_and_migrate(db_path):
             'scheduled_tasks': [
                 ('app_id', 'TEXT', None),
                 ('skip_nodes', 'TEXT', None)
-            ]
+            ],
+            'app_icon_targets': [
+                ('clip_embedding', 'JSON', None),
+                ('clip_model', 'TEXT', None),
+                ('region_hint', 'TEXT', None),
+            ],
         }
 
         for table, columns in schema_changes.items():

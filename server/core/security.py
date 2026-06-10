@@ -18,56 +18,37 @@ class SecurityManager:
     @classmethod
     def load(cls):
         with cls._lock:
-            SLog.d(TAG, f"🔒 [Load] Acquiring lock. Config before load: {cls._config.get('access_token')}")
-            # 1. 读取配置
             if os.path.exists(CONFIG_PATH):
                 try:
                     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                         new_data = json.load(f)
-                        # 🔥 [Fix] 原地更新字典，保持引用一致性，防止内存状态分裂
                         cls._config.clear()
                         cls._config.update(new_data)
-                    print(f"🔒 [Load] File loaded. Token: {cls._config.get('access_token')}")
                 except Exception:
                     cls._config.clear()
-                    print("🔒 [Load] Error loading config file, reset to empty.")
-            else:
-                print("🔒 [Load] Config file does not exist, config is empty.")
-            # SLog.d(TAG, "🔒 [Load] Releasing lock.")
+                    SLog.w(TAG, "config load failed, reset to empty")
 
     @classmethod
     def save(cls):
         with cls._lock:
-            SLog.d(TAG, f"💾 [Save] Acquiring lock. Config before merge: {cls._config.get('access_token')}")
-            # 更稳健的写法是先读再合并：
             current_data = {}
             if os.path.exists(CONFIG_PATH):
                 try:
                     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                         current_data = json.load(f)
-                    # SLog.d(TAG, f"💾 [Save] Read existing file for merge. Disk token: {current_data.get('access_token')}")
-                except:
+                except Exception:
                     pass
 
-            # 合并内存中的配置到文件配置中
             current_data.update(cls._config)
-            
-            # 🔥 [Fix] 移除值为 None 的键，确保从 JSON 文件中物理删除
             current_data = {k: v for k, v in current_data.items() if v is not None}
-            
-            print(f"💾 [Save] Merged data to write (access_token): {current_data.get('access_token')}")
             cls._write_atomic(current_data)
-            # SLog.d(TAG, "💾 [Save] Releasing lock.")
 
     @classmethod
     def save_force(cls):
         """强制将当前内存状态同步到磁盘，不合并旧文件"""
         with cls._lock:
-            SLog.d(TAG, f"💪 [SaveForce] Acquiring lock. Data to write (access_token): {cls._config.get('access_token')}")
-            # 过滤掉 None 的值
             data_to_save = {k: v for k, v in cls._config.items() if v is not None}
             cls._write_atomic(data_to_save)
-            print(f"💪 [SaveForce] Written to disk. Token should be GONE.")
 
     @classmethod
     def _write_atomic(cls, data):
@@ -98,10 +79,8 @@ class SecurityManager:
             # 在 Windows (Python 3.3+) 上，它会调用 MoveFileEx 覆盖目标，也是原子的。
             os.replace(tmp_name, CONFIG_PATH)
 
-            print(f"✍️ [AtomicWrite] File replaced. Written token: {data.get('access_token')}")
-
         except Exception as e:
-            print(f"❌ [AtomicWrite] Failed: {e}")
+            SLog.e(TAG, f"config atomic write failed: {e}")
             # 3. 错误清理机制
             # 如果上面的步骤失败了（比如权限不够），必须把残留的 tmp 文件删掉
             # 否则你的硬盘会被 tmp 文件填满。
@@ -123,35 +102,22 @@ class SecurityManager:
     @classmethod
     def get_external_url(cls):
         with cls._lock:
-            SLog.d(TAG, f"🌐 [GetExtURL] Acquiring lock. Config before check: {cls._config.get('access_token')}")
             if not cls._config:
-                SLog.d(TAG, "🌐 [GetExtURL] _config is empty, calling load().")
                 cls.load()
-            url = cls._config.get("external_url")
-            SLog.d(TAG, f"🌐 [GetExtURL] Returning URL: {url}. Config token: {cls._config.get('access_token')}")
-            return url
+            return cls._config.get("external_url")
 
     @classmethod
     def set_external_url(cls, url):
         with cls._lock:
-            SLog.d(TAG, f"✏️ [SetExtURL] Acquiring lock. Config before set: {cls._config.get('access_token')}")
-            cls.load()  # 先加载防止覆盖
+            cls.load()
             cls._config["external_url"] = url
             cls.save()
-            SLog.d(TAG, f"✏️ [SetExtURL] Config after set: {cls._config.get('access_token')}")
 
     @classmethod
     def clear_cluster_config(cls):
         with cls._lock:
-            print(f"🧹 [Clear] Acquiring lock. Config before clear: {cls._config.get('access_token')}")
-
             keys_to_clear = ["target_url", "candidate_urls", "access_token"]
-
-            # 🔥 [核心修复] 不要用 pop！要设为 None！
             for k in keys_to_clear:
                 cls._config[k] = None
-
-            # 立即强制刷盘
             cls.save_force()
-            print(f"🧹 [Clear] After save_force(). Config now: {cls._config.get('access_token')}")
-            # SLog.i(TAG, "🧹 [Clear] Releasing lock.")
+            SLog.i(TAG, "cluster config cleared")

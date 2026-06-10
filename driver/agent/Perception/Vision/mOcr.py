@@ -40,8 +40,8 @@ def get_ocr_engine():
 
 
 def analyze(image_path, img=None):
-    if not img:
-        if not os.path.exists(image_path):
+    if img is None:
+        if not image_path or not os.path.exists(image_path):
             SLog.e(TAG, f"❌ 文件不存在: {image_path}")
             return []
         img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -54,13 +54,15 @@ def analyze(image_path, img=None):
         if len(img.shape) == 3:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    # 2. 图片放大处理
+    # 2. 低分辨率屏才放大（高分辨率手机屏跳过，可省约 40% 耗时）
     h, w = img.shape[:2]
     scale_factor = 1.0
-    if w < 2000:
-        scale_factor = 0.5
+    if max(w, h) < 1400 and w * h < 1_600_000:
         SLog.d(TAG, f">> 图片较小，正在放大识别...")
-        img = cv2.resize(img, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        scale_factor = 2.0
+        img = cv2.resize(
+            img, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC
+        )
 
     # 3. 运行识别 (使用单例)
     ocr_engine = get_ocr_engine()
@@ -75,6 +77,8 @@ def analyze(image_path, img=None):
     SLog.d(TAG, f">> 识别耗时: {total_time:.4f}s")
 
     if not result:
+        if total_time < 0.05:
+            SLog.w(TAG, "OCR 无识别结果（可能为黑屏/锁屏截图）")
         return []
 
     output_data = []

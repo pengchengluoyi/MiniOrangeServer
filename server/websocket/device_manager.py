@@ -2,9 +2,11 @@
 # -*-coding:utf-8 -*-
 
 import json
-from typing import Dict
+import time
+from typing import Callable, Dict, Optional, TypeVar
 from fastapi import WebSocket
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
 from datetime import datetime, timedelta
 import asyncio
 
@@ -16,6 +18,25 @@ from script.log import SLog
 
 # 创建会话工厂
 SessionLocal = sessionmaker(bind=engine)
+
+T = TypeVar("T")
+
+
+def _with_db_retry(action: Callable[[], T], *, retries: int = 6, base_delay: float = 0.05) -> T:
+    """SQLite 写冲突时短暂退避重试。"""
+    last_err: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            return action()
+        except OperationalError as e:
+            last_err = e
+            if "locked" not in str(e).lower() or attempt >= retries - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+    if last_err:
+        raise last_err
+    raise RuntimeError("db retry failed")
+
 
 class DeviceManager:
     _instance = None
@@ -439,16 +460,18 @@ class DeviceManager:
 
     # --- 数据库操作 ---
     def _update_device_status(self, sn: str, status: str):
-        try:
+        def _write():
             with SessionLocal() as db:
                 device = db.query(MDevice).filter(MDevice.sn == sn).first()
                 if device:
                     device.status = status
                     if status == "online":
-                        # 优化：直接去除微秒，避免产生 .200000 这种让用户困惑的格式，只保留到秒
                         now = datetime.now()
                         device.last_online_time = now.replace(microsecond=0)
                     db.commit()
+
+        try:
+            _with_db_retry(_write)
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error update status: {e}")
 
@@ -459,24 +482,25 @@ class DeviceManager:
         SLog.i("DeviceManager", "Starting heartbeat monitor...")
         while True:
             await asyncio.sleep(30) # 每30秒检查一次
-            try:
+            def _sweep():
                 with SessionLocal() as db:
-                    # 查找在线但超过 60 秒未更新心跳的设备
                     timeout_threshold = datetime.now() - timedelta(seconds=60)
                     devices = db.query(MDevice).filter(
                         MDevice.status == "online",
-                        MDevice.last_online_time < timeout_threshold
+                        MDevice.last_online_time < timeout_threshold,
                     ).all()
-                    
+
                     for dev in devices:
                         SLog.w("DeviceManager", f"Device {dev.sn} heartbeat timeout. Marking offline.")
                         dev.status = "offline"
-                        # 清理内存连接
                         if dev.sn in self.active_connections:
                             del self.active_connections[dev.sn]
-                    
+
                     if devices:
                         db.commit()
+
+            try:
+                _with_db_retry(_sweep)
             except Exception as e:
                 SLog.e("DeviceManager", f"Heartbeat monitor error: {e}")
 

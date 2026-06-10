@@ -41,6 +41,11 @@ from server.routers import rWorkflowRun as workflowRun_router
 from server.routers import rDevice as device_router
 from server.routers import rAbility as ability_router
 from server.routers import rSchedule as schedule_router
+from server.routers import rFeishuRegression as feishu_router
+from server.routers import rAppAutomation as app_automation_router
+from server.routers import rSettings as settings_router
+import server.models.app_regression_run  # noqa: F401 — register ORM table
+import server.models.app_icon_target  # noqa: F401 — register ORM table
 
 # Windows COM Init (仅在 Windows 下执行)
 if platform.system() == "Windows":
@@ -225,6 +230,22 @@ async def lifespan(app: FastAPI):
     if client:
         app.state.device_client_task = asyncio.create_task(client.start())
 
+    # CLIP 启动预加载（首次会下载权重，须完成后再接请求，避免用例执行线程卡 50s+）
+    SLog.i(TAG, "--- [CLIP] warmup starting... ---")
+    try:
+        from server.core.vision.clip_service import warmup_clip_service
+
+        clip_status = await asyncio.to_thread(warmup_clip_service)
+        if clip_status.get("ok"):
+            SLog.i(
+                TAG,
+                f"--- [CLIP] ready model={clip_status.get('model')} dim={clip_status.get('dim')} ---",
+            )
+        else:
+            SLog.w(TAG, f"--- [CLIP] unavailable: {clip_status.get('reason')} ---")
+    except Exception as e:
+        SLog.w(TAG, f"--- [CLIP] warmup failed: {e} ---")
+
     # 只有主进程才打印这个 Ready
     SLog.i(TAG, "--- [LifeSpan] Backend services & Database ready ---")
 
@@ -262,6 +283,9 @@ app.include_router(workflowRun_router.router)
 app.include_router(ability_router.router)
 app.include_router(device_router.router)
 app.include_router(schedule_router.router)
+app.include_router(feishu_router.router)
+app.include_router(app_automation_router.router)
+app.include_router(settings_router.router)
 
 
 @app.get("/")

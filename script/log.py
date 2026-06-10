@@ -36,9 +36,15 @@ class LogFormatter(logging.Formatter):
 # 配置基础 Logger (只负责控制台输出)
 logger = logging.getLogger("AndroidLog")
 logger.setLevel(logging.DEBUG)
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(LogFormatter())
-logger.addHandler(console_handler)
+logger.propagate = False  # 避免 uvicorn/root 再打印一遍 INFO:AndroidLog:...
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(LogFormatter())
+    logger.addHandler(console_handler)
+
+# 压低第三方库在控制台的重试/代理告警（CLIP 加载时尤甚）
+for _noisy in ("huggingface_hub", "urllib3", "httpx", "filelock", "open_clip"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 # ================= 3. SLog 类改造 =================
 class SLog:

@@ -151,6 +151,19 @@ class IOSEngine(MobileEngine):
         except Exception as e:
             SLog.d(TAG, f"screen_on/unlock: {e}")
 
+    def ensure_screen_ready(self, node_sn: Optional[str] = None) -> bool:
+        """唤醒并解锁 iOS 屏幕。"""
+        if not self.driver:
+            return False
+        try:
+            if self.driver.locked():
+                SLog.i(TAG, f"screen locked, unlocking sn={self._target_device_sn()}")
+                self._unlock_after_wda_session()
+            return not self.driver.locked()
+        except Exception as e:
+            SLog.w(TAG, f"ensure_screen_ready failed: {e}")
+            return False
+
     def swipe_norm(
         self,
         x1: float,

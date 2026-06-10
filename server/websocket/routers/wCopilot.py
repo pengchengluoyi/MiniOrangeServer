@@ -19,7 +19,12 @@ async def handle_copilot_execute(websocket, data: dict):
     platform = (data.get("platform") or "android").lower()
     if not steps:
         return {"code": 400, "msg": "steps 为空"}
-    results = cs.execute_steps(steps, sn=sn, platform=platform)
+    results = cs.execute_steps(
+        steps,
+        sn=sn,
+        platform=platform,
+        app_id=str(data.get("app_id") or data.get("appId") or ""),
+    )
     ok_all = all(r.get("ok") for r in results) if results else False
     return {
         "code": 200,

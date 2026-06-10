@@ -104,20 +104,33 @@ class Window(Template):
             if restart:
                 if hasattr(self.engine, 'close_window'):
                     self.engine.close_window(target)
+            ok = False
             if operation == 'start':
+                if not target:
+                    self.result.fail()
+                    SLog.e(TAG, "Window start failed: empty target")
+                    return self.result
+                if not self.engine:
+                    self.result.fail()
+                    SLog.e(TAG, "Window start failed: no mobile engine")
+                    return self.result
                 pid = self.engine.start_app(target)
-                self.memory.set(self.info, "PID", pid)
+                ok = pid is not False and pid is not None
+                if ok:
+                    self.memory.set(self.info, "PID", pid)
+                    self.result.success()
+                else:
+                    self.result.fail()
+                    SLog.e(TAG, f"Window start failed: {target}")
 
-            elif operation == 'switch':
-                # 统一调用 switch_window，由引擎层去处理是切Tab、切App还是切Window
-                if hasattr(self.engine, 'switch_window'):
-                    self.engine.switch_window(target)
-            
             elif operation == 'close':
                 if hasattr(self.engine, 'close_window'):
                     self.engine.close_window(target)
-            
-            self.result.success()
+                self.result.success()
+            elif operation == 'switch':
+                if hasattr(self.engine, 'switch_window'):
+                    self.engine.switch_window(target)
+                self.result.success()
         except Exception as e:
             SLog.e(TAG, f"Window action failed: {e}")
             self.result.fail()

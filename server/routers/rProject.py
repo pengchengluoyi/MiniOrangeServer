@@ -64,9 +64,42 @@ def create_app(item: AppCreate, db: Session = Depends(get_db)):
 
 @router.get("/list")
 def list_projects(db: Session = Depends(get_db)):
-    # 使用 joinedload 预加载关联的 apps
+    from server.models.app_icon_target import AppIconTarget
+
     projects = db.query(Project).options(joinedload(Project.apps)).all()
-    return projects
+    out = []
+    for p in projects:
+        apps_out = []
+        for a in p.apps or []:
+            env = a.env if isinstance(a.env, dict) else {}
+            cache = env.get("feishu_cases_cache") if isinstance(env.get("feishu_cases_cache"), dict) else {}
+            icon_n = db.query(AppIconTarget).filter(AppIconTarget.app_id == a.id).count()
+            apps_out.append(
+                {
+                    "id": a.id,
+                    "uid": a.uid,
+                    "name": a.name,
+                    "description": a.description,
+                    "platforms": a.platforms,
+                    "project_id": a.project_id,
+                    "automation_stats": {
+                        "icon_targets": icon_n,
+                        "feishu_cases": len(cache.get("cases") or []),
+                        "has_feishu": bool(env.get("feishu")),
+                    },
+                }
+            )
+        out.append(
+            {
+                "id": p.id,
+                "uid": p.uid,
+                "name": p.name,
+                "description": p.description,
+                "env": p.env,
+                "apps": apps_out,
+            }
+        )
+    return out
 
 
 @router.get("/app/{app_id}")

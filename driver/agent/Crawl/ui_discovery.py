@@ -3,6 +3,7 @@
 """从 UI 层级 / OCR 发现可点击目标。"""
 from __future__ import annotations
 
+import os
 import re
 import uuid
 import xml.etree.ElementTree as ET
@@ -132,20 +133,85 @@ def discover_clickables_from_hierarchy(
     return targets
 
 
+_OCR_SHOT_CACHE: dict = {}
+_OCR_SHOT_CACHE_MAX = 24
+_OCR_SHOT_CACHE_TTL_SEC = 3.0
+
+
+def _ocr_shot_cache_key(shot_or_path) -> str:
+    import hashlib
+    import time as _time
+
+    if shot_or_path is None:
+        return ""
+    if isinstance(shot_or_path, str):
+        if not os.path.exists(shot_or_path):
+            return ""
+        try:
+            st = os.stat(shot_or_path)
+            return f"path:{shot_or_path}:{int(st.st_mtime)}:{st.st_size}"
+        except OSError:
+            return f"path:{shot_or_path}"
+    try:
+        import numpy as np
+
+        arr = np.asarray(shot_or_path)
+        if arr.size == 0:
+            return ""
+        sample = arr.reshape(-1)[:4096].tobytes()
+        digest = hashlib.md5(sample).hexdigest()
+        return f"arr:{arr.shape}:{digest}:{int(_time.time() // _OCR_SHOT_CACHE_TTL_SEC)}"
+    except Exception:
+        return ""
+
+
+def _ocr_analyze_shot(shot_or_path) -> list:
+    """engine.screenshot() 可能返回路径或 PIL.Image，统一交给 OCR。"""
+    try:
+        from driver.agent.Perception.Vision.mOcr import analyze
+    except Exception:
+        return []
+    if shot_or_path is None:
+        return []
+    cache_key = _ocr_shot_cache_key(shot_or_path)
+    if cache_key:
+        import time as _time
+
+        hit = _OCR_SHOT_CACHE.get(cache_key)
+        if hit and _time.time() - hit["ts"] < _OCR_SHOT_CACHE_TTL_SEC:
+            return list(hit["items"])
+    if isinstance(shot_or_path, str):
+        if not os.path.exists(shot_or_path):
+            return []
+        items = analyze(shot_or_path) or []
+    else:
+        try:
+            import numpy as np
+        except ImportError:
+            return []
+        arr = np.array(shot_or_path)
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            arr = arr[:, :, :3][:, :, ::-1]
+        items = analyze("", img=arr) or []
+    if cache_key:
+        import time as _time
+
+        if len(_OCR_SHOT_CACHE) >= _OCR_SHOT_CACHE_MAX:
+            oldest = min(_OCR_SHOT_CACHE, key=lambda k: _OCR_SHOT_CACHE[k]["ts"])
+            _OCR_SHOT_CACHE.pop(oldest, None)
+        _OCR_SHOT_CACHE[cache_key] = {"ts": _time.time(), "items": items}
+    return items
+
+
 def discover_clickables_ocr(
-    image_path: str,
+    shot_or_path,
     screen_w: int,
     screen_h: int,
     *,
     max_items: int = 16,
 ) -> List[ClickTarget]:
-    """OCR 文本块作为可点区域（兜底）。"""
-    try:
-        from driver.agent.Perception.Vision.mOcr import analyze
-    except Exception:
-        return []
-
-    items = analyze(image_path) or []
+    """OCR 文本块作为可点区域（兜底）。shot_or_path 为文件路径或 PIL 截图。"""
+    items = _ocr_analyze_shot(shot_or_path)
     targets: List[ClickTarget] = []
     y_top = int(screen_h * 0.1)
     y_bottom = int(screen_h * 0.9)
@@ -153,7 +219,12 @@ def discover_clickables_ocr(
     for it in items:
         text = (it.get("text") or "").strip()
         box = it.get("box")
-        if not text or not box or len(box) < 4:
+        if not text or box is None:
+            continue
+        try:
+            if len(box) < 4:
+                continue
+        except TypeError:
             continue
         xs = [p[0] for p in box]
         ys = [p[1] for p in box]

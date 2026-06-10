@@ -70,27 +70,40 @@ class Manager(metaclass=SingletonMeta):
 
     @staticmethod
     def _resolve_run_device(info) -> str | None:
-        """方案 A：运行级设备 > 配置文件兜底。"""
+        """方案 A：运行级设备 > 配置文件兜底；PC 节点 SN 解析为 adb 真机序列号。"""
         subject = Manager._mobile_test_subject(info)
         if subject:
-            return subject
+            subject = str(subject)
+        else:
+            import builtins
 
-        import builtins
+            run_sn = getattr(builtins, "TARGET_DEVICE_SN", None)
+            if run_sn:
+                subject = str(run_sn)
+            else:
+                try:
+                    from driver.agent.Memory import memory_manager
 
-        run_sn = getattr(builtins, "TARGET_DEVICE_SN", None)
-        if run_sn:
-            return str(run_sn)
+                    mem_sn = memory_manager.short_term.get_global("run_device_sn")
+                    if mem_sn:
+                        subject = str(mem_sn)
+                except Exception:
+                    pass
+
+        if not subject:
+            return None
 
         try:
-            from driver.agent.Memory import memory_manager
+            from driver.agent.Crawl.device_bootstrap import resolve_mobile_serial
 
-            mem_sn = memory_manager.short_term.get_global("run_device_sn")
-            if mem_sn:
-                return str(mem_sn)
+            plat = Manager._resolve_node_platform(info)
+            effective = plat
+            if plat == platform_code.MOBILE:
+                effective = Manager._effective_mobile_kind(info)
+            platform = effective if effective in (platform_code.IOS, platform_code.ANDROID) else platform_code.ANDROID
+            return resolve_mobile_serial(subject, platform)
         except Exception:
-            pass
-
-        return None
+            return subject
 
     def _resolve_node_platform(info) -> str:
         data = getattr(info, "data", None)
@@ -116,8 +129,6 @@ class Manager(metaclass=SingletonMeta):
     def apply_engine(self, info):
         plat = Manager._resolve_node_platform(info)
         if plat in platform_code.MMOBILE:
-            if self.MobileEngine:
-                return True
             test_subject = self._resolve_run_device(info)
             effective = plat
             if plat == platform_code.MOBILE:
@@ -126,6 +137,18 @@ class Manager(metaclass=SingletonMeta):
                 from server.services.device_service import DeviceService
 
                 test_subject = DeviceService.pick_sn(device_type=effective)
+
+            if self.MobileEngine:
+                prev = getattr(self.MobileEngine, "_serial", None) or getattr(
+                    self.MobileEngine, "_test_subject", None
+                )
+                if prev == test_subject:
+                    return True
+                self.MobileEngine._test_subject = test_subject
+                if hasattr(self.MobileEngine, "init_driver"):
+                    self.MobileEngine.init_driver(test_subject)
+                return True
+
             if effective == platform_code.IOS:
                 from driver.tentacle.engine.mobile.mIOS import IOSEngine
 
