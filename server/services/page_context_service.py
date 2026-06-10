@@ -464,7 +464,6 @@ def get_engine_screen_snapshot(engine, *, force: bool = False) -> Dict[str, Any]
 
     snap: Dict[str, Any] = {
         "wm": wm,
-        "shot": shot,
         "ocr_text": ocr_text,
         "blob": blob,
         "screen_w": w,

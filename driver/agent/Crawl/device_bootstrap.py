@@ -172,8 +172,25 @@ def clear_engine_cache(node_sn: str = "", platform: str = "android") -> None:
     """断开设备或跑批结束时释放缓存。"""
     if node_sn:
         mobile_sn = resolve_mobile_serial(node_sn, platform)
-        _ENGINE_CACHE.pop(f"{mobile_sn}:{platform}", None)
+        key = f"{mobile_sn}:{platform}"
+        entry = _ENGINE_CACHE.pop(key, None)
+        if entry and entry.get("engine") is not None:
+            try:
+                from server.services.page_context_service import invalidate_engine_screen_cache
+
+                invalidate_engine_screen_cache(entry["engine"])
+            except Exception:
+                pass
     else:
+        for entry in _ENGINE_CACHE.values():
+            eng = entry.get("engine")
+            if eng is not None:
+                try:
+                    from server.services.page_context_service import invalidate_engine_screen_cache
+
+                    invalidate_engine_screen_cache(eng)
+                except Exception:
+                    pass
         _ENGINE_CACHE.clear()
     try:
         from server.services.regression_run_context import get_ctx

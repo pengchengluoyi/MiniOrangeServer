@@ -33,6 +33,77 @@ from server.services.page_navigation_service import (
 TAG = "FeishuRegression"
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
+_RUNS_MAX_ENTRIES = 10
+_RUNS_TTL_SEC = 6 * 3600
+
+
+def _slim_run_for_memory_cache(run_doc: Dict[str, Any]) -> Dict[str, Any]:
+    """完整 run 已入库后，内存只保留摘要，避免 _RUNS 长期堆积 trace/gesture。"""
+    keys = (
+        "run_id",
+        "app_id",
+        "app_name",
+        "sn",
+        "platform",
+        "env_profile",
+        "package",
+        "started_at",
+        "finished_at",
+        "status",
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "duration_ms",
+        "executed",
+        "pending_clarification",
+    )
+    slim: Dict[str, Any] = {k: run_doc[k] for k in keys if k in run_doc}
+    slim_cases: List[Dict[str, Any]] = []
+    for c in run_doc.get("cases") or []:
+        slim_cases.append(
+            {
+                k: c.get(k)
+                for k in (
+                    "case_id",
+                    "name",
+                    "status",
+                    "msg",
+                    "duration_ms",
+                    "command",
+                )
+                if c.get(k) is not None
+            }
+        )
+    slim["cases"] = slim_cases
+    return slim
+
+
+def _prune_runs_cache() -> None:
+    """淘汰已完成且过期的 run，限制内存中缓存条数。"""
+    if not _RUNS:
+        return
+    now = time.time()
+    finished: List[tuple] = []
+    for rid, doc in list(_RUNS.items()):
+        if doc.get("status") == "running":
+            continue
+        ts = doc.get("finished_at") or doc.get("started_at") or ""
+        age = _RUNS_TTL_SEC + 1
+        try:
+            if ts:
+                age = now - datetime.fromisoformat(str(ts)).timestamp()
+        except Exception:
+            pass
+        if age > _RUNS_TTL_SEC:
+            _RUNS.pop(rid, None)
+            continue
+        finished.append((rid, ts))
+    while len(_RUNS) > _RUNS_MAX_ENTRIES and finished:
+        finished.sort(key=lambda x: x[1] or "")
+        rid = finished.pop(0)[0]
+        if _RUNS.get(rid, {}).get("status") != "running":
+            _RUNS.pop(rid, None)
 
 
 def _get_app_feishu_config(app) -> Dict[str, Any]:
@@ -1352,7 +1423,14 @@ def _finalize_run_doc(run_doc: Dict[str, Any], db: Optional[Session] = None) -> 
         aas.persist_run_finish(db, run_doc)
     rid = run_doc.get("run_id")
     if rid:
-        _RUNS[rid] = run_doc
+        if db is not None and run_doc.get("status") not in (
+            "running",
+            "awaiting_clarification",
+        ):
+            _RUNS[rid] = _slim_run_for_memory_cache(run_doc)
+        else:
+            _RUNS[rid] = run_doc
+        _prune_runs_cache()
     return run_doc
 
 
@@ -1943,8 +2021,11 @@ def clarify_and_resume_run(
 
 
 def get_run(run_id: str, db: Optional[Session] = None) -> Optional[Dict[str, Any]]:
-    if run_id in _RUNS:
-        return _RUNS[run_id]
+    mem = _RUNS.get(run_id)
+    if mem and mem.get("status") in ("running", "awaiting_clarification"):
+        return mem
     if db is not None:
-        return aas.get_run_from_db(db, run_id)
-    return None
+        row = aas.get_run_from_db(db, run_id)
+        if row:
+            return row
+    return mem
