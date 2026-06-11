@@ -467,48 +467,54 @@ def _ocr_left_of_anchor(
     return cx, cy, "ocr_toggle_left"
 
 
-def _ocr_agreement_checkbox_pos(
+def _is_agreement_checkbox_label(label: str) -> bool:
+    return bool(re.search(r"底部|协议|隐私|勾选|条款|用户协议", label or ""))
+
+
+def _clip_agreement_checkbox_pos(
     engine,
     screen_w: int,
     screen_h: int,
 ) -> Optional[Tuple[int, int, str]]:
-    """登录页底栏协议行：取最左侧协议 OCR 框，在其左侧点圆形勾选框。"""
+    """登录页底栏协议勾选框：CLIP 视觉定位（弃用 OCR 左侧偏移）。"""
     try:
-        from server.services.page_navigation_service import _ocr_box_bounds
+        from server.services.clip_locate_service import try_clip_locate
 
-        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
-        if shot is None:
-            return None
-        from driver.agent.Crawl.ui_discovery import _ocr_analyze_shot
-
-        y_lo = int(screen_h * 0.74)
-        hits: List[Tuple[Tuple[int, int, int, int], str]] = []
-        for it in _ocr_analyze_shot(shot) or []:
-            text = (it.get("text") or "").strip()
-            if not text:
+        query = "empty round checkbox"
+        aliases = [
+            "unchecked circular checkbox",
+            "round agreement checkbox",
+            "圆形勾选框",
+            "empty checkbox circle",
+            "small unchecked checkbox",
+            "checkbox next to user agreement",
+        ]
+        y_lo = int(screen_h * 0.68)
+        for region in ("login_row", "bottom", "full"):
+            pos, method, detail, _rect = try_clip_locate(
+                engine,
+                screen_w,
+                screen_h,
+                label="协议勾选框",
+                query=query,
+                aliases=aliases,
+                region=region,
+            )
+            if not pos:
                 continue
-            bounds = _ocr_box_bounds(it)
-            if not bounds:
-                continue
-            cy = (bounds[1] + bounds[3]) // 2
+            cx, cy = int(pos[0]), int(pos[1])
             if cy < y_lo:
                 continue
-            if any(
-                w in text
-                for w in ("用户协议", "隐私", "已阅读", "阅读并同意", "条款", "同意")
-            ):
-                hits.append((bounds, text))
-        if not hits:
-            return None
-        x1, y1, x2, y2 = min(hits, key=lambda h: h[0][0])[0]
-        cy = (y1 + y2) // 2
-        offset = max(40, int(screen_w * 0.042))
-        cx = max(int(screen_w * 0.04), x1 - offset)
-        SLog.i(TAG, f"agreement checkbox ocr-left @({cx},{cy}) text_x1={x1}")
-        return cx, cy, "ocr_agreement_checkbox"
+            if cx > int(screen_w * 0.45):
+                continue
+            SLog.i(
+                TAG,
+                f"agreement checkbox clip @({cx},{cy}) region={region} method={method} {detail}",
+            )
+            return cx, cy, method or "clip_agreement_checkbox"
     except Exception as e:
-        SLog.w(TAG, f"agreement checkbox ocr failed: {e}")
-        return None
+        SLog.w(TAG, f"agreement checkbox clip failed: {e}")
+    return None
 
 
 def resolve_toggle_tap(
@@ -519,8 +525,9 @@ def resolve_toggle_tap(
 ) -> Optional[Tuple[int, int, str]]:
     """
     通用开关点击坐标解析。
-    顺序：无障碍小控件 + 文案锚点 → OCR 左侧偏移 → CLIP 打补丁。
-  已处于目标状态时返回 method=already_checked。
+    协议勾选框：CLIP 优先（弃用 OCR 几何偏移）。
+    其他开关：无障碍 → CLIP patch → OCR 锚点左侧（兜底）。
+    已处于目标状态时返回 method=already_checked。
     """
     intent = parse_toggle_intent(label)
     if not intent:
@@ -529,23 +536,7 @@ def resolve_toggle_tap(
     candidates = discover_toggle_candidates(engine, screen_w, screen_h)
     anchor_list = _toggle_search_anchors(label, intent.anchor)
     anchor_bounds = _find_toggle_anchor_bounds(engine, screen_w, screen_h, anchor_list)
-
-    if intent.kind == "checkbox" and re.search(r"底部|协议|隐私|勾选|条款", label or ""):
-        ocr_cb = _ocr_agreement_checkbox_pos(engine, screen_w, screen_h)
-        if ocr_cb:
-            return ocr_cb
-
-    if anchor_bounds and not candidates:
-        ocr_hit = _ocr_left_of_anchor(
-            engine, anchor_bounds, screen_h, screen_w=screen_w
-        )
-        if ocr_hit:
-            SLog.i(
-                TAG,
-                f"toggle ocr-left (no u2) anchor={anchor_list!r} "
-                f"@({ocr_hit[0]},{ocr_hit[1]})",
-            )
-            return ocr_hit
+    agreement_cb = intent.kind == "checkbox" and _is_agreement_checkbox_label(label)
 
     if intent.wants_checked:
         checked_nodes = [c for c in candidates if c.get("checked")]
@@ -560,6 +551,45 @@ def resolve_toggle_tap(
                 cx = already["x"] + already["w"] // 2
                 cy = already["y"] + already["h"] // 2
                 return cx, cy, "already_checked"
+
+    if agreement_cb:
+        clip_cb = _clip_agreement_checkbox_pos(engine, screen_w, screen_h)
+        if clip_cb:
+            return clip_cb
+        clip_hit = _try_clip_on_toggles(engine, screen_w, screen_h, candidates, intent)
+        if clip_hit:
+            return clip_hit
+        grid = _grid_scan_bottom_band(screen_w, screen_h)
+        clip_hit = _try_clip_on_toggles(engine, screen_w, screen_h, grid, intent)
+        if clip_hit:
+            return clip_hit
+        pick = _spatial_pick_toggle(
+            candidates,
+            anchor_bounds,
+            index=intent.index,
+            wants_checked=intent.wants_checked,
+        )
+        if pick:
+            cx = pick["x"] + pick["w"] // 2
+            cy = pick["y"] + pick["h"] // 2
+            return cx, cy, str(pick.get("source") or "u2_toggle")
+        SLog.w(
+            TAG,
+            f"agreement checkbox miss label={label!r} candidates={len(candidates)}",
+        )
+        return None
+
+    if anchor_bounds and not candidates:
+        ocr_hit = _ocr_left_of_anchor(
+            engine, anchor_bounds, screen_h, screen_w=screen_w
+        )
+        if ocr_hit:
+            SLog.i(
+                TAG,
+                f"toggle ocr-left (no u2) anchor={anchor_list!r} "
+                f"@({ocr_hit[0]},{ocr_hit[1]})",
+            )
+            return ocr_hit
 
     pick = _spatial_pick_toggle(
         candidates,

@@ -24,6 +24,8 @@ REGION_BANDS = {
     "bottom": (0.86, 1.0),
     "segment": (0.04, 0.28),
     "login_row": (0.66, 0.88),
+    "top_right": (0.0, 0.32),
+    "top_left": (0.0, 0.32),
     "full": (0.0, 1.0),
 }
 
@@ -32,9 +34,17 @@ _GENERIC_ICON_RE = re.compile(r"^icon[_\-]?\d+$", re.I)
 
 def _score_threshold() -> float:
     try:
-        return float(os.getenv("CLIP_SCORE_THRESHOLD", "0.21"))
+        return float(os.getenv("CLIP_SCORE_THRESHOLD", "0.28"))
     except ValueError:
-        return 0.21
+        return 0.28
+
+
+def _login_row_threshold() -> float:
+    """登录图标行置信度（配合视觉 query，略低于全屏阈值）。"""
+    try:
+        return float(os.getenv("CLIP_LOGIN_ROW_THRESHOLD", "0.30"))
+    except ValueError:
+        return 0.30
 
 
 def _gallery_threshold() -> float:
@@ -155,8 +165,10 @@ def infer_region_hint(label: str) -> str:
         return "login_row"
     if re.search(r"手机(号)?.*(方式|登录)", raw) and "一键" not in raw and "本机" not in raw:
         return "login_row"
-    if re.search(r"访客", raw):
-        return "login_row"
+    if re.search(r"右上角|右上", raw):
+        return "top_right"
+    if re.search(r"左上角|左上", raw):
+        return "top_left"
     return "full"
 
 
@@ -405,31 +417,24 @@ def _locate_login_row(
         f"margin={margin:.3f} scores={[f'{s:.3f}' for s, _ in scored]}",
     )
 
-    if margin < 0.03 and len(row) >= 2:
-        slot = _login_row_intent_slot(query, len(row))
-        if slot is not None and 0 <= slot < len(row):
-            slot_c = row[slot]
-            slot_key = _candidate_key(slot_c)
-            slot_score = next(
-                (s for s, c in scored if _candidate_key(c) == slot_key),
-                top_score,
-            )
-            pick_c, pick_score = slot_c, slot_score
-            SLog.i(
-                TAG,
-                f"login_row tiebreak slot={slot}/{len(row)} "
-                f"score={pick_score:.3f} cx={slot_c['x'] + slot_c['w'] // 2} "
-                f"query={query!r}",
-            )
+    # 禁止按「左→右槽位」硬选图标；仅当 CLIP 最高分达标且领先明显时才点击
+    row_threshold = max(threshold, _login_row_threshold())
+    if margin < 0.06:
+        SLog.i(
+            TAG,
+            f"login_row ambiguous top={top_score:.3f} margin={margin:.3f} query={query!r}",
+        )
+        if top_score < row_threshold:
+            return None, row
 
-    if pick_score < threshold:
+    if pick_score < row_threshold:
         row_y = int(row[0]["y"]) + int(row[0]["h"]) // 2
         grid = _grid_scan_login_row(screen_w, screen_h, row_y=row_y)
         grid_scored = _score_patch_candidates(frame, grid, text_vec, svc, query=query, pad=4)
         if grid_scored and grid_scored[0][0] > pick_score:
             pick_score, pick_c = grid_scored[0]
             SLog.i(TAG, f"login_row grid fallback score={pick_score:.3f}")
-        if pick_score < threshold:
+        if pick_score < row_threshold:
             return None, row
 
     method = "clip_patch" if pick_c.get("source") != "grid" else "clip_grid"
@@ -778,9 +783,11 @@ def locate_on_screenshot(
                         }
             elif icon_emb is not None and not _is_generic_icon_name(top_icon.get("name") or ""):
                 gx, gy = int(top_icon.get("x") or 0), int(top_icon.get("y") or 0)
-                gw, gh = int(top_icon.get("w") or 48), int(top_icon.get("h") or 48)
+                gw, gh = int(top_icon.get("w") or 0), int(top_icon.get("h") or 0)
+                if gw <= 0 or gh <= 0:
+                    gx, gy, gw, gh = 0, 0, 0, 0
                 cx, cy = gx + gw // 2, gy + gh // 2
-                if _y_in_band(cy, screen_h, band) or region == "full":
+                if gw > 0 and gh > 0 and (_y_in_band(cy, screen_h, band) or region == "full"):
                     if g_score >= gallery_threshold:
                         coord_hit = {
                             "x": gx,
@@ -798,7 +805,10 @@ def locate_on_screenshot(
                         if best is None or coord_hit["score"] > best["score"]:
                             best = coord_hit
 
-    if best and best["score"] >= threshold:
+    effective_threshold = (
+        max(threshold, _login_row_threshold()) if region == "login_row" else threshold
+    )
+    if best and best["score"] >= effective_threshold:
         if not _clip_hit_matches_query(query, best, region=region, screen_h=screen_h):
             SLog.i(
                 TAG,

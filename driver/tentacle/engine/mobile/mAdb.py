@@ -333,9 +333,9 @@ class MAdbEngine(MobileEngine):
                     self.swipe_norm(0.5, 0.93, 0.5, 0.08, 0.25)
             except Exception as e:
                 SLog.w(TAG, f"keyguard swipe-up failed: {e}")
-            time.sleep(0.6)
+            time.sleep(0.32)
             self._switch_to_password_entry(d)
-            time.sleep(0.25)
+            time.sleep(0.15)
 
     def _switch_to_password_entry(self, d) -> None:
         """指纹/人脸锁屏上切到密码输入（MIUI / 原生常见文案）。"""
@@ -380,8 +380,8 @@ class MAdbEngine(MobileEngine):
                     self.shell(f"input tap {x} {y}")
             except Exception:
                 self.shell(f"input tap {x} {y}")
-            time.sleep(0.12)
-        time.sleep(0.6)
+            time.sleep(0.07)
+        time.sleep(0.35)
         return not self._is_keyguard_showing()
 
     def _tap_lock_screen_keypad(self, d, pwd: str, *, w: int = 0, h: int = 0) -> bool:
@@ -399,10 +399,10 @@ class MAdbEngine(MobileEngine):
             ):
                 try:
                     o = d(**spec)
-                    if o.exists(timeout=0.9):
+                    if o.exists(timeout=0.38):
                         o.click()
                         clicked = True
-                        time.sleep(0.12)
+                        time.sleep(0.07)
                         break
                 except Exception:
                     continue
@@ -417,10 +417,10 @@ class MAdbEngine(MobileEngine):
                 ):
                     try:
                         o = d(**spec)
-                        if o.exists(timeout=0.9):
+                        if o.exists(timeout=0.38):
                             o.click()
                             clicked = True
-                            time.sleep(0.12)
+                            time.sleep(0.07)
                             break
                     except Exception:
                         continue
@@ -450,11 +450,12 @@ class MAdbEngine(MobileEngine):
             if not self._pin_keypad_visible(d) or self._needs_swipe_up_hint(d):
                 self._swipe_up_to_pin_entry(d, w, h)
             self._switch_to_password_entry(d)
-            try:
-                d.click(w // 2, int(h * 0.55))
-                time.sleep(0.3)
-            except Exception:
-                pass
+            if not self._pin_keypad_visible(d):
+                try:
+                    d.click(w // 2, int(h * 0.55))
+                    time.sleep(0.15)
+                except Exception:
+                    pass
         elif d:
             self._switch_to_password_entry(d)
 
@@ -557,7 +558,7 @@ class MAdbEngine(MobileEngine):
             self._wake_display()
             if locked or blank:
                 self._unlock_keyguard(node_sn)
-            time.sleep(0.6)
+            time.sleep(0.35)
         ok = not self._is_keyguard_showing() and not self._is_mostly_black_image(
             self.screenshot()
         )
@@ -1076,6 +1077,8 @@ class MAdbEngine(MobileEngine):
         skip_label_lookup: bool = False,
         exact_label: bool = False,
         consent_dismiss: bool = False,
+        locate_method: str = "",
+        skip_gesture_audit: bool = False,
     ) -> bool:
         target = position if position else element
         x, y = None, None
@@ -1094,14 +1097,14 @@ class MAdbEngine(MobileEngine):
         if x is not None and y is not None and (skip_label_lookup or position is not None):
             tap_summary = f"点击「{label}」@({x},{y})" if label else f"点击 ({x},{y})"
             audit = None
-            if not consent_dismiss:
+            if not consent_dismiss and not skip_gesture_audit:
                 audit = self._audit_gesture_begin(
                     "click",
                     tap_summary,
                     x=int(x),
                     y=int(y),
                     label=label,
-                    method="coordinate",
+                    method=(locate_method or "coordinate").strip() or "coordinate",
                 )
             ok = False
             try:

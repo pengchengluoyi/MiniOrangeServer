@@ -4,17 +4,18 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from script.log import SLog
 from server.services import copilot_service as cs
 from server.services import app_automation_service as aas
-from server.services.feishu_service import load_cases_from_config
+from server.services.feishu_service import load_cases_from_config, normalize_feishu_case
 from server.services.case_precondition_service import (
     has_precondition_phase,
     precondition_cleared_app_cache,
@@ -22,10 +23,7 @@ from server.services.case_precondition_service import (
 )
 from server.services.page_navigation_service import (
     _should_attempt_page_recovery,
-    clear_blocking_overlays,
-    dismiss_startup_overlays,
     ensure_page_ready_before_action,
-    ensure_system_permissions_cleared,
     try_dismiss_blocking_overlay,
     try_recover_and_reverify,
 )
@@ -138,6 +136,7 @@ def fetch_cases_for_app(app, *, persist: bool = True) -> Dict[str, Any]:
     if not cfg.get("doc_url") and not cfg.get("spreadsheet_token"):
         raise RuntimeError("请先在应用中配置飞书表格链接")
     payload = load_cases_from_config(cfg)
+    payload["cases"] = [normalize_feishu_case(c) for c in (payload.get("cases") or [])]
     if persist:
         cache = aas.save_feishu_cases_cache(app, payload)
         payload["cached_at"] = cache.get("synced_at")
@@ -149,9 +148,10 @@ def list_cases_for_app(app, *, refresh: bool = False) -> Dict[str, Any]:
         return fetch_cases_for_app(app, persist=True)
     cache = aas.get_feishu_cases_cache(app)
     if cache and cache.get("cases"):
+        cases = [normalize_feishu_case(c) for c in (cache.get("cases") or [])]
         return {
-            "cases": cache.get("cases") or [],
-            "total": cache.get("total") or len(cache.get("cases") or []),
+            "cases": cases,
+            "total": cache.get("total") or len(cases),
             "synced_at": cache.get("synced_at"),
             "from_cache": True,
             "resolve_note": cache.get("resolve_note") or "",
@@ -202,6 +202,267 @@ def _trace_precondition_phase(
     return None
 
 
+def _probe_screen_before_prep(sn: str, platform: str) -> Tuple[bool, bool]:
+    """ADB 轻量探测锁屏（不解锁、不 bootstrap）。"""
+    if platform != "android" or not sn:
+        return False, False
+    try:
+        import subprocess
+
+        from driver.agent.Crawl.device_bootstrap import resolve_mobile_serial
+
+        mobile_sn = resolve_mobile_serial(sn, platform)
+        proc = subprocess.run(
+            ["adb", "-s", mobile_sn, "shell", "dumpsys", "window"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        locked = any(
+            m in out
+            for m in (
+                "mDreamingLockscreen=true",
+                "mShowingLockscreen=true",
+                "mKeyguardShowing=true",
+                "isStatusBarKeyguard=true",
+                "KeyguardShowing=true",
+            )
+        )
+        return locked, False
+    except Exception as e:
+        SLog.w(TAG, f"screen probe failed: {e}")
+        return False, False
+
+
+def _append_foreground_trace(
+    trace: List[Dict[str, Any]],
+    fg: Dict[str, Any],
+    *,
+    run_id: str,
+    sn: str,
+    platform: str,
+) -> None:
+    """拉起被测应用写入时间轴（填补前置条件与业务步骤之间的空档）。"""
+    from server.services.regression_run_context import stamp_run_timing
+
+    row = stamp_run_timing(
+        {
+            "index": 0,
+            "kind": "launch",
+            "summary": "拉起被测应用",
+            "ok": bool(fg.get("ok")),
+            "msg": fg.get("msg") or "",
+            "package": fg.get("package") or "",
+            "foreground_before": fg.get("foreground_before") or "",
+            "foreground_after": fg.get("foreground_after") or "",
+        }
+    )
+    shot = _capture_step_screenshot(sn, platform, run_id=run_id, tag="foreground_after")
+    if shot:
+        row["screenshot_after"] = shot
+    planned = [
+        {
+            "type": "planned_step",
+            "index": 0,
+            "kind": "launch",
+            "summary": "拉起被测应用",
+        }
+    ]
+    exec_log = aas.build_execute_log([row])
+    trace.append(
+        {
+            "phase": "foreground",
+            "title": "拉起被测应用",
+            "subtitle": fg.get("package") or "",
+            "ok": bool(fg.get("ok")),
+            "entries": [
+                {
+                    "text": fg.get("msg") or "拉起被测应用",
+                    "ok": bool(fg.get("ok")),
+                    "msg": fg.get("msg") or "",
+                    "kind": "launch",
+                }
+            ],
+            "execute_log": exec_log,
+            "operation": aas.build_operation_plan_tree(
+                planned,
+                exec_log,
+                reply=fg.get("msg") or "拉起被测应用到前台",
+            ),
+        }
+    )
+
+
+def _append_device_prep_trace(
+    *,
+    sn: str,
+    platform: str,
+    run_id: str,
+    trace: List[Dict[str, Any]],
+) -> None:
+    """记录设备唤醒/解锁步骤，便于回放排查黑屏、锁屏等问题。"""
+    if not sn:
+        return
+    try:
+        import builtins
+        from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+
+        from server.services.regression_run_context import stamp_run_timing
+
+        locked_before, blank_before = _probe_screen_before_prep(sn, platform)
+        shot_lock = ""
+        if run_id and locked_before:
+            try:
+                from server.services.regression_capture import capture_adb_raw_screenshot
+
+                shot_lock = capture_adb_raw_screenshot(
+                    sn,
+                    platform,
+                    run_id=run_id,
+                    tag="device_prep_lock",
+                    wake_first=True,
+                )
+            except Exception:
+                shot_lock = ""
+
+        entries: List[Dict[str, Any]] = []
+        if locked_before:
+            entries.append(
+                stamp_run_timing(
+                    {"text": "检测到锁屏", "ok": True, "msg": "准备解锁", "kind": "device_check"}
+                )
+            )
+        if blank_before:
+            entries.append(
+                stamp_run_timing(
+                    {
+                        "text": "检测到黑屏/未点亮",
+                        "ok": True,
+                        "msg": "准备唤醒",
+                        "kind": "device_check",
+                    }
+                )
+            )
+
+        builtins.TARGET_DEVICE_SN = sn
+        engine, (screen_w, screen_h) = bootstrap_mobile_engine(sn, platform)
+
+        shot_unlocked = ""
+        if run_id:
+            try:
+                from server.services.regression_capture import capture_engine_screenshot
+
+                shot_unlocked = capture_engine_screenshot(
+                    engine,
+                    run_id=run_id,
+                    tag="device_prep_unlocked",
+                    settle_ms=150,
+                )
+            except Exception:
+                shot_unlocked = ""
+
+        unlock_ok = not bool(getattr(engine, "_is_keyguard_showing", lambda: False)())
+        if locked_before or blank_before:
+            entries.append(
+                stamp_run_timing(
+                    {
+                        "text": "唤醒并解锁屏幕",
+                        "ok": unlock_ok,
+                        "msg": "解锁成功" if unlock_ok else "解锁失败，请检查设备锁屏密码配置",
+                        "kind": "device_unlock",
+                    }
+                )
+            )
+        elif not locked_before and not blank_before:
+            entries.append(
+                stamp_run_timing(
+                    {
+                        "text": "屏幕已点亮且未锁屏",
+                        "ok": True,
+                        "msg": "无需解锁",
+                        "kind": "device_check",
+                        "skipped": True,
+                    }
+                )
+            )
+
+        shot_after = shot_unlocked or ""
+        if run_id and not shot_after:
+            shot_after = _capture_step_screenshot(
+                sn, platform, run_id=run_id, tag="device_prep_after"
+            )
+
+        def _prep_shots(entry: Dict[str, Any], idx: int) -> Tuple[str, str]:
+            text = entry.get("text") or ""
+            kind = entry.get("kind") or ""
+            if text == "检测到锁屏":
+                return shot_lock, shot_lock
+            if kind == "device_unlock":
+                return shot_lock, shot_unlocked or shot_after
+            if text == "检测到黑屏/未点亮":
+                return shot_lock, shot_lock
+            if idx == 0:
+                return shot_lock or shot_after, shot_after if len(entries) == 1 else ""
+            if idx == len(entries) - 1:
+                return "", shot_unlocked or shot_after
+            return "", ""
+
+        planned = [
+            {
+                "type": "planned_step",
+                "index": i,
+                "kind": e.get("kind") or "verify",
+                "summary": e.get("text") or "设备准备",
+            }
+            for i, e in enumerate(entries)
+        ]
+
+        results = []
+        for i, e in enumerate(entries):
+            before_shot, after_shot = _prep_shots(e, i)
+            results.append(
+                {
+                    "index": i,
+                    "kind": "verify",
+                    "summary": e.get("text") or "",
+                    "ok": e.get("ok"),
+                    "msg": e.get("msg") or "",
+                    "screenshot_before": before_shot,
+                    "screenshot_after": after_shot,
+                    "screen_size": {"w": screen_w, "h": screen_h},
+                    "run_elapsed_ms": e.get("run_elapsed_ms"),
+                    "run_elapsed": e.get("run_elapsed") or "",
+                }
+            )
+        exec_log = aas.build_execute_log(results)
+        trace.append(
+            {
+                "phase": "device_prep",
+                "title": "设备准备",
+                "subtitle": "唤醒 / 解锁屏幕",
+                "ok": unlock_ok,
+                "entries": entries,
+                "execute_log": exec_log,
+                "operation": aas.build_operation_plan_tree(
+                    planned,
+                    exec_log,
+                    reply="执行前检查设备屏幕状态，必要时自动唤醒并解锁",
+                ),
+            }
+        )
+    except Exception as e:
+        SLog.w(TAG, f"device prep trace failed: {e}")
+        trace.append(
+            {
+                "phase": "device_prep",
+                "title": "设备准备",
+                "ok": False,
+                "entries": [{"text": "设备准备", "ok": False, "msg": str(e)}],
+            }
+        )
+
+
 def _append_precondition_trace(
     case: Dict[str, Any],
     *,
@@ -214,6 +475,8 @@ def _append_precondition_trace(
     raw = (case.get("precondition") or "").strip()
     if not raw and not before_items and not after_items:
         return
+    from server.services.regression_run_context import stamp_run_timing
+
     entries = []
     for i in before_items + after_items:
         entries.append(
@@ -228,6 +491,33 @@ def _append_precondition_trace(
                 "sim_state": i.get("sim_state"),
             }
         )
+    planned = [
+        {
+            "type": "planned_step",
+            "index": idx,
+            "kind": e.get("kind") or "verify",
+            "summary": e.get("text") or "前置条件",
+        }
+        for idx, e in enumerate(entries)
+    ]
+    merged_items = list(before_items) + list(after_items)
+    results = []
+    for idx, e in enumerate(entries):
+        row = {
+            "index": idx,
+            "kind": "verify",
+            "summary": e.get("text") or "",
+            "ok": e.get("ok"),
+            "msg": e.get("msg") or "",
+        }
+        src = merged_items[idx] if idx < len(merged_items) else {}
+        if src.get("run_elapsed_ms") is not None:
+            row["run_elapsed_ms"] = src["run_elapsed_ms"]
+            row["run_elapsed"] = src.get("run_elapsed") or ""
+        else:
+            stamp_run_timing(row)
+        results.append(row)
+    exec_log = aas.build_execute_log(results)
     trace.append(
         {
             "phase": "precondition",
@@ -235,6 +525,12 @@ def _append_precondition_trace(
             "subtitle": raw,
             "ok": ok,
             "entries": entries,
+            "execute_log": exec_log,
+            "operation": aas.build_operation_plan_tree(
+                planned,
+                exec_log,
+                reply=raw or "前置条件校验",
+            ),
         }
     )
 
@@ -303,11 +599,33 @@ def _run_command_block(
         capture_screenshots=bool(run_id),
         app_id=str(context.get("app_id") or context.get("appId") or ""),
         skip_overlay_clear=bool(context.get("skip_overlay_clear")),
+        enable_overlay_guard=not bool(context.get("skip_overlay_guard")),
         target_package=str(context.get("package") or ""),
         stop_on_failure=True,
     )
+    try:
+        from server.services.regression_run_context import get_ctx
+        from server.services.overlay_guard_service import merge_guard_plan_log
+
+        gctx = get_ctx()
+        guard_planned = (gctx or {}).get("guard_planned_steps") or []
+        if guard_planned:
+            plan_log = merge_guard_plan_log(plan_log, guard_planned)
+            if gctx is not None:
+                gctx["guard_planned_steps"] = []
+    except Exception:
+        pass
     segment_errors = list(plan.get("segment_errors") or [])
-    ok = all(r.get("ok") for r in results) if results else True
+    ok = aas.business_step_results_ok(results)
+    if results:
+        guard_fail = any(
+            not r.get("ok")
+            for r in results
+            if (r.get("phase") or "") == "overlay_guard"
+            and (r.get("kind") or "") in ("overlay_guard", "click")
+        )
+        if guard_fail:
+            ok = False
     if segment_errors:
         ok = False
     fail_msgs = [r.get("msg") or "" for r in results if not r.get("ok")]
@@ -367,17 +685,19 @@ def _prepare_screen_for_verify(
     sn: str = "",
     platform: str = "android",
 ) -> List[Dict[str, Any]]:
-    """校验前关闭系统权限等阻塞弹窗，避免挡住页面识别。"""
+    """校验前运行阻塞弹窗守卫，避免挡住页面识别。"""
     from script.sleep import mSleep
+    from server.services.overlay_guard_service import run_overlay_guard_until_clear
 
     gestures: List[Dict[str, Any]] = []
     try:
-        gestures.extend(clear_blocking_overlays(engine, screen_w, screen_h, max_rounds=5))
-        if sn:
-            perm = ensure_system_permissions_cleared(sn, platform, max_rounds=3)
-            for g in perm.get("gestures") or []:
-                if g not in gestures:
-                    gestures.append(g)
+        guard_out = run_overlay_guard_until_clear(
+            engine, screen_w, screen_h, max_rounds=5
+        )
+        for it in guard_out.get("iterations") or []:
+            g = (it.get("action") or {}).get("gesture")
+            if g and g not in gestures:
+                gestures.append(g)
         mSleep(0.4)
     except Exception as e:
         SLog.w(TAG, f"prepare screen for verify failed: {e}")
@@ -424,7 +744,7 @@ def _check_expected(
     page_context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
-    all_steps_ok = all(r.get("ok") for r in step_results) if step_results else False
+    all_steps_ok = aas.business_step_results_ok(step_results)
     blob = screen_text or ""
 
     try:
@@ -450,7 +770,17 @@ def _check_expected(
                 reason += f"（当前页「{cur}」· {src}{score_txt}）"
         else:
             page_verdict = None
-            if enrich_check_with_page:
+            try:
+                from server.services.expectation_semantic_service import (
+                    evaluate_dynamic_expectation,
+                )
+
+                page_verdict = evaluate_dynamic_expectation(
+                    exp, blob, step_results=step_results
+                )
+            except Exception:
+                pass
+            if page_verdict is None and enrich_check_with_page:
                 page_verdict = enrich_check_with_page(
                     exp,
                     page_context or {},
@@ -524,7 +854,7 @@ def _verify_case(
         step_results,
         page_context=page_context,
     )
-    steps_ok = all(r.get("ok") for r in step_results) if step_results else False
+    steps_ok = aas.business_step_results_ok(step_results)
     checks_ok = all(c.get("ok") for c in checks) if checks else steps_ok
 
     if steps_ok and checks_ok:
@@ -729,7 +1059,7 @@ def _verify_step_expected(
         else:
             SLog.w(TAG, f"verify step screenshot failed: {e}")
 
-    steps_ok = all(r.get("ok") for r in step_results) if step_results else False
+    steps_ok = aas.business_step_results_ok(step_results)
     checks = _check_expected(
         [exp], screen_text, step_results, page_context=page_context
     )
@@ -918,6 +1248,18 @@ def _last_screenshot_from_execute_log(execute_log: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _last_locate_meta_from_execute_log(
+    execute_log: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    for entry in reversed(execute_log or []):
+        if entry.get("locate_debug"):
+            return {
+                "locate_debug": entry.get("locate_debug"),
+                "screen_size": entry.get("screen_size") or {},
+            }
+    return {}
+
+
 def _run_case_steps_sequential(
     case: Dict[str, Any],
     *,
@@ -935,6 +1277,9 @@ def _run_case_steps_sequential(
     """按飞书用例编号逐步执行：每步操作 → 对应预期校验。"""
     step_lines = list(case.get("steps") or [])
     expected_lines = list(case.get("expected") or [])
+    step_nums = list(case.get("step_nums") or [])
+    case = normalize_feishu_case(case)
+    expected_by_step: Dict[int, str] = dict(case.get("expected_by_step") or {})
     trace: List[Dict[str, Any]] = list(initial_trace or [])
     all_results: List[Dict[str, Any]] = list(initial_all_results or [])
     overall_ok = True
@@ -956,7 +1301,8 @@ def _run_case_steps_sequential(
         except Exception:
             pass
 
-        expected_text = expected_lines[i] if i < len(expected_lines) else ""
+        step_no = step_nums[i] if i < len(step_nums) else (i + 1)
+        expected_text = (expected_by_step.get(step_no) or "").strip()
         step_block: Dict[str, Any] = {
             "phase": "case_step",
             "step_index": i,
@@ -968,58 +1314,31 @@ def _run_case_steps_sequential(
         cmd = _normalize_step_line(step_line)
         app_id_str = str(context.get("app_id") or context.get("appId") or "")
         pre_action_recovery: Optional[Dict[str, Any]] = None
-        if app_id_str:
-            skip_pre_action = False
-            if i == 0 and not context.get("app_cache_cleared"):
-                startup_recovery = context.get("startup_overlay_recovery") or {}
-                if startup_recovery.get("attempted") and startup_recovery.get("ok"):
-                    import builtins
+        if app_id_str and not context.get("skip_pre_action_recovery"):
+            try:
+                from server.core.database import SessionLocal
 
-                    from server.services.page_navigation_service import (
-                        _screen_is_overlay,
-                        classify_blocking_screen,
-                    )
-                    from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-
-                    builtins.TARGET_DEVICE_SN = sn
-                    engine, _ = bootstrap_mobile_engine(sn, platform)
-                    after_state = classify_blocking_screen(engine)
-                    if not (
-                        after_state.get("consent")
-                        or after_state.get("agreement")
-                        or _screen_is_overlay(after_state.get("ocr_text") or "")
-                    ):
-                        skip_pre_action = True
-                        pre_action_recovery = {
-                            "attempted": False,
-                            "skipped": True,
-                            "reason": "启动弹层已处理",
-                            "current_page_before": startup_recovery.get("current_page_after"),
-                        }
-            if not skip_pre_action:
+                db = SessionLocal()
                 try:
-                    from server.core.database import SessionLocal
-
-                    db = SessionLocal()
-                    try:
-                        pre_action_recovery = ensure_page_ready_before_action(
-                            sn=sn,
-                            platform=platform,
-                            app_id=app_id_str,
-                            session=db,
-                            step_text=step_line,
-                            icon_targets=icon_targets,
-                            run_id=run_id,
-                            target_package=package,
-                        )
-                    finally:
-                        db.close()
-                except Exception as e:
-                    SLog.w(TAG, f"pre-action page ready failed: {e}")
+                    pre_action_recovery = ensure_page_ready_before_action(
+                        sn=sn,
+                        platform=platform,
+                        app_id=app_id_str,
+                        session=db,
+                        step_text=step_line,
+                        icon_targets=icon_targets,
+                        run_id=run_id,
+                        target_package=package,
+                    )
+                finally:
+                    db.close()
+            except Exception as e:
+                SLog.w(TAG, f"pre-action page ready failed: {e}")
 
         step_ctx = dict(context)
         if pre_action_recovery and pre_action_recovery.get("attempted"):
-            step_ctx["skip_overlay_clear"] = True
+            if not pre_action_recovery.get("overlay_guard_delegated"):
+                step_ctx["skip_overlay_clear"] = True
 
         first_block = _run_command_block(
             cmd,
@@ -1038,8 +1357,17 @@ def _run_case_steps_sequential(
         ]
         action_ok = bool(action_block.get("ok"))
         post_recovery: Optional[Dict[str, Any]] = None
-        if not action_ok and app_id_str and not (
-            pre_action_recovery and pre_action_recovery.get("attempted")
+        if (
+            not action_ok
+            and app_id_str
+            and not run_id
+            and not (
+                pre_action_recovery
+                and (
+                    pre_action_recovery.get("attempted")
+                    or pre_action_recovery.get("overlay_guard_delegated")
+                )
+            )
         ):
             fail_msg_text = action_block.get("msg") or ""
             overlay_blocked = any(
@@ -1090,12 +1418,25 @@ def _run_case_steps_sequential(
             except Exception as e:
                 SLog.w(TAG, f"post-action overlay recovery failed: {e}")
 
-        page_recovery = post_recovery or (
-            pre_action_recovery if pre_action_recovery and pre_action_recovery.get("attempted") else None
+        delegated_guard = bool(
+            (pre_action_recovery or {}).get("overlay_guard_delegated")
         )
+        pre_rec = (
+            pre_action_recovery
+            if pre_action_recovery
+            and pre_action_recovery.get("attempted")
+            and not delegated_guard
+            else None
+        )
+        page_recovery = post_recovery or pre_rec
 
         recovery_exec: List[Dict[str, Any]] = []
-        if page_recovery and page_recovery.get("attempted") and page_recovery.get("nav_results"):
+        if (
+            not delegated_guard
+            and page_recovery
+            and page_recovery.get("attempted")
+            and page_recovery.get("nav_results")
+        ):
             recovery_exec = aas.build_execute_log(page_recovery.get("nav_results") or [])
             for e in recovery_exec:
                 e["phase"] = "recovery"
@@ -1106,7 +1447,7 @@ def _run_case_steps_sequential(
             exec_log_ordered,
             reply=action_block.get("reply") or "",
         )
-        display_recovery = dict(page_recovery) if page_recovery else None
+        display_recovery = None if delegated_guard else (dict(page_recovery) if page_recovery else None)
         if display_recovery and recovery_exec:
             display_recovery = {**display_recovery, "nav_results": []}
 
@@ -1129,10 +1470,13 @@ def _run_case_steps_sequential(
             "plan_log": plan_log,
             "execute_log": exec_log_ordered,
             "ok": action_ok,
+            "action_ok": action_ok,
             "msg": action_block.get("msg"),
             "screenshot": _last_screenshot_from_execute_log(exec_log_ordered),
             "page_recovery": display_recovery,
-            "page_context": (
+            "page_context": {}
+            if delegated_guard
+            else (
                 (pre_action_recovery or {}).get("current_page_before")
                 or (page_recovery or {}).get("current_page_after")
                 or {}
@@ -1142,16 +1486,31 @@ def _run_case_steps_sequential(
         step_block["action"] = step_block["operation"]
         all_results.extend(step_results_merged or action_block.get("step_results") or [])
 
+        op_shot = _last_screenshot_from_execute_log(exec_log_ordered)
+        locate_meta = _last_locate_meta_from_execute_log(exec_log_ordered)
+
         expected_part: Dict[str, Any] = {"text": expected_text, "ok": True, "checks": [], "screenshot": ""}
-        if expected_text and not action_ok:
+        if not expected_text:
+            expected_part = {
+                "text": "",
+                "ok": True,
+                "skipped": True,
+                "checks": [],
+                "msg": "本步无预期，已跳过校验",
+                "screenshot": op_shot,
+                "page_context": {},
+                "plans": [],
+            }
+        elif expected_text and not action_ok:
             expected_part = {
                 "text": expected_text,
-                "ok": False,
+                "ok": True,
                 "skipped": True,
                 "checks": [],
                 "msg": "前置操作未成功，已跳过预期校验",
-                "screenshot": "",
+                "screenshot": op_shot,
                 "page_context": {},
+                **locate_meta,
             }
         elif expected_text:
             verify_one = _verify_step_expected(
@@ -1183,48 +1542,63 @@ def _run_case_steps_sequential(
 
         step_block["expected_action"] = expected_part
         step_block["expected"] = expected_part
-        step_block["ok"] = action_ok and expected_part.get("ok", True)
+        step_block["action_ok"] = action_ok
+        step_block["expected_ok"] = (
+            True if expected_part.get("skipped") else expected_part.get("ok", True)
+        )
+        step_block["ok"] = action_ok and step_block["expected_ok"]
         trace.append(step_block)
 
-        if not step_block["ok"]:
-            parts = []
-            if not action_ok:
-                parts.append(f"步骤{i + 1}操作失败: {action_block.get('msg') or ''}")
-            if expected_text and not expected_part.get("ok"):
-                parts.append(f"步骤{i + 1}预期未达成: {expected_part.get('msg') or ''}")
-            fail_msg = "；".join(p for p in parts if p)
+        expected_verify_failed = (
+            bool(expected_text)
+            and action_ok
+            and not expected_part.get("skipped")
+            and not expected_part.get("ok", True)
+        )
 
-            if pause_on_clarification and not action_ok:
-                try:
-                    from server.services.execution_clarification_service import (
-                        build_login_icon_clarification,
-                        needs_clarification_for_step,
-                    )
-
-                    if needs_clarification_for_step(step_line, action_block):
-                        clarification = build_login_icon_clarification(
-                            sn=sn,
-                            platform=platform,
-                            app_id=str(context.get("app_id") or context.get("appId") or ""),
-                            step_text=step_line,
-                            action_block=action_block,
-                            run_id=run_id,
-                            case_name=str(case.get("name") or case.get("case_id") or ""),
-                        )
-                        if clarification:
-                            return {
-                                "trace": trace,
-                                "step_results": all_results,
-                                "status": "awaiting_clarification",
-                                "msg": fail_msg or "等待人工确认",
-                                "overall_ok": False,
-                                "clarification": clarification,
-                                "resume_state": {"step_index": i},
-                            }
-                except Exception as e:
-                    SLog.w(TAG, f"build clarification failed: {e}")
-
+        if not action_ok:
+            part = f"步骤{i + 1}操作失败: {action_block.get('msg') or ''}"
+            fail_msg = f"{fail_msg}；{part}" if fail_msg else part
             overall_ok = False
+            break
+
+        if expected_verify_failed:
+            part = f"步骤{i + 1}预期未达成: {expected_part.get('msg') or ''}"
+            fail_msg = f"{fail_msg}；{part}" if fail_msg else part
+            overall_ok = False
+
+        if pause_on_clarification and not action_ok:
+            try:
+                from server.services.execution_clarification_service import (
+                    build_login_icon_clarification,
+                    needs_clarification_for_step,
+                )
+
+                if needs_clarification_for_step(step_line, action_block):
+                    clarification = build_login_icon_clarification(
+                        sn=sn,
+                        platform=platform,
+                        app_id=str(context.get("app_id") or context.get("appId") or ""),
+                        step_text=step_line,
+                        action_block=action_block,
+                        run_id=run_id,
+                        case_name=str(case.get("name") or case.get("case_id") or ""),
+                    )
+                    if clarification:
+                        return {
+                            "trace": trace,
+                            "step_results": all_results,
+                            "status": "awaiting_clarification",
+                            "msg": fail_msg or "等待人工确认",
+                            "overall_ok": False,
+                            "clarification": clarification,
+                            "resume_state": {"step_index": i},
+                        }
+            except Exception as e:
+                SLog.w(TAG, f"build clarification failed: {e}")
+
+        # 仅「有预期且校验失败」时中断；无预期 / 跳过预期校验时继续后续步骤
+        if expected_verify_failed:
             break
 
     if overall_ok:
@@ -1267,6 +1641,7 @@ def run_cases(
     start_index: int = 0,
     db: Optional[Session] = None,
     use_cache: bool = True,
+    async_exec: bool = True,
 ) -> Dict[str, Any]:
     if use_cache:
         payload = list_cases_for_app(app, refresh=False)
@@ -1280,7 +1655,8 @@ def run_cases(
         if missing:
             SLog.w(TAG, f"run_cases: {len(missing)} case_id not found: {missing[:5]}")
     else:
-        cases = [c for c in all_cases if _case_matches_platform(c, platform)]
+        # 全量执行：包含 iOS 专用用例等，平台不匹配时由前置条件 skip 并展示在列表中
+        cases = list(all_cases)
     if start_index > 0:
         cases = cases[start_index:]
 
@@ -1376,6 +1752,21 @@ def run_cases(
             total=len(cases),
         )
 
+    if async_exec:
+        _spawn_background_run(
+            app_id=app.id,
+            run_id=run_id,
+            cases=cases,
+            sn=sn,
+            platform=platform,
+            context=context,
+            icon_targets=icon_targets,
+            device_skills=device_skills,
+            package=package,
+            env_profile=env_profile,
+        )
+        return _client_run_snapshot(run_doc)
+
     _execute_cases_batch(
         app,
         cases,
@@ -1392,6 +1783,119 @@ def run_cases(
     )
 
     return _finalize_run_doc(run_doc, db)
+
+
+def _client_run_snapshot(run_doc: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "run_id": run_doc.get("run_id"),
+        "app_id": run_doc.get("app_id"),
+        "app_name": run_doc.get("app_name"),
+        "sn": run_doc.get("sn"),
+        "platform": run_doc.get("platform"),
+        "status": run_doc.get("status") or "running",
+        "total": run_doc.get("total") or 0,
+        "passed": run_doc.get("passed") or 0,
+        "failed": run_doc.get("failed") or 0,
+        "skipped": run_doc.get("skipped") or 0,
+        "started_at": run_doc.get("started_at"),
+        "finished_at": run_doc.get("finished_at"),
+        "cases": list(run_doc.get("cases") or []),
+    }
+
+
+def _spawn_background_run(
+    *,
+    app_id: str,
+    run_id: str,
+    cases: List[Dict[str, Any]],
+    sn: str,
+    platform: str,
+    context: Dict[str, Any],
+    icon_targets: List[Dict[str, Any]],
+    device_skills: Dict[str, Any],
+    package: str,
+    env_profile: str,
+) -> None:
+    t = threading.Thread(
+        target=_background_run_worker,
+        kwargs={
+            "app_id": app_id,
+            "run_id": run_id,
+            "cases": cases,
+            "sn": sn,
+            "platform": platform,
+            "context": context,
+            "icon_targets": icon_targets,
+            "device_skills": device_skills,
+            "package": package,
+            "env_profile": env_profile,
+        },
+        name=f"feishu-run-{run_id}",
+        daemon=True,
+    )
+    t.start()
+
+
+def _background_run_worker(
+    *,
+    app_id: str,
+    run_id: str,
+    cases: List[Dict[str, Any]],
+    sn: str,
+    platform: str,
+    context: Dict[str, Any],
+    icon_targets: List[Dict[str, Any]],
+    device_skills: Dict[str, Any],
+    package: str,
+    env_profile: str,
+) -> None:
+    from server.core.database import SessionLocal
+    from server.models.project import App
+
+    db = SessionLocal()
+    run_doc = _RUNS.get(run_id)
+    try:
+        from server.services.regression_run_context import begin_run, get_ctx
+
+        if not get_ctx():
+            begin_run(
+                run_id=run_id,
+                sn=sn,
+                platform=platform,
+                capture_screenshots=True,
+            )
+        app = db.query(App).filter(App.id == app_id).first()
+        if not app or not run_doc:
+            SLog.e(TAG, f"background run aborted run_id={run_id} app={app_id}")
+            return
+        _execute_cases_batch(
+            app,
+            cases,
+            run_doc,
+            sn=sn,
+            platform=platform,
+            context=context,
+            icon_targets=icon_targets,
+            device_skills=device_skills,
+            package=package,
+            env_profile=env_profile,
+            db=db,
+            run_id=run_id,
+        )
+        _finalize_run_doc(run_doc, db)
+    except Exception as e:
+        SLog.e(TAG, f"background run failed run_id={run_id}: {e}")
+        if run_doc:
+            run_doc["status"] = "failed"
+            run_doc["error"] = str(e)
+            run_doc["finished_at"] = datetime.now().isoformat()
+            try:
+                aas.persist_run_finish(db, run_doc)
+            except Exception:
+                pass
+            _RUNS[run_id] = run_doc
+    finally:
+        db.close()
 
 
 def _finalize_run_doc(run_doc: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
@@ -1452,8 +1956,15 @@ def _execute_cases_batch(
     """执行一批用例；若因人工确认暂停则返回 True。"""
     import time as _time
 
-    for case in cases:
+    for raw_case in cases:
+        case = normalize_feishu_case(raw_case)
         case_started = _time.time()
+        try:
+            from server.services.regression_run_context import begin_case
+
+            begin_case()
+        except Exception:
+            pass
         item: Dict[str, Any] = {
             "case_id": case.get("case_id"),
             "name": case.get("name"),
@@ -1465,7 +1976,13 @@ def _execute_cases_batch(
             "precondition_raw": case.get("precondition") or "",
             "expected_raw": case.get("expected_raw") or "",
             "step_lines": list(case.get("steps") or []),
+            "steps": list(case.get("steps") or []),
+            "step_nums": list(case.get("step_nums") or []),
             "expected_lines": list(case.get("expected") or []),
+            "expected": list(case.get("expected") or []),
+            "expected_nums": list(case.get("expected_nums") or []),
+            "expected_by_step": dict(case.get("expected_by_step") or {}),
+            "expected_by_step": dict(case.get("expected_by_step") or {}),
             "step_results": [],
             "execution_trace": [],
             "verify": {},
@@ -1506,6 +2023,16 @@ def _execute_cases_batch(
                 _stamp_case_duration(item, case_started)
                 continue
 
+        step_lines = list(case.get("steps") or [])
+        item["command"] = _steps_to_command(case)
+        context["platform"] = platform
+        context.pop("startup_overlay_recovery", None)
+        context.pop("skip_overlay_clear", None)
+        context.pop("system_permission_recovery", None)
+
+        # 设备准备优先于前置校验，避免重复 bootstrap 且侧栏时间戳反映真实顺序
+        _append_device_prep_trace(sn=sn, platform=platform, run_id=run_id, trace=trace)
+
         pre_before_items: List[Dict[str, Any]] = []
         raw_pre = (case.get("precondition") or "").strip()
         if raw_pre:
@@ -1537,13 +2064,8 @@ def _execute_cases_batch(
                 run_doc["skipped"] = int(run_doc.get("skipped") or 0) + 1
                 _stamp_case_duration(item, case_started)
                 continue
+            # 前置条件 trace 统一在拉起应用后合并写入，避免 before_launch 与 after_launch 各写一条导致回放重复
 
-        step_lines = list(case.get("steps") or [])
-        item["command"] = _steps_to_command(case)
-        context["platform"] = platform
-        context.pop("startup_overlay_recovery", None)
-        context.pop("skip_overlay_clear", None)
-        context.pop("system_permission_recovery", None)
         app_cache_cleared = precondition_cleared_app_cache(pre_before_items)
         context["app_cache_cleared"] = app_cache_cleared
 
@@ -1579,12 +2101,12 @@ def _execute_cases_batch(
         startup_recovery: Optional[Dict[str, Any]] = None
         if not _case_allows_background(case):
             fg = aas.ensure_app_foreground(sn, package, platform)
-            trace.append(
-                {
-                    "phase": "foreground",
-                    "title": "拉起被测应用",
-                    "entries": [{"type": "info", "text": fg.get("msg"), "ok": fg.get("ok")}],
-                }
+            _append_foreground_trace(
+                trace,
+                fg,
+                run_id=run_id,
+                sn=sn,
+                platform=platform,
             )
             if not fg.get("ok"):
                 item["status"] = "fail"
@@ -1594,131 +2116,12 @@ def _execute_cases_batch(
                 _stamp_case_duration(item, case_started)
                 continue
 
-            try:
-                startup_recovery = dismiss_startup_overlays(
-                    sn=sn,
-                    platform=platform,
-                    app_id=str(app.id),
-                    session=db,
-                    icon_targets=icon_targets,
-                    run_id=run_id,
-                    target_package=package,
-                    requires_fresh_startup=app_cache_cleared,
+            if app_cache_cleared:
+                context["requires_fresh_startup"] = True
+                SLog.i(
+                    TAG,
+                    "fresh startup after cache clear — overlay guard runs inside each Plan step",
                 )
-            except Exception as e:
-                SLog.w(TAG, f"startup overlay dismiss failed: {e}")
-            if startup_recovery:
-                context["startup_overlay_recovery"] = startup_recovery
-                perm_recovery = startup_recovery.get("permission_recovery") or {}
-                if perm_recovery.get("attempted"):
-                    context["system_permission_recovery"] = perm_recovery
-            elif db is not None:
-                try:
-                    fallback = try_dismiss_blocking_overlay(
-                        sn=sn,
-                        platform=platform,
-                        app_id=str(app.id),
-                        session=db,
-                        icon_targets=icon_targets,
-                        run_id=run_id,
-                        target_package=package,
-                    )
-                    if fallback and fallback.get("attempted"):
-                        startup_recovery = fallback
-                        context["startup_overlay_recovery"] = fallback
-                        SLog.i(TAG, "startup overlay fallback dismiss consent/permission")
-                except Exception as e:
-                    SLog.w(TAG, f"startup overlay fallback failed: {e}")
-            if startup_recovery and startup_recovery.get("attempted"):
-                nav_results = startup_recovery.get("nav_results") or []
-                plan_steps = startup_recovery.get("plan") or {}
-                recovery_steps = plan_steps.get("steps") or []
-                planned = [
-                    {
-                        "type": "planned_step",
-                        "index": i,
-                        "kind": s.get("kind") or "click",
-                        "summary": s.get("summary") or s.get("label") or "关闭弹层",
-                    }
-                    for i, s in enumerate(recovery_steps)
-                ]
-                exec_log = aas.build_execute_log(nav_results)
-                after_shot = (startup_recovery.get("current_page_after") or {}).get(
-                    "screenshot"
-                ) or ""
-                if after_shot:
-                    aas.patch_exec_log_after_from_page(exec_log, nav_results, after_shot)
-                op_tree = aas.build_operation_plan_tree(
-                    planned,
-                    exec_log,
-                    reply=startup_recovery.get("reason") or "关闭启动弹层",
-                )
-                trace.append(
-                    {
-                        "phase": "startup_overlay",
-                        "title": "关闭启动弹层",
-                        "page_recovery": {
-                            **startup_recovery,
-                            "nav_results": [],
-                        },
-                        "ok": startup_recovery.get("ok"),
-                        "execute_log": exec_log,
-                        "operation": op_tree,
-                        "entries": [
-                            {
-                                "text": s.get("summary") or s.get("label"),
-                                "ok": startup_recovery.get("ok"),
-                            }
-                            for s in recovery_steps
-                        ],
-                    }
-                )
-                perm_recovery = startup_recovery.get("permission_recovery") or {}
-                if perm_recovery.get("attempted"):
-                    perm_gestures = perm_recovery.get("gestures") or []
-                    perm_results = [
-                        {
-                            "index": 0,
-                            "kind": "click",
-                            "summary": "Tap · 允许系统权限",
-                            "ok": perm_recovery.get("ok"),
-                            "gestures": perm_gestures,
-                        }
-                    ]
-                    perm_exec = aas.build_execute_log(perm_results)
-                    perm_planned = [
-                        {
-                            "type": "planned_step",
-                            "index": 0,
-                            "kind": "click",
-                            "summary": "允许系统权限弹窗",
-                        }
-                    ]
-                    trace.append(
-                        {
-                            "phase": "system_permission",
-                            "title": "关闭系统权限弹层",
-                            "ok": perm_recovery.get("ok"),
-                            "execute_log": perm_exec,
-                            "operation": aas.build_operation_plan_tree(
-                                perm_planned,
-                                perm_exec,
-                                reply=perm_recovery.get("reason") or "关闭系统权限弹窗",
-                            ),
-                        }
-                    )
-
-        if (
-            startup_recovery
-            and startup_recovery.get("attempted")
-            and not startup_recovery.get("ok")
-        ):
-            item["status"] = "fail"
-            item["msg"] = "启动弹层/权限处理失败，用例中止"
-            item["execution_trace"] = trace
-            run_doc["failed"] += 1
-            _stamp_case_duration(item, case_started)
-            continue
 
         needs_after_launch = has_precondition_phase(case.get("precondition") or "", "after_launch")
         if needs_after_launch and package and platform == "android":
@@ -1900,6 +2303,12 @@ def _execute_cases_batch(
             run_doc["passed"] += 1
         elif item["status"] not in ("awaiting_clarification", "skip"):
             run_doc["failed"] += 1
+
+        if db is not None:
+            try:
+                aas.persist_run_progress(db, run_doc)
+            except Exception as e:
+                SLog.w(TAG, f"persist_run_progress failed run={run_id}: {e}")
 
     return False
 

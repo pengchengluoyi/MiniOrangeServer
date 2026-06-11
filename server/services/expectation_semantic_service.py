@@ -64,6 +64,8 @@ def normalize_page_intent(text: str) -> str:
         return "我的"
     if s in ("消息", "通知"):
         return "消息"
+    if "手机号" in s and re.search(r"登录|登陆", s, re.I):
+        return "手机号登录页"
     if re.search(r"登录|登陆|sign\s*in", s, re.I) or "登录弹窗" in s or "登录页" in s:
         return "登录注册页"
     return s.strip()
@@ -129,6 +131,11 @@ def pages_semantically_match(expected: str, current_label: str) -> bool:
     if exp_login and cur_home:
         return False
     if exp_home and cur_home:
+        return True
+
+    exp_phone = "手机号" in exp and "登录" in exp
+    cur_phone = "手机号" in cur or "手机号登录" in cur
+    if exp_phone and (cur_phone or cur_norm == "手机号登录页"):
         return True
 
     if "造物秀" in exp and "造物秀" in cur:
@@ -234,6 +241,98 @@ def _llm_judge_page_expectation(
     except Exception as e:
         SLog.w(TAG, f"LLM judge failed: {e}")
         return None
+
+
+def evaluate_dynamic_expectation(
+    expected: str,
+    screen_text: str,
+    *,
+    step_results: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    非固定页面的预期判定：文案变化、数量、增减等。
+    返回 {ok, reason, method} 或 None（无法判定，交下游）。
+    """
+    exp = (expected or "").strip()
+    blob = screen_text or ""
+    if not exp or not blob:
+        return None
+
+    # 变成 / 变为 / 显示为 / 文案为 / 提示为
+    m = re.search(
+        r"(?:变成|变为|显示为|文案为|提示为|展示为)[「\"'']?(.+?)[」\"'']?\s*$",
+        exp,
+    )
+    if m:
+        target = m.group(1).strip()
+        if target and target in blob:
+            return {"ok": True, "reason": f"界面文案已包含「{target}」", "method": "text_change"}
+        return {
+            "ok": False,
+            "reason": f"未在界面中找到预期文案「{target}」",
+            "method": "text_change",
+        }
+
+    # 不包含 / 不再显示
+    m = re.search(r"(?:不包含|不再显示|没有)[「\"'']?(.+?)[」\"'']?", exp)
+    if m:
+        forbidden = m.group(1).strip()
+        if forbidden and forbidden not in blob:
+            return {"ok": True, "reason": f"界面未出现「{forbidden}」", "method": "text_absent"}
+        if forbidden:
+            return {"ok": False, "reason": f"界面仍包含「{forbidden}」", "method": "text_absent"}
+
+    # 数量为 N / 是 N 个 / 共 N
+    m = re.search(r"(?:数量|个数|)(?:为|是|共)\s*(\d+)\s*(?:个|条|项)?", exp)
+    if m:
+        want = int(m.group(1))
+        nums = [int(x) for x in re.findall(r"\b(\d+)\b", blob)]
+        if want in nums:
+            return {"ok": True, "reason": f"界面可见数量 {want}", "method": "numeric"}
+        return {
+            "ok": False,
+            "reason": f"界面未找到数量 {want}（OCR 数字: {nums[:8]}）",
+            "method": "numeric",
+        }
+
+    # +1 / 增加1 / 加1（需操作成功且界面有数字变化迹象）
+    if re.search(r"\+1|增加\s*1|加\s*1|多\s*1", exp):
+        steps_ok = all(r.get("ok") for r in (step_results or [])) if step_results else True
+        if steps_ok and re.search(r"\b\d+\b", blob):
+            return {
+                "ok": True,
+                "reason": "操作已成功，界面含计数类数字（+1 类预期需结合业务字段扩展）",
+                "method": "delta_hint",
+            }
+        if not steps_ok:
+            return {"ok": False, "reason": "前置操作未成功，无法校验增减", "method": "delta_hint"}
+
+    # 原来是 X 现在是 Y
+    m = re.search(
+        r"原来(?:是|为)?[「\"'']?(.+?)[」\"'']?\s*(?:现在|变为|变成)(?:是|为)?[「\"'']?(.+?)[」\"'']?\s*$",
+        exp,
+    )
+    if m:
+        now_val = m.group(2).strip()
+        if now_val and now_val in blob:
+            return {"ok": True, "reason": f"界面已变为「{now_val}」", "method": "state_change"}
+        return {"ok": False, "reason": f"界面未出现「{now_val}」", "method": "state_change"}
+
+    # 切换/进入某页面（如「切换到手机号登录页面」）
+    m = re.search(
+        r"(?:切换到|切换至?|切到|进入|打开|跳转至?|导航至?)(.+?)(?:页面|页)?\s*$",
+        exp,
+    )
+    if m:
+        target = re.sub(r"^[「\"'\s]+|[」\"'\s]+$", "", m.group(1).strip())
+        candidates = [target]
+        if target and not target.endswith("页"):
+            candidates.extend([f"{target}页", f"{target}页面"])
+        if any(c and c in blob for c in candidates):
+            hit = next(c for c in candidates if c and c in blob)
+            return {"ok": True, "reason": f"界面已进入「{hit}」", "method": "page_nav"}
+
+    return None
 
 
 def judge_navigation_expectation(

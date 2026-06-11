@@ -192,6 +192,15 @@ def _check_logged_in(engine, *, expect_logged_in: bool) -> Tuple[bool, str]:
     return False, f"当前在「{label or '未知页'}」，不满足「未登录」前置"
 
 
+def _stamp_precondition_item(entry: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from server.services.regression_run_context import stamp_run_timing
+
+        return stamp_run_timing(entry)
+    except Exception:
+        return entry
+
+
 def _run_one(
     kind: str,
     line: str,
@@ -227,7 +236,7 @@ def _run_one(
     except Exception as e:
         entry["ok"] = False
         entry["msg"] = str(e)
-    return entry
+    return _stamp_precondition_item(entry)
 
 
 def precondition_cleared_app_cache(items: List[Dict[str, Any]]) -> bool:
@@ -293,29 +302,35 @@ def run_preconditions(
         for kind, line in tasks:
             if kind != "check_ios_device" and kind != "check_android_device" and engine is None:
                 items.append(
-                    {
-                        "text": line,
-                        "kind": kind,
-                        "ok": False,
-                        "msg": "需要 Android 设备执行该检查",
-                    }
+                    _stamp_precondition_item(
+                        {
+                            "text": line,
+                            "kind": kind,
+                            "ok": False,
+                            "msg": "需要 Android 设备执行该检查",
+                        }
+                    )
                 )
                 continue
             if kind in ("check_ios_device", "check_android_device"):
-                items.append(
-                    _run_one(kind, line, engine=engine, platform=platform, package=package)
-                    if engine
-                    else {
-                        "text": line,
-                        "kind": kind,
-                        "ok": _check_platform(
-                            "ios" if kind == "check_ios_device" else "android", platform
-                        )[0],
-                        "msg": _check_platform(
-                            "ios" if kind == "check_ios_device" else "android", platform
-                        )[1],
-                    }
-                )
+                if engine:
+                    items.append(
+                        _run_one(kind, line, engine=engine, platform=platform, package=package)
+                    )
+                else:
+                    ok, msg = _check_platform(
+                        "ios" if kind == "check_ios_device" else "android", platform
+                    )
+                    items.append(
+                        _stamp_precondition_item(
+                            {
+                                "text": line,
+                                "kind": kind,
+                                "ok": ok,
+                                "msg": msg,
+                            }
+                        )
+                    )
             else:
                 items.append(
                     _run_one(kind, line, engine=engine, platform=platform, package=package)

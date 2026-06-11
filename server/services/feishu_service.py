@@ -301,14 +301,122 @@ def _cell(row: List[Any], col_map: Dict[str, int], key: str) -> str:
 
 
 def _split_numbered_lines(text: str) -> List[str]:
+    """按出现顺序返回步骤/预期文本（不含编号）。"""
+    return [item["text"] for item in _parse_numbered_items(text)]
+
+
+def _strip_leading_number(text: str) -> str:
+    """去掉正文开头残留的「2. 」等编号（飞书常见「1. 2. xxx」连写）。"""
+    t = (text or "").strip()
+    while t:
+        m = re.match(r"^\d+[.、．)\）]\s*", t)
+        if not m:
+            break
+        t = t[m.end() :].strip()
+    return t
+
+
+def _parse_numbered_items(text: str) -> List[Dict[str, Any]]:
+    """
+    解析飞书单元格中带编号的条目，保留原始编号。
+    预期列可能写 2. 3. 4. 而步骤列写 1. 2. 3. 4. — 需按编号对齐而非数组下标。
+    """
     raw = (text or "").strip()
     if not raw:
         return []
-    parts = re.split(r"(?:\n|^)\s*\d+[.、．)\）]\s*", raw, flags=re.M)
-    lines = [p.strip() for p in parts if p and p.strip()]
-    if len(lines) <= 1 and raw:
-        return [raw]
-    return lines
+    pattern = re.compile(r"(?:^|\n)\s*(\d+)[.、．)\）]\s*")
+    matches = list(pattern.finditer(raw))
+    if not matches:
+        # 无 "1." 前缀的单行内容仍视为第 1 条，避免同步后丢失序号
+        return [{"num": 1, "text": raw}]
+    items: List[Dict[str, Any]] = []
+    prefix = raw[: matches[0].start()].strip()
+    if prefix:
+        items.append({"num": 1, "text": prefix})
+    for idx, match in enumerate(matches):
+        try:
+            num = int(match.group(1))
+        except ValueError:
+            continue
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+        body = _strip_leading_number(raw[start:end].strip())
+        if body:
+            items.append({"num": num, "text": body})
+    if not items:
+        return [{"num": 1, "text": _strip_leading_number(raw)}]
+    # 仅一条预期/步骤且多步用例：整段预期通常对应最后一步（如一键登录）
+    return items
+
+
+def _rebalance_single_expected(
+    step_items: List[Dict[str, Any]],
+    expected_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if len(expected_items) != 1 or len(step_items) <= 1:
+        return expected_items
+    only = expected_items[0]
+    if only.get("num") != 1:
+        return expected_items
+    last_no = int(step_items[-1]["num"])
+    return [{"num": last_no, "text": only.get("text") or ""}]
+
+
+def _expected_by_step_number(text: str) -> Dict[int, str]:
+    """编号 → 预期文案（飞书预期列可跳号，如 2/3/4 无 1）。"""
+    return {int(item["num"]): item["text"] for item in _parse_numbered_items(text)}
+
+
+def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
+    """补齐编号字段；JSON 缓存会把 expected_by_step 的 int 键变成 str。"""
+    out = dict(case or {})
+    steps = list(out.get("steps") or [])
+    if steps:
+        if out.get("step_nums"):
+            out["step_nums"] = [int(x) for x in out["step_nums"]]
+        else:
+            raw_steps = out.get("steps_raw") or ""
+            items = _parse_numbered_items(raw_steps)
+            out["step_nums"] = (
+                [int(it["num"]) for it in items]
+                if items
+                else list(range(1, len(steps) + 1))
+            )
+
+    expected = list(out.get("expected") or [])
+    expected_raw = out.get("expected_raw") or ""
+    raw_steps = out.get("steps_raw") or ""
+    step_items = (
+        [{"num": int(n), "text": t} for n, t in zip(out.get("step_nums") or [], steps)]
+        if steps and out.get("step_nums")
+        else (_parse_numbered_items(raw_steps) if raw_steps else [])
+    )
+    expected_items = _rebalance_single_expected(
+        step_items, _parse_numbered_items(expected_raw)
+    )
+    if expected_items:
+        out["expected"] = [it["text"] for it in expected_items]
+        out["expected_nums"] = [int(it["num"]) for it in expected_items]
+    elif expected:
+        if out.get("expected_nums"):
+            out["expected_nums"] = [int(x) for x in out["expected_nums"]]
+        else:
+            out["expected_nums"] = list(range(1, len(expected) + 1))
+    else:
+        out["expected_nums"] = []
+
+    ebs = out.get("expected_by_step") or {}
+    if ebs:
+        out["expected_by_step"] = {
+            int(k): str(v)
+            for k, v in ebs.items()
+            if str(k).strip().lstrip("-").isdigit()
+        }
+    elif expected_items:
+        out["expected_by_step"] = _expected_by_step_number(expected_raw)
+    else:
+        out["expected_by_step"] = {}
+    return out
 
 
 def parse_cases_from_rows(rows: List[List[Any]]) -> List[Dict[str, Any]]:
@@ -325,23 +433,39 @@ def parse_cases_from_rows(rows: List[List[Any]]) -> List[Dict[str, Any]]:
         if _norm_header(case_id) in ("用例编号", "编号") and not steps_raw:
             continue
 
-        step_lines = _split_numbered_lines(steps_raw)
-        expected_lines = _split_numbered_lines(_cell(row, col_map, "expected"))
+        step_items = _parse_numbered_items(steps_raw)
+        expected_raw = _cell(row, col_map, "expected")
+        expected_items = _rebalance_single_expected(
+            step_items, _parse_numbered_items(expected_raw)
+        )
+        if not (case_id or "").strip():
+            for cell in row:
+                m = re.search(r"\b(app-\d+)\b", str(cell or ""), flags=re.I)
+                if m:
+                    case_id = m.group(1)
+                    break
+        step_lines = [item["text"] for item in step_items]
+        expected_lines = [item["text"] for item in expected_items]
         cases.append(
-            {
-                "row_index": row_idx,
-                "case_id": case_id or f"row-{row_idx}",
-                "platform": _cell(row, col_map, "platform"),
-                "module": _cell(row, col_map, "module"),
-                "name": name,
-                "precondition": _cell(row, col_map, "precondition"),
-                "steps_raw": steps_raw,
-                "steps": step_lines,
-                "expected_raw": _cell(row, col_map, "expected"),
-                "expected": expected_lines,
-                "ios_status": _cell(row, col_map, "ios_status"),
-                "android_status": _cell(row, col_map, "android_status"),
-            }
+            normalize_feishu_case(
+                {
+                    "row_index": row_idx,
+                    "case_id": case_id or f"row-{row_idx}",
+                    "platform": _cell(row, col_map, "platform"),
+                    "module": _cell(row, col_map, "module"),
+                    "name": name,
+                    "precondition": _cell(row, col_map, "precondition"),
+                    "steps_raw": steps_raw,
+                    "steps": step_lines,
+                    "step_nums": [item["num"] for item in step_items],
+                    "expected_raw": expected_raw,
+                    "expected": expected_lines,
+                    "expected_nums": [item["num"] for item in expected_items],
+                    "expected_by_step": _expected_by_step_number(expected_raw),
+                    "ios_status": _cell(row, col_map, "ios_status"),
+                    "android_status": _cell(row, col_map, "android_status"),
+                }
+            )
         )
     return cases
 

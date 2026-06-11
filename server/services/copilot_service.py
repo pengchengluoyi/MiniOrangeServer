@@ -15,6 +15,61 @@ from script.log import SLog
 
 TAG = "CopilotService"
 
+_LAST_LOCATE_DEBUG: Optional[Dict[str, Any]] = None
+
+
+def pop_locate_debug() -> Optional[Dict[str, Any]]:
+    global _LAST_LOCATE_DEBUG
+    dbg = _LAST_LOCATE_DEBUG
+    _LAST_LOCATE_DEBUG = None
+    return dbg
+
+
+def clear_locate_debug() -> None:
+    global _LAST_LOCATE_DEBUG
+    _LAST_LOCATE_DEBUG = None
+
+
+def _make_toggle_locate_debug(
+    cx: int,
+    cy: int,
+    method: str,
+    label: str,
+    *,
+    w: int = 44,
+    h: int = 44,
+) -> Dict[str, Any]:
+    """协议勾选等开关快路径的定位诊断（不经多通道仲裁）。"""
+    row = {
+        "channel": "toggle",
+        "method": method,
+        "label": label,
+        "raw_score": 1.0,
+        "final_score": 1.0,
+        "cx": cx,
+        "cy": cy,
+        "w": w,
+        "h": h,
+        "selected": True,
+        "detail": f"{method}@({cx},{cy})",
+    }
+    return {
+        "query": label,
+        "profile": "login",
+        "target_kind": "toggle",
+        "spatial_zones": [],
+        "candidates": [row],
+        "overlay": [row],
+        "winner_channel": "toggle",
+    }
+
+
+def _with_locate_debug(payload: Dict[str, Any]) -> Dict[str, Any]:
+    dbg = pop_locate_debug()
+    if dbg:
+        payload = {**payload, "locate_debug": dbg}
+    return payload
+
 # 规划阶段无坐标时的占位；执行时会按文案/层级/OCR 重新定位
 _DEFAULT_CLICK_XY = (0, 0)
 
@@ -700,8 +755,10 @@ def _classify_login_method_intent(label: str) -> Optional[str]:
         return "apple"
     if re.search(r"邮箱|账号密码|密码登录|密码方式|帐号密码", raw):
         return "email_password"
-    if re.search(r"手机|验证码|短信", raw):
+    if re.search(r"手机(号)?.*(登录|方式)|验证码|短信", raw):
         return "phone_sms"
+    if re.search(r"访客|游客", raw):
+        return None
     return None
 
 
@@ -762,11 +819,20 @@ def _discover_login_icon_row(
 def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
     """
     从自然语言指令提炼 CLIP 检索词 / 别名 / 区域。
-    通用路径：不按业务写专用定位器，新图标靠 query + 图标库 embedding。
+    一期：造好物登录链路走 clip_query_plan 表；未命中再走通用启发式。
     """
     raw = (label or "").strip()
     if not raw:
         return "", [], None
+
+    try:
+        from server.services.locate.clip_query_plan import clip_params_from_plan, lookup_clip_query_plan
+
+        plan = lookup_clip_query_plan(raw)
+        if plan:
+            return clip_params_from_plan(plan, raw)
+    except Exception:
+        pass
 
     parsed_tab = parse_bottom_tab_label(raw)
     if parsed_tab:
@@ -782,11 +848,12 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         from server.services.toggle_locate_service import parse_toggle_intent, toggle_clip_queries
 
         intent = parse_toggle_intent(raw)
+        region = "bottom" if re.search(r"底部|底栏|协议", raw) else "full"
         if intent:
             q, extras = toggle_clip_queries(intent)
-            return q, extras + ([raw] if raw != q else []), "full"
+            return q, extras + ([raw] if raw != q else []), region
         q = "empty checkbox"
-        return q, ["checkbox", "round checkbox", raw], "full"
+        return q, ["checkbox", "round checkbox", raw], region
 
     if re.search(r"下一步|继续|提交", raw):
         return (
@@ -805,51 +872,149 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         )
     if intent and intent in _LOGIN_ICON_ALIAS_GROUPS:
         group = list(_LOGIN_ICON_ALIAS_GROUPS[intent])
-        extras = (
-            [
-                "手机图标",
-                "phone icon",
-                "mobile login",
-                "smartphone outline icon",
-                "手机轮廓图标",
-                "mobile phone icon button",
-            ]
-            if intent == "phone_sms"
-            else []
-        )
-        return group[0], group[1:] + extras, "login_row"
+        visual_primary = {
+            "phone_sms": "smartphone mobile phone outline icon button",
+            "wechat": "wechat green chat bubble icon",
+            "email_password": "user account password login icon",
+            "apple": "apple logo sign in icon",
+        }.get(intent, group[0])
+        extras = list(group[1:]) + [raw] if raw and raw not in group else list(group[1:])
+        if intent == "phone_sms":
+            extras.extend(
+                [
+                    "phone icon",
+                    "mobile phone icon",
+                    "手机图标",
+                    "smartphone icon",
+                ]
+            )
+        return visual_primary, extras, "login_row"
 
-    q = re.sub(r"^(点击|点一下|tap|click|进入|打开)\s*", "", raw, flags=re.I).strip()
-    for prefix in (
-        "登录页面的",
-        "登录页",
-        "页面上的",
-        "底部",
-        "底栏",
-        "右上角",
-        "左上角的",
-        "页面",
-        "里的",
-        "中的",
-    ):
-        q = q.replace(prefix, "")
-    q = q.strip("「」『』【】\"' \t")
+    q, pos_hint = _extract_ui_text_core(raw)
     if not q:
         q = raw
 
-    region = None
-    if re.search(r"底部|底栏", raw) and not re.search(r"协议|勾选", raw):
+    region = pos_hint
+    if region is None and re.search(r"底部|底栏", raw) and not re.search(r"协议|勾选", raw):
         region = "bottom"
-    elif re.search(r"顶栏|分段", raw):
+    elif region is None and re.search(r"顶栏|分段", raw):
         region = "segment"
 
-    aliases = [raw] if q != raw else []
-    return q, aliases, region
+    aliases = [raw, q] if q != raw else [raw]
+    return q, list(dict.fromkeys(aliases)), region
 
 
 def _is_disagree_label(text: str) -> bool:
     t = (text or "").strip()
     return t == "不同意" or t.startswith("不同意")
+
+
+def _extract_ui_text_core(label: str) -> Tuple[str, Optional[str]]:
+    """从「登录页面点击右上角的访客浏览」提取核心文案与方位。"""
+    raw = (label or "").strip()
+    pos_hint: Optional[str] = None
+    if re.search(r"右上角|右上", raw):
+        pos_hint = "top_right"
+    elif re.search(r"左上角|左上", raw):
+        pos_hint = "top_left"
+    elif re.search(r"底部|底栏", raw) and not re.search(r"协议|勾选", raw):
+        pos_hint = "bottom"
+
+    q = re.sub(r"^(点击|点一下|tap|click|进入|打开)\s*", "", raw, flags=re.I).strip()
+    q = re.sub(r"^(登录页(面)?|页面)(上的|中的)?\s*", "", q)
+    q = re.sub(r"^(右上角|左上角|右下角|左下角|底部|底栏|顶部)(的)?\s*", "", q)
+    q = q.strip("「」『』【】\"' \t的")
+    return q or raw, pos_hint
+
+
+def _in_top_right_band(cx: int, cy: int, screen_w: int, screen_h: int) -> bool:
+    return cy <= int(screen_h * 0.32) and cx >= int(screen_w * 0.48)
+
+
+def _in_top_left_band(cx: int, cy: int, screen_w: int, screen_h: int) -> bool:
+    return cy <= int(screen_h * 0.32) and cx <= int(screen_w * 0.52)
+
+
+def _position_band_ok(
+    pos_hint: Optional[str], cx: int, cy: int, screen_w: int, screen_h: int
+) -> bool:
+    if pos_hint == "top_right":
+        return _in_top_right_band(cx, cy, screen_w, screen_h)
+    if pos_hint == "top_left":
+        return _in_top_left_band(cx, cy, screen_w, screen_h)
+    if pos_hint == "bottom":
+        return _in_bottom_bar_band(cy, screen_h)
+    return True
+
+
+def _should_try_text_locate_first(label: str) -> bool:
+    if not label:
+        return False
+    if _classify_login_method_intent(label):
+        return False
+    if _is_toggle_intent(label) or _is_consent_action_label(label):
+        return False
+    if re.search(r"图标|icon", label, re.I):
+        return False
+    core, _ = _extract_ui_text_core(label)
+    return bool(core and re.search(r"[\u4e00-\u9fff]", core) and len(core) <= 24)
+
+
+def _resolve_text_click_target(
+    engine,
+    screen_w: int,
+    screen_h: int,
+    label: str,
+) -> Tuple[Optional[Tuple[int, int]], str, str, Optional[Dict[str, Any]]]:
+    """短中文文案优先 hierarchy/OCR（CLIP 不适合纯文字链接）。"""
+    core, pos_hint = _extract_ui_text_core(label)
+    query = core or label
+    try:
+        from driver.agent.Crawl.ui_discovery import (
+            discover_clickables_from_hierarchy,
+            discover_clickables_ocr,
+        )
+
+        hier_pool = list(
+            discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=64)
+        )
+        hier_pool = [
+            t
+            for t in hier_pool
+            if _position_band_ok(pos_hint, t.center[0], t.center[1], screen_w, screen_h)
+        ]
+        pick = _pick_best_text_clickable(query, hier_pool, screen_h=screen_h)
+        if pick:
+            cx, cy, txt, score, t = pick
+            rect = _make_target_rect(t.x, t.y, t.w, t.h, label=txt)
+            return (
+                (cx, cy),
+                "hierarchy",
+                f"层级「{txt}」@({cx},{cy}) sim={score:.2f}",
+                rect,
+            )
+
+        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
+        if shot is not None:
+            ocr_pool = list(discover_clickables_ocr(shot, screen_w, screen_h, max_items=32))
+            ocr_pool = [
+                t
+                for t in ocr_pool
+                if _position_band_ok(pos_hint, t.center[0], t.center[1], screen_w, screen_h)
+            ]
+            pick = _pick_best_text_clickable(query, ocr_pool, screen_h=screen_h)
+            if pick:
+                cx, cy, txt, score, t = pick
+                rect = _make_target_rect(t.x, t.y, t.w, t.h, label=txt)
+                return (
+                    (cx, cy),
+                    "ocr",
+                    f"OCR「{txt}」@({cx},{cy}) sim={score:.2f}",
+                    rect,
+                )
+    except Exception as e:
+        SLog.w(TAG, f"text locate failed label={label!r}: {e}")
+    return None, "none", f"未找到文本「{query}」", None
 
 
 def _label_similarity(query: str, candidate: str) -> float:
@@ -892,6 +1057,37 @@ def _min_label_similarity(query: str) -> float:
     return 0.58
 
 
+def _pick_consent_agree_clickable(
+    query: str,
+    candidates: list,
+    *,
+    screen_h: int = 0,
+) -> Optional[Tuple[int, int, str, float, Any]]:
+    """consent 弹窗「同意」：排除「不同意」，同分时取更靠右的按钮。"""
+    floor = _min_label_similarity(query)
+    matches: List[Tuple[float, int, int, str, Any]] = []
+    y_lo = int(screen_h * 0.32) if screen_h else 0
+    y_hi = int(screen_h * 0.82) if screen_h else 0
+    for t in candidates or []:
+        txt = (getattr(t, "label", None) or "").strip()
+        if not txt or _is_disagree_label(txt) or _is_legal_bearing_target(txt):
+            continue
+        if txt not in ("同意", "同意并继续") and not _is_consent_action_label(txt):
+            continue
+        cx, cy = t.center
+        if screen_h and not (y_lo <= cy <= y_hi):
+            continue
+        score = _label_similarity(query, txt)
+        if score < floor:
+            continue
+        matches.append((score, cx, cy, txt, t))
+    if not matches:
+        return None
+    matches.sort(key=lambda m: (-m[0], -m[1]))
+    score, cx, cy, txt, t = matches[0]
+    return cx, cy, txt, score, t
+
+
 def _pick_best_text_clickable(
     query: str,
     candidates: list,
@@ -899,8 +1095,13 @@ def _pick_best_text_clickable(
     screen_h: int = 0,
     bottom_band_only: bool = False,
     max_label_len: int = 0,
+    consent_modal: bool = False,
 ) -> Optional[Tuple[int, int, str, float, Any]]:
     """从可点击候选中按文本贴合度选最高分。"""
+    if query in ("同意", "同意并继续") or consent_modal:
+        hit = _pick_consent_agree_clickable(query, candidates, screen_h=screen_h)
+        if hit:
+            return hit
     best: Optional[Tuple[int, int, str, float, Any]] = None
     best_score = 0.0
     floor = _min_label_similarity(query)
@@ -987,8 +1188,10 @@ def _resolve_icon_target(
         else:
             x, y = int(t.get("x") or 0), int(t.get("y") or 0)
             w, h = int(t.get("w") or 0), int(t.get("h") or 0)
-        cx = x + (w // 2 if w else 0)
-        cy = y + (h // 2 if h else 0)
+        if w <= 0 or h <= 0:
+            continue
+        cx = x + w // 2
+        cy = y + h // 2
         if cx > 0 and cy > 0:
             rect = _make_target_rect(x, y, w or 48, h or 48, label=name)
             src = "Figma" if "figma_norm" in (t.get("note") or "") else "图标库"
@@ -1114,40 +1317,104 @@ def _resolve_click_target(
     优先级：显式坐标 → consent 安全定位 → toggle → CLIP(全屏/区域) → 图标库 → hierarchy/OCR → Tab → 无障碍 label
     method: clip_* | hierarchy | ocr | icon_target | coordinate | label
     """
+    global _LAST_LOCATE_DEBUG
+
+    if label:
+        try:
+            from server.services.overlay_guard_service import is_screen_blocked
+            from server.services.page_navigation_service import is_overlay_dismiss_target_label
+
+            if is_screen_blocked(engine) and not is_overlay_dismiss_target_label(label):
+                from server.services.overlay_guard_service import (
+                    blocked_overlay_message,
+                    detect_blocking_overlay,
+                )
+
+                ov = detect_blocking_overlay(engine) or {}
+                blocked_msg = blocked_overlay_message(engine) or "当前屏被阻塞弹窗占用"
+                _LAST_LOCATE_DEBUG = {
+                    "query": label,
+                    "blocked_overlay": True,
+                    "overlay_type": ov.get("type") or "",
+                    "detail": blocked_msg,
+                }
+                return (
+                    None,
+                    "blocked_overlay",
+                    blocked_msg,
+                    None,
+                )
+        except Exception:
+            pass
+
+        intent = _classify_login_method_intent(label)
+        if intent == "one_click":
+            try:
+                from server.services.page_navigation_service import (
+                    _collect_ocr_text_only,
+                    _screen_is_login_home,
+                    _screen_is_login_surface,
+                )
+
+                blob = (_collect_ocr_text_only(engine) or "").strip()
+                if blob and not _screen_is_login_surface(blob) and not _screen_is_login_home(blob):
+                    _LAST_LOCATE_DEBUG = {
+                        "query": label,
+                        "wrong_page": True,
+                        "detail": "不在登录页，跳过一键登录定位",
+                    }
+                    return None, "wrong_page", "当前不在登录页", None
+            except Exception:
+                pass
+
     if coords_explicit and x > 0 and y > 0:
         half = 24
         rect = _make_target_rect(x - half, y - half, half * 2, half * 2, label=label or f"({x},{y})")
         return (x, y), "coordinate", f"坐标({x},{y})", rect
 
-    if label and _is_consent_action_label(label):
-        try:
-            from server.services.page_navigation_service import resolve_consent_agree_tap
+    try:
+        from server.services.locate.resolver import _locate_arbitrator_enabled, resolve_locate_target
 
-            tap = resolve_consent_agree_tap(engine, screen_w, screen_h)
-            if tap:
-                cx, cy, method = tap
-                half = 44
-                rect = _make_target_rect(
-                    cx - half, cy - half, half * 2, half * 2, label="同意"
-                )
-                return (cx, cy), method, f"consent「同意」@({cx},{cy})", rect
-        except Exception as e:
-            SLog.w(TAG, f"consent safe resolve failed: {e}")
+        if label and _locate_arbitrator_enabled():
+            lr = resolve_locate_target(
+                engine,
+                screen_w,
+                screen_h,
+                label=label,
+                icon_targets=icon_targets,
+            )
+            _LAST_LOCATE_DEBUG = lr.debug
+            if lr.ok:
+                return lr.position, lr.method, lr.detail, lr.target_rect
+    except Exception as e:
+        SLog.w(TAG, f"locate arbitrator failed label={label!r}: {e}")
 
-    if label and _is_toggle_intent(label):
-        try:
-            from server.services.toggle_locate_service import resolve_toggle_tap
+    intent = _classify_login_method_intent(label) if label else None
+    if intent and intent != "one_click":
+        row = _discover_login_icon_row(engine, screen_w, screen_h)
+        if row:
+            slot = (login_icon_order or {}).get(intent)
+            if slot is None:
+                slot = {"wechat": 1, "phone_sms": 2, "email_password": 3, "apple": 3}.get(intent)
+            if slot is not None:
+                idx = int(slot) - 1
+                if 0 <= idx < len(row):
+                    t = row[idx]
+                    cx, cy = t.center
+                    rect = _make_target_rect(t.x, t.y, t.w, t.h, label=label or intent)
+                    detail = f"登录图标行第{slot}位 @({int(cx)},{int(cy)})"
+                    _LAST_LOCATE_DEBUG = {
+                        "query": label,
+                        "profile": "login",
+                        "kind": "icon",
+                        "winner": {"channel": "icon_row", "method": "login_icon_row"},
+                    }
+                    return (int(cx), int(cy)), "login_icon_row", detail, rect
 
-            tap = resolve_toggle_tap(engine, screen_w, screen_h, label)
-            if tap:
-                cx, cy, method = tap
-                half = 22
-                rect = _make_target_rect(
-                    cx - half, cy - half, half * 2, half * 2, label="toggle"
-                )
-                return (cx, cy), method, f"开关控件@({cx},{cy})", rect
-        except Exception as e:
-            SLog.w(TAG, f"toggle resolve failed: {e}")
+    if label and _should_try_text_locate_first(label):
+        text_hit = _resolve_text_click_target(engine, screen_w, screen_h, label)
+        if text_hit[0]:
+            return text_hit
 
     clip_attempted = False
     if label and not _is_toggle_intent(label):
@@ -1268,7 +1535,19 @@ def _resolve_click_target(
     except Exception as e:
         SLog.w(TAG, f"resolve click target failed: {e}")
 
-    if label and hasattr(engine, "click_by_label") and not _is_toggle_intent(label):
+    try:
+        from server.services.locate.resolver import _locate_arbitrator_enabled
+
+        arbitrator_on = _locate_arbitrator_enabled()
+    except Exception:
+        arbitrator_on = False
+
+    if (
+        label
+        and hasattr(engine, "click_by_label")
+        and not _is_toggle_intent(label)
+        and not arbitrator_on
+    ):
         use_exact = (
             exact_label
             or _is_probable_bottom_tab_query(label)
@@ -1315,11 +1594,6 @@ def _run_mobile_click(
     skip_overlay_clear: bool = False,
 ) -> Dict[str, Any]:
     try:
-        if consent_dismiss:
-            from server.services.page_navigation_service import run_consent_agree_tap
-
-            return run_consent_agree_tap(sn, platform)
-
         import builtins
         from driver.agent.Crawl.device_bootstrap import (
             DeviceOfflineError,
@@ -1339,21 +1613,30 @@ def _run_mobile_click(
             except Exception as e:
                 SLog.w(TAG, f"pre-click ensure_screen_ready failed: {e}")
 
-        if not skip_overlay_clear:
+        consent_label = _is_consent_action_label(label)
+        if consent_label:
             try:
-                from server.services.page_navigation_service import dismiss_blocking_on_engine
+                from server.services.page_navigation_service import _consent_dialog_gone
 
-                dismiss_blocking_on_engine(engine, screen_w, screen_h, max_rounds=4)
+                if _consent_dialog_gone(engine):
+                    _gesture_tick()
+                    SLog.i(
+                        TAG,
+                        f"Click skip consent already cleared label={label!r}",
+                    )
+                    return _with_locate_debug(
+                        {
+                            "ok": True,
+                            "msg": "隐私弹窗已关闭",
+                            "method": "already_dismissed",
+                            "screen_size": {"w": screen_w, "h": screen_h},
+                            "target_label": label,
+                        }
+                    )
             except Exception as e:
-                SLog.w(TAG, f"pre-click overlay clear failed: {e}")
+                SLog.w(TAG, f"consent dismissed check failed: {e}")
 
-        if _is_one_click_login_label(label) or _classify_login_method_intent(label) == "one_click":
-            try:
-                from server.services.page_navigation_service import prepare_login_page
-
-                prepare_login_page(engine, screen_w, screen_h)
-            except Exception as e:
-                SLog.w(TAG, f"prepare login page failed: {e}")
+        clear_locate_debug()
 
         pos, method, detail, target_rect = _resolve_click_target(
             engine,
@@ -1375,18 +1658,15 @@ def _run_mobile_click(
                 or _classify_login_method_intent(label) == "one_click"
             )
         )
-        if pos is None and login_related:
+        if pos is None and login_related and not skip_overlay_clear:
             try:
-                from server.services.page_navigation_service import (
-                    dismiss_blocking_on_engine,
-                    prepare_login_page,
-                )
+                from server.services.page_navigation_service import dismiss_blocking_on_engine
 
                 SLog.i(TAG, f"login click retry after wake/overlay clear label={label!r}")
                 if hasattr(engine, "ensure_screen_ready"):
                     engine.ensure_screen_ready(node_sn=sn)
                 dismiss_blocking_on_engine(engine, screen_w, screen_h, max_rounds=4)
-                prepare_login_page(engine, screen_w, screen_h)
+                clear_locate_debug()
                 pos, method, detail, target_rect = _resolve_click_target(
                     engine,
                     screen_w,
@@ -1406,7 +1686,11 @@ def _run_mobile_click(
         clip_query, _, _ = _clip_search_params(label) if label else ("", [], None)
 
         clip_semantic_ok = (
-            _match_target_label(label, target_label)
+            _is_toggle_intent(label)
+            or _is_consent_action_label(label)
+            or (method or "") == "already_checked"
+            or (method or "").startswith(("toggle", "u2_toggle", "u2_checkbox"))
+            or _match_target_label(label, target_label)
             or _icon_names_match_label(label, [target_label, clip_query])
             or (
                 (method or "").startswith("clip")
@@ -1421,6 +1705,7 @@ def _run_mobile_click(
             and (method or "").startswith("clip")
             and target_label
             and not clip_semantic_ok
+            and not _is_toggle_intent(label)
             and not (
                 _is_probable_bottom_tab_query(label)
                 and _match_bottom_tab_label(label, target_label)
@@ -1432,18 +1717,6 @@ def _run_mobile_click(
                     f"CLIP 命中「{target_label}」与指令「{label}」不符，已终止点击。"
                     f" {detail}"
                 ),
-                "method": method,
-                "target_rect": target_rect,
-                "screen_size": screen_size,
-                "target_label": target_label,
-            }
-
-        if method == "label":
-            _gesture_tick()
-            SLog.i(TAG, f"Click audit ok=True method=label label={target_label!r} detail={detail}")
-            return {
-                "ok": True,
-                "msg": detail,
                 "method": method,
                 "target_rect": target_rect,
                 "screen_size": screen_size,
@@ -1465,13 +1738,15 @@ def _run_mobile_click(
             }
 
         if pos is None:
-            return {
-                "ok": False,
-                "msg": detail or "未找到可点击目标，请指定坐标如：点击 1080,2450",
-                "method": method,
-                "target_rect": target_rect,
-                "screen_size": screen_size,
-            }
+            return _with_locate_debug(
+                {
+                    "ok": False,
+                    "msg": detail or "未找到可点击目标，请指定坐标如：点击 1080,2450",
+                    "method": method,
+                    "target_rect": target_rect,
+                    "screen_size": screen_size,
+                }
+            )
 
         cx, cy = pos
         if hasattr(engine, "click"):
@@ -1487,13 +1762,70 @@ def _run_mobile_click(
                     label=tap_label,
                     skip_label_lookup=force_coord,
                     exact_label=exact_label,
+                    locate_method=method or "",
                 )
             except TypeError:
                 clicked = engine.click(None, position=(cx, cy), label=tap_label)
             if clicked is False:
-                return {
-                    "ok": False,
-                    "msg": f"{detail} — 触控注入失败，请检查 USB 调试(安全设置) 与无障碍 ATX",
+                return _with_locate_debug(
+                    {
+                        "ok": False,
+                        "msg": f"{detail} — 触控注入失败，请检查 USB 调试(安全设置) 与无障碍 ATX",
+                        "method": method,
+                        "x": cx,
+                        "y": cy,
+                        "target_rect": target_rect,
+                        "screen_size": screen_size,
+                        "target_label": target_label,
+                    }
+                )
+            toggle_ok = True
+            if _is_toggle_intent(label) and method != "already_checked":
+                try:
+                    from script.sleep import mSleep
+
+                    from server.services.page_navigation_service import _login_checkbox_checked
+
+                    mSleep(0.35)
+                    toggle_ok = _login_checkbox_checked(engine)
+                    if not toggle_ok:
+                        try:
+                            engine.click(
+                                None,
+                                position=(cx, cy),
+                                label=tap_label,
+                                skip_label_lookup=True,
+                                locate_method=method or "",
+                            )
+                        except TypeError:
+                            engine.click(None, position=(cx, cy), label=tap_label)
+                        mSleep(0.35)
+                        toggle_ok = _login_checkbox_checked(engine)
+                except Exception as e:
+                    SLog.w(TAG, f"toggle verify failed: {e}")
+            if not toggle_ok:
+                return _with_locate_debug(
+                    {
+                        "ok": False,
+                        "msg": f"{detail} — 协议勾选未生效",
+                        "method": method,
+                        "x": cx,
+                        "y": cy,
+                        "target_rect": target_rect,
+                        "screen_size": screen_size,
+                        "target_label": target_label,
+                    }
+                )
+            _gesture_tick()
+            SLog.i(
+                TAG,
+                f"Click audit ok=True method={method} label={target_label!r} "
+                f"pos=({cx},{cy}) detail={detail}",
+            )
+            return _with_locate_debug(
+                {
+                    "ok": True,
+                    "msg": detail,
                     "method": method,
                     "x": cx,
                     "y": cy,
@@ -1501,23 +1833,8 @@ def _run_mobile_click(
                     "screen_size": screen_size,
                     "target_label": target_label,
                 }
-            _gesture_tick()
-            SLog.i(
-                TAG,
-                f"Click audit ok=True method={method} label={target_label!r} "
-                f"pos=({cx},{cy}) detail={detail}",
             )
-            return {
-                "ok": True,
-                "msg": detail,
-                "method": method,
-                "x": cx,
-                "y": cy,
-                "target_rect": target_rect,
-                "screen_size": screen_size,
-                "target_label": target_label,
-            }
-        return {"ok": False, "msg": "引擎不支持点击"}
+        return _with_locate_debug({"ok": False, "msg": "引擎不支持点击"})
     except Exception as e:
         from driver.agent.Crawl.device_bootstrap import DeviceOfflineError
 
@@ -1837,6 +2154,7 @@ def _normalize_segment(segment: str) -> str:
 
 
 _ORPHAN_TOGGLE_SEG_RE = re.compile(r"^(?:勾选框|框勾选框|选框)$")
+_CLICK_ORPHAN_SEG_RE = re.compile(r"^(?:点击|点一下|tap|click)$", re.I)
 
 
 def _coalesce_split_segments(parts: List[str]) -> List[str]:
@@ -1845,6 +2163,9 @@ def _coalesce_split_segments(parts: List[str]) -> List[str]:
     for seg in parts:
         s = (seg or "").strip()
         if not s:
+            continue
+        if out and _CLICK_ORPHAN_SEG_RE.match(out[-1]) and not _CLICK_ORPHAN_SEG_RE.match(s):
+            out[-1] = f"{out[-1]}{s}"
             continue
         if out and _ORPHAN_TOGGLE_SEG_RE.match(s):
             out[-1] = f"{out[-1]}{s}"
@@ -2029,7 +2350,7 @@ def _plan_segment(
 
     coord = re.search(r"(\d{2,4})\s*[,，]\s*(\d{2,4})", segment)
     label_m = re.search(r"[「『\"']([^」』\"']+)[」』\"']", segment) or re.search(
-        r"点击\s*([^\s,，]+)", segment
+        r"点击\s*(.+?)(?:\s*[,，;；]|$)", segment
     )
     if re.search(r"点击|点一下|tap|click", segment, re.I):
         label = label_m.group(1).strip() if label_m else ""
@@ -2311,6 +2632,7 @@ def execute_steps(
     capture_screenshots: bool = True,
     app_id: Optional[str] = None,
     skip_overlay_clear: bool = False,
+    enable_overlay_guard: bool = True,
     target_package: str = "",
     stop_on_failure: bool = True,
 ) -> List[Dict[str, Any]]:
@@ -2361,7 +2683,11 @@ def execute_steps(
         pass
 
     results: List[Dict[str, Any]] = []
+    guard_planned_all: List[Dict[str, Any]] = []
     pkg_guard = (target_package or "").strip()
+    use_reactive_guard = bool(enable_overlay_guard)
+    skip_click_overlay_dismiss = bool(skip_overlay_clear or use_reactive_guard)
+
     for i, step in enumerate(steps or []):
         t0 = time.time()
         kind = step.get("kind", "")
@@ -2446,27 +2772,152 @@ def execute_steps(
             else:
                 from server.services.regression_run_context import mark_step
 
-                mark_step()
-                SLog.i(
-                    TAG,
-                    f"Step {i} click begin label={step.get('label')!r} "
-                    f"coords=({step.get('x')},{step.get('y')})",
-                )
-                r = _run_mobile_click(
-                    sn,
-                    int(step.get("x", 0)),
-                    int(step.get("y", 0)),
-                    label=step.get("label", ""),
-                    platform=platform,
-                    coords_explicit=bool(step.get("coords_explicit")),
-                    icon_targets=runtime_icons,
-                    exact_label=bool(step.get("exact_label")),
-                    skip_label_lookup=bool(step.get("skip_label_lookup")),
-                    consent_dismiss=bool(step.get("consent_dismiss")),
-                    login_icon_order=login_icon_order or None,
-                    skip_overlay_clear=skip_overlay_clear,
-                )
-                out.update(r)
+                guard_round_i = 0
+                max_guard_rounds = 3
+                click_attempt = 0
+                r: Dict[str, Any] = {"ok": False, "msg": ""}
+
+                while True:
+                    mark_step()
+                    SLog.i(
+                        TAG,
+                        f"Step {i} click attempt={click_attempt} label={step.get('label')!r} "
+                        f"coords=({step.get('x')},{step.get('y')})",
+                    )
+                    r = _run_mobile_click(
+                        sn,
+                        int(step.get("x", 0)),
+                        int(step.get("y", 0)),
+                        label=step.get("label", ""),
+                        platform=platform,
+                        coords_explicit=bool(step.get("coords_explicit")),
+                        icon_targets=runtime_icons,
+                        exact_label=bool(step.get("exact_label")),
+                        skip_label_lookup=bool(step.get("skip_label_lookup")),
+                        consent_dismiss=bool(step.get("consent_dismiss")),
+                        login_icon_order=login_icon_order or None,
+                        skip_overlay_clear=skip_click_overlay_dismiss,
+                    )
+                    if r.get("ok"):
+                        out.update(r)
+                        break
+
+                    if not use_reactive_guard:
+                        out.update(r)
+                        break
+
+                    try:
+                        import builtins
+                        from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+                        from server.services.overlay_guard_service import (
+                            apply_reactive_guard_round,
+                            is_screen_blocked,
+                        )
+
+                        builtins.TARGET_DEVICE_SN = str(sn)
+                        engine_g, (gw, gh) = bootstrap_mobile_engine(str(sn), platform)
+                        if not is_screen_blocked(engine_g):
+                            out.update(r)
+                            break
+
+                        SLog.i(
+                            TAG,
+                            f"Step {i}: reactive guard round={guard_round_i} "
+                            f"after click miss {summary!r}",
+                        )
+                        try:
+                            from server.services.regression_run_context import (
+                                capture_trace_frame,
+                                stamp_run_timing,
+                            )
+
+                            attempt_out = {
+                                "index": i,
+                                "kind": kind,
+                                "summary": summary,
+                                "ok": False,
+                                "msg": r.get("msg") or "点击未命中",
+                                "method": r.get("method") or "",
+                                "phase": "plan_attempt",
+                                "click_attempt": click_attempt,
+                                "locate_debug": r.get("locate_debug"),
+                                "screen_size": r.get("screen_size"),
+                                "started_at": datetime.fromtimestamp(t0).isoformat(
+                                    timespec="milliseconds"
+                                ),
+                                "duration_ms": int((time.time() - t0) * 1000),
+                            }
+                            try:
+                                miss_shot = capture_trace_frame(
+                                    f"plan_attempt_{i}_{click_attempt}",
+                                    settle_ms=80,
+                                )
+                                if miss_shot:
+                                    attempt_out["screenshot_before"] = miss_shot
+                                    attempt_out["screenshot_after"] = miss_shot
+                            except Exception:
+                                pass
+                            stamp_run_timing(attempt_out)
+                            results.append(attempt_out)
+                        except Exception:
+                            pass
+                        reactive = apply_reactive_guard_round(
+                            engine_g,
+                            gw,
+                            gh,
+                            before_step_index=i,
+                            round_i=guard_round_i,
+                            icon_targets=runtime_icons,
+                            app_id=str(learn_app_id or ""),
+                            step_summary=summary,
+                            sn=str(sn),
+                            platform=platform,
+                        )
+                        if reactive.get("planned_steps"):
+                            guard_planned_all.extend(reactive["planned_steps"])
+                        for gr in reactive.get("step_rows") or []:
+                            gr["duration_ms"] = gr.get("duration_ms") or 0
+                            results.append(gr)
+
+                        if not reactive.get("attempted"):
+                            out.update(r)
+                            break
+                        if not reactive.get("can_retry_click"):
+                            last_action = (reactive.get("one") or {}).get("action") or {}
+                            fail_out = {
+                                "index": i,
+                                "kind": kind,
+                                "summary": summary,
+                                "ok": False,
+                                "msg": reactive.get("msg") or "阻塞弹窗守卫失败",
+                                "method": "overlay_guard",
+                                "started_at": datetime.fromtimestamp(t0).isoformat(
+                                    timespec="milliseconds"
+                                ),
+                                "duration_ms": int((time.time() - t0) * 1000),
+                                "overlay_guard": reactive,
+                                "locate_debug": last_action.get("locate_debug"),
+                            }
+                            try:
+                                from server.services.regression_run_context import stamp_run_timing
+
+                                stamp_run_timing(fail_out)
+                            except Exception:
+                                pass
+                            results.append(fail_out)
+                            out.update(fail_out)
+                            break
+
+                        guard_round_i += 1
+                        click_attempt += 1
+                        if guard_round_i >= max_guard_rounds:
+                            out.update(r)
+                            break
+                        continue
+                    except Exception as e:
+                        SLog.w(TAG, f"reactive guard after click miss failed: {e}")
+                        out.update(r)
+                        break
 
         elif kind == "swipe":
             if not sn:
@@ -2554,6 +3005,13 @@ def execute_steps(
         out["started_at"] = datetime.fromtimestamp(t0).isoformat(timespec="milliseconds")
 
         try:
+            from server.services.regression_run_context import stamp_run_timing
+
+            stamp_run_timing(out)
+        except Exception:
+            pass
+
+        try:
             from server.services.regression_run_context import take_gestures_since_watermark
 
             step_gestures = take_gestures_since_watermark()
@@ -2578,7 +3036,7 @@ def execute_steps(
             try:
                 from server.services.regression_capture import capture_device_screenshot
 
-                fallback_settle = 900 if step.get("consent_dismiss") else 450
+                fallback_settle = 350 if step.get("consent_dismiss") else 450
                 out["screenshot_after"] = capture_device_screenshot(
                     sn,
                     platform,
@@ -2619,5 +3077,15 @@ def execute_steps(
         if stop_on_failure and not out.get("ok") and kind not in ("verify",):
             SLog.w(TAG, f"Step {i} failed — stop remaining steps")
             break
+
+    if guard_planned_all:
+        try:
+            from server.services.regression_run_context import get_ctx
+
+            ctx = get_ctx()
+            if ctx is not None:
+                ctx["guard_planned_steps"] = guard_planned_all
+        except Exception:
+            pass
 
     return results

@@ -71,6 +71,50 @@ def capture_engine_screenshot(
         return ""
 
 
+def capture_adb_raw_screenshot(
+    sn: str,
+    platform: str = "android",
+    *,
+    run_id: str = "",
+    tag: str = "prep",
+    wake_first: bool = False,
+) -> str:
+    """ADB screencap，不 bootstrap；可选 KEYCODE_WAKEUP 避免纯黑帧。"""
+    if not sn or platform != "android":
+        return ""
+    try:
+        import io
+        import subprocess
+        import time
+
+        from driver.agent.Crawl.device_bootstrap import resolve_mobile_serial
+        from server.services.crawl_persistence import save_screenshot_file
+
+        mobile_sn = resolve_mobile_serial(sn, platform)
+        if wake_first:
+            subprocess.run(
+                ["adb", "-s", mobile_sn, "shell", "input", "keyevent", "224"],
+                capture_output=True,
+                timeout=8,
+            )
+            time.sleep(0.35)
+        proc = subprocess.run(
+            ["adb", "-s", mobile_sn, "exec-out", "screencap", "-p"],
+            capture_output=True,
+            timeout=15,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return ""
+        from PIL import Image
+
+        shot = Image.open(io.BytesIO(proc.stdout))
+        prefix = f"reg_{run_id[:8]}_{tag}" if run_id else f"reg_{tag}"
+        return save_screenshot_file(shot, prefix=prefix) or ""
+    except Exception as e:
+        SLog.w(TAG, f"adb raw capture failed: {e}")
+        return ""
+
+
 def capture_device_screenshot(
     sn: str,
     platform: str = "android",

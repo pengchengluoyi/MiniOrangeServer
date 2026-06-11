@@ -14,6 +14,53 @@ _run_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.Context
 )
 
 
+def format_run_elapsed(ms: int) -> str:
+    """相对本次 run 起点的 HH:MM:SS，供回放侧栏展示。"""
+    s = max(0, int(ms)) // 1000
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def run_elapsed_ms(*, per_case: bool = True) -> int:
+    ctx = _run_ctx.get()
+    if not ctx:
+        return 0
+    t0 = (ctx.get("case_t0") if per_case else None) or ctx.get("run_t0")
+    if not t0:
+        return 0
+    return int((time.time() - float(t0)) * 1000)
+
+
+def stamp_run_timing(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """为手势/步骤写入 run_elapsed_ms / run_elapsed。"""
+    if not entry:
+        return entry
+    ms = run_elapsed_ms()
+    if ms >= 0 and _run_ctx.get():
+        entry["run_elapsed_ms"] = ms
+        entry["run_elapsed"] = format_run_elapsed(ms)
+    return entry
+
+
+def apply_run_timing(entry: Dict[str, Any], ms: int) -> Dict[str, Any]:
+    """写入已知的相对用例起点毫秒（守卫 Detect/Assert 等回放用）。"""
+    if not entry:
+        return entry
+    if ms >= 0 and _run_ctx.get():
+        entry["run_elapsed_ms"] = int(ms)
+        entry["run_elapsed"] = format_run_elapsed(int(ms))
+    return entry
+
+
+def capture_trace_frame(tag: str, *, settle_ms: int = 120) -> str:
+    """守卫 Detect/Assert 等无手势时的截图。"""
+    ctx = _run_ctx.get()
+    if not ctx or not ctx.get("capture"):
+        return ""
+    return _capture(tag, settle_ms=settle_ms, max_attempts=2)
+
+
 def begin_run(
     *,
     run_id: str = "",
@@ -29,8 +76,19 @@ def begin_run(
             "capture": bool(capture_screenshots and run_id and sn),
             "gestures": [],
             "watermark": 0,
+            "run_t0": time.time(),
+            "case_t0": time.time(),
         }
     )
+
+
+def begin_case() -> None:
+    """每条用例单独计时（侧栏时间戳相对本用例起点）。"""
+    ctx = _run_ctx.get()
+    if not ctx:
+        return
+    ctx["case_t0"] = time.time()
+    ctx["watermark"] = len(ctx.get("gestures") or [])
 
 
 def end_run() -> List[Dict[str, Any]]:
@@ -69,9 +127,9 @@ def _default_settle_ms(entry: Dict[str, Any]) -> int:
     phase = (entry.get("phase") or "").lower()
     if kind == "click":
         if phase in ("consent_dismiss", "consent_agree", "permission_dismiss"):
-            return 850
+            return 350
         if label in ("同意", "同意并继续", "仅在使用中允许", "始终允许"):
-            return 850
+            return 350
         return 450
     if kind == "input":
         return 400
@@ -80,7 +138,13 @@ def _default_settle_ms(entry: Dict[str, Any]) -> int:
     return 200
 
 
-def _capture(tag: str, *, settle_ms: int = 0, entry: Optional[Dict[str, Any]] = None) -> str:
+def _capture(
+    tag: str,
+    *,
+    settle_ms: int = 0,
+    entry: Optional[Dict[str, Any]] = None,
+    max_attempts: Optional[int] = None,
+) -> str:
     ctx = _run_ctx.get()
     if not ctx or not ctx.get("capture"):
         return ""
@@ -88,13 +152,26 @@ def _capture(tag: str, *, settle_ms: int = 0, entry: Optional[Dict[str, Any]] = 
         from server.services.regression_capture import capture_device_screenshot
 
         wait_ms = settle_ms or (_default_settle_ms(entry) if entry else 0)
+        phase = ((entry or {}).get("phase") or "").lower()
+        label = ((entry or {}).get("label") or "").strip()
+        fast_overlay = phase in ("consent_dismiss", "consent_agree", "permission_dismiss") or label in (
+            "同意",
+            "同意并继续",
+        )
+        if fast_overlay:
+            wait_ms = min(wait_ms, 350)
+        attempts = (
+            max_attempts
+            if max_attempts is not None
+            else (2 if fast_overlay else (5 if wait_ms >= 600 else 3))
+        )
         return capture_device_screenshot(
             ctx["sn"],
             ctx.get("platform") or "android",
             run_id=ctx["run_id"],
             tag=tag,
             settle_ms=wait_ms,
-            max_attempts=5 if wait_ms >= 600 else 3,
+            max_attempts=attempts,
         )
     except Exception:
         return ""
@@ -140,8 +217,18 @@ def record_gesture(
     tag_base = f"g{gid}_{kind}"
     before = screenshot_before
     after = screenshot_after
+    capture_meta = {"kind": kind, "label": label, "phase": phase}
     if ctx and ctx.get("capture") and not before:
-        before = _capture(f"{tag_base}_before")
+        phase_l = (phase or "").lower()
+        if phase_l in ("consent_dismiss", "consent_agree", "permission_dismiss"):
+            before = _capture(
+                f"{tag_base}_before",
+                settle_ms=120,
+                entry=capture_meta,
+                max_attempts=1,
+            )
+        else:
+            before = _capture(f"{tag_base}_before")
     entry: Dict[str, Any] = {
         "type": "gesture",
         "gesture_id": gid,
@@ -162,6 +249,7 @@ def record_gesture(
     }
     if extra:
         entry.update(extra)
+    stamp_run_timing(entry)
     if ctx:
         gestures: List[Dict[str, Any]] = ctx.setdefault("gestures", [])
         entry["index"] = len(gestures)

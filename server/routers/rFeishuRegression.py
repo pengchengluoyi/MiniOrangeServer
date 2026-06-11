@@ -147,9 +147,9 @@ def run_feishu_regression(body: FeishuRunRequest, db: Session = Depends(get_db))
             case_ids=body.case_ids,
             start_index=body.start_index or 0,
             db=db,
+            async_exec=True,
         )
-        db.commit()
-        return {"code": 200, "data": run_doc}
+        return {"code": 200, "data": run_doc, "msg": "回归任务已启动"}
     except Exception as e:
         SLog.e(TAG, f"run failed app={body.app_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))

@@ -427,6 +427,8 @@ def _tap_target_rect(
 def _action_display_name(kind: str, method: str = "") -> str:
     k = (kind or "").lower()
     m = (method or "").lower()
+    if k == "overlay_guard":
+        return "Guard"
     if k == "click":
         return "Tap"
     if k == "input":
@@ -458,6 +460,29 @@ def _format_action_title(kind: str, method: str, summary: str) -> str:
     if action_name == "Input":
         return s if s.lower().startswith("input") else f"Input - {s}"
     return f"{action_name} - {s}"
+
+
+def business_step_results_ok(results: List[Dict[str, Any]]) -> bool:
+    """以每个业务 index 的最后一次结果为准；忽略 plan_attempt 中间失败与守卫行。"""
+    if not results:
+        return True
+    try:
+        from server.services.overlay_guard_service import is_guard_plan_index
+    except Exception:
+        def is_guard_plan_index(pi: int) -> bool:
+            return int(pi) >= 1000
+
+    last_by_index: Dict[int, Dict[str, Any]] = {}
+    for r in results:
+        idx = int(r.get("index") or 0)
+        if is_guard_plan_index(idx):
+            continue
+        if (r.get("phase") or "").strip() == "overlay_guard":
+            continue
+        last_by_index[idx] = r
+    if not last_by_index:
+        return False
+    return all(bool(r.get("ok")) for r in last_by_index.values())
 
 
 def build_operation_plan_tree(
@@ -501,27 +526,39 @@ def build_operation_plan_tree(
         actions_raw = exec_by_index.get(idx, [])
 
         plan_shot = ""
+        plan_elapsed = ""
         if actions_raw:
             plan_shot = (
                 actions_raw[0].get("screenshot_before")
                 or actions_raw[-1].get("screenshot_after")
                 or ""
             )
+            plan_elapsed = actions_raw[0].get("run_elapsed") or ""
+
+        ps_summary = (ps.get("summary") or ps.get("kind") or "").strip()
+        if ps_summary.startswith("守卫 ·"):
+            plan_title = ps_summary
+        else:
+            plan_title = f"Plan - {ps_summary or '步骤'}"
 
         # 记录 Plan 本身
+        actions_raw = sorted(
+            actions_raw,
+            key=lambda a: int(a.get("run_elapsed_ms") or 0),
+        )
+
         plan_item = {
             "plan_index": idx,
-            "summary": ps.get("summary") or ps.get("kind") or "",
-            "title": f"Plan - {ps.get('summary') or ps.get('kind') or '步骤'}",
+            "summary": ps_summary,
+            "title": plan_title,
             "kind": ps.get("kind"),
             "detail": ps.get("detail") or {},
             "screenshot": plan_shot,
-            "ok": all(a.get("ok", True) for a in actions_raw) if actions_raw else None,
+            "run_elapsed": plan_elapsed,
+            "ok": actions_raw[-1].get("ok") if actions_raw else None,
         }
         plans.append({**plan_item, "actions": []})
-        flat_items.append({"type": "plan", "plan_index": idx})
 
-        # 同一 index 下可能产生多个动作，按时间顺序展平
         for a in actions_raw:
             kind = a.get("kind") or "step"
             method = a.get("method") or ""
@@ -531,16 +568,6 @@ def build_operation_plan_tree(
                 "title": _format_action_title(kind, method, a.get("summary") or kind),
                 "plan_index": idx,
             }
-            flat_items.append(
-                {
-                    "type": "action",
-                    "plan_index": idx,
-                    "index": a.get("index"),
-                    "gesture_index": a.get("gesture_index"),
-                    "gesture_id": a.get("gesture_id"),
-                }
-            )
-            # Plan 内部仍然挂一份 actions，兼容旧结构
             plans[-1]["actions"].append(action_with_meta)
 
     # 兼容：如果大模型没有显式输出 planned_step，而只有 execute_log
@@ -569,11 +596,98 @@ def build_operation_plan_tree(
             flat_items.append({"type": "plan", "plan_index": i})
             flat_items.append({"type": "action", "plan_index": i, "index": entry.get("index", i)})
 
+    if plans:
+        flat_items = _build_flat_items_by_execution_order(plans)
+    elif flat_items:
+        flat_items = _sort_flat_items_chronologically(flat_items, plans)
+
     return {
         "thought": (reply or "").strip(),
         "plans": plans,
         "flat_items": flat_items,
     }
+
+
+def _action_flat_item(plan_index: int, action: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "action",
+        "plan_index": plan_index,
+        "index": action.get("index"),
+        "gesture_index": action.get("gesture_index"),
+        "gesture_id": action.get("gesture_id"),
+        "phase": action.get("phase") or "",
+        "click_attempt": action.get("click_attempt"),
+        "guard_round": action.get("guard_round"),
+    }
+
+
+def _plan_flat_item(plan_index: int, run_elapsed_ms: int) -> Dict[str, Any]:
+    item: Dict[str, Any] = {"type": "plan", "plan_index": plan_index}
+    if run_elapsed_ms >= 0:
+        try:
+            from server.services.regression_run_context import format_run_elapsed
+
+            item["run_elapsed"] = format_run_elapsed(run_elapsed_ms)
+            item["run_elapsed_ms"] = run_elapsed_ms
+        except Exception:
+            pass
+    return item
+
+
+def _build_flat_items_by_execution_order(
+    plans: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """按 run_elapsed_ms 跨 Plan 交错：业务 Plan → 点击 → 守卫 Plan → Tap → 重试业务 Plan。"""
+    try:
+        from server.services.overlay_guard_service import is_guard_plan_index
+    except Exception:
+        def is_guard_plan_index(pi: int) -> bool:
+            return int(pi) >= 1000
+
+    timeline: List[tuple] = []
+    for p in plans:
+        pi = int(p.get("plan_index") or 0)
+        for a in p.get("actions") or []:
+            timeline.append((int(a.get("run_elapsed_ms") or 0), pi, a))
+    timeline.sort(key=lambda t: (t[0], t[1]))
+
+    flat: List[Dict[str, Any]] = []
+    last_was_guard = False
+    emitted_guard_plans: set = set()
+    emitted_business_initial: set = set()
+
+    for _ms, pi, act in timeline:
+        is_guard = act.get("phase") == "overlay_guard" or is_guard_plan_index(pi)
+        if is_guard:
+            if pi not in emitted_guard_plans:
+                flat.append(_plan_flat_item(pi, _ms))
+                emitted_guard_plans.add(pi)
+            flat.append(_action_flat_item(pi, act))
+            last_was_guard = True
+            continue
+
+        biz_pi = int(act.get("index") if act.get("index") is not None else pi)
+        if is_guard_plan_index(biz_pi):
+            biz_pi = int(act.get("guard_before_step") or 0)
+        if last_was_guard:
+            flat.append(_plan_flat_item(biz_pi, _ms))
+        elif biz_pi not in emitted_business_initial:
+            flat.append(_plan_flat_item(biz_pi, _ms))
+            emitted_business_initial.add(biz_pi)
+        flat.append(_action_flat_item(biz_pi, act))
+        last_was_guard = False
+
+    return flat
+
+
+def _sort_flat_items_chronologically(
+    flat_items: List[Dict[str, Any]],
+    plans: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """兼容旧结构：无 plans 时保留已有 flat_items。"""
+    if not plans:
+        return flat_items
+    return _build_flat_items_by_execution_order(plans) or flat_items
 
 
 def _split_expected_fragments(expected_text: str) -> List[str]:
@@ -675,6 +789,13 @@ def build_execute_log(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "action_name": g.get("action_name")
                         or r.get("action_name")
                         or _action_display_name(g_kind, g_method),
+                        "locate_debug": r.get("locate_debug") or g.get("locate_debug"),
+                        "run_elapsed": g.get("run_elapsed") or r.get("run_elapsed"),
+                        "run_elapsed_ms": g.get("run_elapsed_ms") or r.get("run_elapsed_ms"),
+                        "phase": g.get("phase") or r.get("phase") or "",
+                        "guard_round": g.get("guard_round") if g.get("guard_round") is not None else r.get("guard_round"),
+                        "guard_before_step": r.get("guard_before_step"),
+                        "click_attempt": r.get("click_attempt"),
                     }
                 )
             continue
@@ -704,6 +825,13 @@ def build_execute_log(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "current_page_id": r.get("current_page_id") or "",
                 "icon_auto_learned": r.get("icon_auto_learned"),
                 "suggest_icon_library": r.get("suggest_icon_library"),
+                "locate_debug": r.get("locate_debug"),
+                "run_elapsed": r.get("run_elapsed"),
+                "run_elapsed_ms": r.get("run_elapsed_ms"),
+                "phase": r.get("phase") or "",
+                "guard_round": r.get("guard_round"),
+                "guard_before_step": r.get("guard_before_step"),
+                "click_attempt": r.get("click_attempt"),
             }
         )
         if not entries[-1].get("suggest_icon_library"):
@@ -787,6 +915,18 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def persist_run_progress(db: Session, run_doc: Dict[str, Any]) -> None:
+    """执行过程中增量写入，供前端轮询展示进度与回放。"""
+    row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_doc.get("run_id")).first()
+    if not row:
+        return
+    row.status = run_doc.get("status") or "running"
+    row.passed = float(run_doc.get("passed") or 0)
+    row.failed = float(run_doc.get("failed") or 0)
+    row.payload = _json_safe(run_doc)
+    db.commit()
 
 
 def persist_run_pause(db: Session, run_doc: Dict[str, Any]) -> None:

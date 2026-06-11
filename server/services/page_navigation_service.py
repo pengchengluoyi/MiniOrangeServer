@@ -102,6 +102,7 @@ def _clip_tap_label(
     region: Optional[str] = None,
     phase: str = "navigation",
     source: str = "clip_nav",
+    exact_label: bool = False,
 ) -> Dict[str, Any]:
     """PageNavigation 统一点击：CLIP-first（走 copilot _resolve_click_target）。"""
     from server.services.copilot_service import _resolve_click_target
@@ -113,6 +114,7 @@ def _clip_tap_label(
         screen_h,
         label=label,
         icon_targets=icon_targets,
+        exact_label=exact_label,
     )
     if not pos:
         return {
@@ -159,13 +161,21 @@ def _clip_tap_label(
         "label": label,
     }
     gesture["action_name"] = "Tap"
-    settle = 900 if "同意" in (label or "") else 450
+    settle = 500 if phase == "overlay_guard" else (900 if "同意" in (label or "") else 450)
     finish_gesture(
         gesture,
         ok=ok,
         msg=f"Tap「{label}」@({cx},{cy}) [{method}]" if ok else (detail or "点击失败"),
         settle_ms=settle,
     )
+    try:
+        from server.services.copilot_service import pop_locate_debug
+
+        dbg = pop_locate_debug()
+        if dbg:
+            gesture["locate_debug"] = dbg
+    except Exception:
+        pass
     return {
         "ok": ok,
         "method": method or "clip",
@@ -174,6 +184,7 @@ def _clip_tap_label(
         "y": cy,
         "gesture": gesture,
         "target_rect": gesture.get("target_rect"),
+        "locate_debug": gesture.get("locate_debug"),
     }
 
 
@@ -890,13 +901,20 @@ def resolve_consent_agree_tap(
 ) -> Optional[Tuple[int, int, str]]:
     """
     解析 consent 弹窗「同意」按钮坐标。
-    按文本贴合度在「同意/不同意/同意并继续」等候选中选最高分，不依赖左右位置。
+    优先 hierarchy/OCR 成对按钮（右侧同意），再走文本相似度；绝不误点「不同意」。
     返回 (x, y, method)。
     """
     from server.services.copilot_service import (
         _label_similarity,
         _pick_best_text_clickable,
     )
+
+    pair = _hierarchy_find_consent_agree_button(engine, screen_w, screen_h)
+    if pair:
+        return pair[0], pair[1], "hierarchy_pair"
+    pair = _ocr_find_consent_agree_button(engine, screen_w, screen_h)
+    if pair:
+        return pair[0], pair[1], "ocr_pair"
 
     legal_boxes = _ocr_legal_link_boxes(engine, screen_h)
     query = "同意"
@@ -940,7 +958,7 @@ def resolve_consent_agree_tap(
                 query,
                 pool,
                 screen_h=screen_h,
-                bottom_band_only=True,
+                consent_modal=True,
                 max_label_len=12,
             )
             if pick:
@@ -959,7 +977,7 @@ def resolve_consent_agree_tap(
                     query,
                     ocr_pool,
                     screen_h=screen_h,
-                    bottom_band_only=True,
+                    consent_modal=True,
                     max_label_len=12,
                 )
                 if pick:
@@ -976,7 +994,7 @@ def resolve_consent_agree_tap(
             if d:
                 best_u2 = None
                 best_score = 0.0
-                for text in ("同意", "同意并继续", "不同意"):
+                for text in ("同意", "同意并继续"):
                     for factory in (
                         lambda t=text: d(text=t),
                         lambda t=text: d(textContains=t),
@@ -1229,6 +1247,16 @@ SYSTEM_ALLOW_LABELS = (
 )
 
 
+def is_overlay_dismiss_target_label(label: str) -> bool:
+    """守卫处置目标（同意 / 系统允许）：阻塞屏上仍需定位点击。"""
+    t = (label or "").strip()
+    if not t:
+        return False
+    if t in ("同意", "同意并继续", "接受", "我知道了", "继续"):
+        return True
+    return any(t == a or a in t for a in SYSTEM_ALLOW_LABELS)
+
+
 def _screen_looks_like_launcher_home(blob: str) -> bool:
     if not blob:
         return False
@@ -1442,14 +1470,119 @@ def _tap_system_permission_allow(
     return gesture
 
 
+def _system_permission_dialog_gone(engine) -> bool:
+    try:
+        ocr = _collect_ocr_text_only(engine)
+        return not _screen_is_system_permission_dialog(ocr, engine=engine)
+    except Exception:
+        return False
+
+
+def tap_system_permission_on_engine(
+    engine,
+    screen_w: int,
+    screen_h: int,
+    *,
+    icon_targets: Optional[List[Dict[str, Any]]] = None,
+    phase: str = "overlay_guard",
+    source: str = "overlay_guard",
+) -> Dict[str, Any]:
+    """系统权限弹窗：hierarchy → OCR → 多通道，单次 Tap（守卫用）。"""
+    from script.sleep import mSleep
+
+    locate_debug: Optional[Dict[str, Any]] = None
+    gestures: List[Dict[str, Any]] = []
+
+    def _try_tap(cx: int, cy: int, label: str, method: str) -> bool:
+        nonlocal locate_debug
+        gesture = _tap_system_permission_allow(
+            engine, screen_w, screen_h, cx, cy, label, method
+        )
+        gestures.append(gesture)
+        mSleep(0.5)
+        return bool(gesture.get("ok")) and _system_permission_dialog_gone(engine)
+
+    hier = _hierarchy_find_system_allow_button(engine, screen_h)
+    if hier:
+        cx, cy, label = hier
+        if _try_tap(cx, cy, label, "hierarchy_permission"):
+            g = gestures[-1]
+            return {
+                "ok": True,
+                "method": "hierarchy_permission",
+                "x": cx,
+                "y": cy,
+                "msg": f"Tap「{label}」@({cx},{cy}) [hierarchy_permission]",
+                "gesture": g,
+                "gestures": gestures,
+                "target_rect": g.get("target_rect"),
+                "locate_debug": locate_debug,
+            }
+
+    ocr_hit = _ocr_find_system_allow_button(engine)
+    if ocr_hit:
+        cx, cy, label = ocr_hit
+        if _try_tap(cx, cy, label, "ocr_permission"):
+            g = gestures[-1]
+            return {
+                "ok": True,
+                "method": "ocr_permission",
+                "x": cx,
+                "y": cy,
+                "msg": f"Tap「{label}」@({cx},{cy}) [ocr_permission]",
+                "gesture": g,
+                "gestures": gestures,
+                "target_rect": g.get("target_rect"),
+                "locate_debug": locate_debug,
+            }
+
+    for perm_label in ("仅在使用中允许", "始终允许", "允许"):
+        try:
+            from server.services.locate.resolver import resolve_locate_target
+
+            loc = resolve_locate_target(
+                engine,
+                screen_w,
+                screen_h,
+                label=perm_label,
+                icon_targets=icon_targets,
+            )
+            locate_debug = loc.debug
+            if loc.position:
+                cx, cy = int(loc.position[0]), int(loc.position[1])
+                if _try_tap(cx, cy, perm_label, loc.method or "multichannel"):
+                    g = gestures[-1]
+                    return {
+                        "ok": True,
+                        "method": loc.method or "multichannel",
+                        "x": cx,
+                        "y": cy,
+                        "msg": loc.detail or f"Tap「{perm_label}」",
+                        "gesture": g,
+                        "gestures": gestures,
+                        "target_rect": loc.target_rect,
+                        "locate_debug": locate_debug,
+                    }
+        except Exception as e:
+            SLog.w(TAG, f"permission multichannel {perm_label!r} failed: {e}")
+
+    last_g = gestures[-1] if gestures else None
+    return {
+        "ok": False,
+        "method": "permission_allow",
+        "msg": "系统权限弹窗未命中允许按钮",
+        "gesture": last_g,
+        "gestures": gestures,
+        "locate_debug": locate_debug,
+    }
+
+
 def dismiss_system_permission_dialog(
     engine,
     screen_w: int,
     screen_h: int,
 ) -> Optional[Dict[str, Any]]:
     """关闭 Android 系统权限弹窗，避免挡住应用内操作。"""
-    from script.sleep import mSleep
-
     ocr = _collect_ocr_text_only(engine)
     if not _screen_is_system_permission_dialog(ocr, engine=engine):
         return None
@@ -1458,134 +1591,19 @@ def dismiss_system_permission_dialog(
         f"system permission dialog detected ocr_snip={(ocr or '')[:160]!r}",
     )
 
-    for perm_label in ("仅在使用中允许", "始终允许", "允许"):
-        clip_hit = _clip_tap_label(
-            engine,
-            screen_w,
-            screen_h,
-            perm_label,
-            phase="permission_dismiss",
-            source="clip_permission",
-        )
-        if not clip_hit.get("ok"):
-            continue
-        mSleep(0.8)
-        if not _screen_is_system_permission_dialog(
-            _collect_ocr_text_only(engine), engine=engine
-        ):
-            SLog.i(TAG, f"system permission dismissed clip {perm_label!r}")
-            return {
-                "ok": True,
-                "method": clip_hit.get("method") or "clip_permission",
-                "gesture": clip_hit.get("gesture"),
-                "x": clip_hit.get("x"),
-                "y": clip_hit.get("y"),
-            }
+    hit = tap_system_permission_on_engine(
+        engine,
+        screen_w,
+        screen_h,
+        phase="permission_dismiss",
+        source="system_permission",
+    )
+    if hit.get("ok"):
+        SLog.i(TAG, f"system permission dismissed method={hit.get('method')}")
+        return hit
 
-    d = engine._ensure_u2() if hasattr(engine, "_ensure_u2") else None
-    if d:
-        for text in SYSTEM_ALLOW_LABELS:
-            for factory in (
-                lambda t=text: d(text=t),
-                lambda t=text: d(textContains=t),
-                lambda t=text: d(description=t),
-                lambda t=text: d(descriptionContains=t),
-            ):
-                try:
-                    sel = factory()
-                    if not sel.exists(timeout=0.5):
-                        continue
-                    info = sel.info or {}
-                    bounds = info.get("bounds") or {}
-                    cx = (int(bounds.get("left", 0)) + int(bounds.get("right", 0))) // 2
-                    cy = (int(bounds.get("top", 0)) + int(bounds.get("bottom", 0))) // 2
-                    node_text = (info.get("text") or info.get("contentDescription") or text).strip()
-                    if "拒绝" in node_text:
-                        continue
-                    from server.services.regression_run_context import (
-                        finish_gesture,
-                        record_gesture,
-                    )
-
-                    label = node_text or text
-                    gesture = record_gesture(
-                        "click",
-                        f"Tap · 系统权限「{label}」",
-                        method="u2_permission",
-                        x=cx,
-                        y=cy,
-                        label=label,
-                        source="system_permission",
-                        phase="permission_dismiss",
-                        extra={"action_name": "Tap"},
-                    )
-                    ok = False
-                    try:
-                        sel.click()
-                        ok = True
-                    except Exception as e:
-                        SLog.w(TAG, f"u2 permission sel.click failed: {e}")
-                    mSleep(0.8)
-                    gone = not _screen_is_system_permission_dialog(
-                        _collect_ocr_text_only(engine), engine=engine
-                    )
-                    ok = ok and gone
-                    finish_gesture(
-                        gesture,
-                        ok=ok,
-                        msg=f"允许权限 @({cx},{cy}) [u2_permission]"
-                        if ok
-                        else "u2 点击后权限弹窗仍在",
-                    )
-                    half = 44
-                    gesture["screen_size"] = {"w": screen_w, "h": screen_h}
-                    gesture["target_rect"] = {
-                        "left": max(0, cx - half),
-                        "top": max(0, cy - half),
-                        "width": half * 2,
-                        "height": half * 2,
-                        "center": [cx, cy],
-                        "label": label,
-                    }
-                    gesture["action_name"] = "Tap"
-                    if ok:
-                        SLog.i(TAG, f"system permission dismissed u2 {label!r}")
-                        return {
-                            "ok": True,
-                            "method": "u2_permission",
-                            "gesture": gesture,
-                            "x": cx,
-                            "y": cy,
-                        }
-                except Exception:
-                    continue
-
-    hit = _hierarchy_find_system_allow_button(engine, screen_h)
-    if hit:
-        cx, cy, label = hit
-        gesture = _tap_system_permission_allow(
-            engine, screen_w, screen_h, cx, cy, label, "hierarchy_permission"
-        )
-        if not _screen_is_system_permission_dialog(
-            _collect_ocr_text_only(engine), engine=engine
-        ):
-            SLog.i(TAG, f"system permission dismissed hierarchy {label!r}")
-            return {"ok": True, "method": "hierarchy_permission", "gesture": gesture, "x": cx, "y": cy}
-
-    ocr_hit = _ocr_find_system_allow_button(engine)
-    if ocr_hit:
-        cx, cy, label = ocr_hit
-        gesture = _tap_system_permission_allow(
-            engine, screen_w, screen_h, cx, cy, label, "ocr_permission"
-        )
-        if not _screen_is_system_permission_dialog(
-            _collect_ocr_text_only(engine), engine=engine
-        ):
-            SLog.i(TAG, f"system permission dismissed ocr {label!r} @({cx},{cy})")
-            return {"ok": True, "method": "ocr_permission", "gesture": gesture, "x": cx, "y": cy}
-
-    SLog.w(TAG, "system permission dialog visible but allow button not clicked")
-    return {"ok": False, "method": "permission_allow", "msg": "系统权限弹窗未能自动允许"}
+    SLog.w(TAG, "system permission dialog visible but allow tap failed")
+    return {"ok": False, "method": "permission_allow", "msg": hit.get("msg") or "系统权限弹窗未命中允许按钮"}
 
 
 def dismiss_blocking_on_engine(
@@ -1798,88 +1816,187 @@ def prepare_login_page(
     screen_w: int,
     screen_h: int,
 ) -> Optional[Dict[str, Any]]:
-    """登录页：勾选底部用户协议后再点一键登录。"""
-    from server.services.regression_run_context import finish_gesture, record_gesture
-
-    from script.sleep import mSleep
-
-    dismiss_system_permission_dialog(engine, screen_w, screen_h)
-    ocr = _collect_ocr_text_only(engine)
-    if not _screen_is_login_home(ocr):
-        return None
-    if not any(m in ocr for m in ("已仔细阅读", "已阅读", "阅读并同意", "用户协议")):
-        return None
-
-    hit = _login_checkbox_target(engine, screen_w, screen_h)
-    if not hit:
-        return None
-    cx, cy, method = hit
-    gesture = record_gesture(
-        "click",
-        "Tap · 勾选登录页用户协议",
-        method=method,
-        x=cx,
-        y=cy,
-        label="协议勾选",
-        source="login_prepare",
-        phase="login_agreement",
-        extra={"action_name": "Tap"},
-    )
-    clicked = False
-    try:
-        if hasattr(engine, "click"):
-            clicked = bool(
-                engine.click(None, position=(cx, cy), label="协议勾选", skip_label_lookup=True)
-            )
-        if not clicked and hasattr(engine, "_ensure_u2"):
-            d = engine._ensure_u2()
-            if d:
-                d.click(cx, cy)
-                clicked = True
-    except Exception as e:
-        SLog.w(TAG, f"login checkbox click failed: {e}")
-    mSleep(0.4)
-    checked = clicked and _login_checkbox_checked(engine)
-    if clicked and not checked:
-        retry = _login_checkbox_target(engine, screen_w, screen_h)
-        if retry:
-            rcx, rcy, rmethod = retry
-            try:
-                if hasattr(engine, "click"):
-                    clicked = bool(
-                        engine.click(
-                            None,
-                            position=(rcx, rcy),
-                            label="协议勾选",
-                            skip_label_lookup=True,
-                        )
-                    )
-                if not clicked and hasattr(engine, "_ensure_u2"):
-                    d = engine._ensure_u2()
-                    if d:
-                        d.click(rcx, rcy)
-                        clicked = True
-                if clicked:
-                    cx, cy, method = rcx, rcy, rmethod
-                    gesture["x"] = cx
-                    gesture["y"] = cy
-                    gesture["method"] = method
-            except Exception as e:
-                SLog.w(TAG, f"login checkbox retry click failed: {e}")
-            mSleep(0.35)
-            checked = clicked and _login_checkbox_checked(engine)
-
-    finish_gesture(
-        gesture,
-        ok=checked,
-        msg=f"勾选协议 @({cx},{cy})" if checked else "协议勾选未生效",
-    )
-    gesture["screen_size"] = {"w": screen_w, "h": screen_h}
-    gesture["target_rect"] = _gesture_rect_for_tap(cx, cy, "协议勾选", half=22)
-    gesture["action_name"] = "Tap"
-    if checked:
-        return {"ok": True, "method": method, "x": cx, "y": cy, "gesture": gesture}
+    """已废弃：协议勾选由用例步骤显式执行，不再在登录点击前自动勾选。"""
     return None
+
+
+def _consent_multichannel_rejects_winner(loc) -> bool:
+    """多通道命中「不同意」或无效坐标时退回几何定位。"""
+    if not loc or not getattr(loc, "position", None):
+        return True
+    cx, cy = int(loc.position[0]), int(loc.position[1])
+    if cx <= 0 or cy <= 0:
+        return True
+    rect = getattr(loc, "target_rect", None) or {}
+    lbl = (rect.get("label") or "").strip()
+    if "不同意" in lbl:
+        return True
+    detail = (getattr(loc, "detail", None) or "").strip()
+    if "不同意" in detail:
+        return True
+    return False
+
+
+def tap_consent_agree_on_engine(
+    engine,
+    screen_w: int,
+    screen_h: int,
+    *,
+    icon_targets: Optional[List[Dict[str, Any]]] = None,
+    phase: str = "consent_dismiss",
+    source: str = "consent_agree",
+    exact_label: bool = True,
+    single_tap: bool = False,
+) -> Dict[str, Any]:
+    """在当前 engine 上安全点击 consent「同意」：多通道仲裁优先，几何/OCR 兜底，始终附带 locate_debug。"""
+    if phase == "overlay_guard":
+        single_tap = True
+    gestures: List[Dict[str, Any]] = []
+    clicked = False
+    method = "none"
+    cx, cy = 0, 0
+    locate_debug: Optional[Dict[str, Any]] = None
+    geometry_tap: Optional[Tuple[int, int, str]] = None
+
+    def _tap_consent_at(
+        tap: Tuple[int, int, str],
+        *,
+        debug: Optional[Dict[str, Any]] = None,
+        rect_override: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        nonlocal cx, cy, method, clicked
+        cx, cy, method = tap
+        from server.services.regression_run_context import finish_gesture, record_gesture
+
+        gesture = record_gesture(
+            "click",
+            "Tap · 同意",
+            method=method or "geometry_consent",
+            x=cx,
+            y=cy,
+            label="同意",
+            source=source,
+            phase=phase,
+            extra={"action_name": "Tap"},
+        )
+        if debug:
+            gesture["locate_debug"] = debug
+        coord_ok = False
+        try:
+            if hasattr(engine, "click"):
+                coord_ok = bool(
+                    engine.click(
+                        None,
+                        position=(cx, cy),
+                        label="同意",
+                        skip_label_lookup=True,
+                        exact_label=exact_label,
+                        consent_dismiss=True,
+                    )
+                )
+        except Exception as e:
+            SLog.w(TAG, f"consent geometry tap failed: {e}")
+        half = 44
+        gesture["screen_size"] = {"w": screen_w, "h": screen_h}
+        gesture["target_rect"] = rect_override or {
+            "left": max(0, cx - half),
+            "top": max(0, cy - half),
+            "width": half * 2,
+            "height": half * 2,
+            "center": [cx, cy],
+            "label": "同意",
+        }
+        effective = _consent_dismiss_succeeded(engine, tap_ok=coord_ok)
+        tap_ok = effective if not single_tap else coord_ok
+        finish_gesture(
+            gesture,
+            ok=tap_ok,
+            msg=f"Tap「同意」@({cx},{cy}) [{method}]",
+            settle_ms=500 if single_tap else (700 if phase == "overlay_guard" else 900),
+        )
+        gestures.append(gesture)
+        return tap_ok
+
+    try:
+        from server.services.locate.resolver import resolve_locate_target
+
+        loc = resolve_locate_target(
+            engine,
+            screen_w,
+            screen_h,
+            label="同意",
+            icon_targets=icon_targets,
+        )
+        locate_debug = loc.debug
+        if loc.position and not _consent_multichannel_rejects_winner(loc):
+            mc_method = loc.method or "multichannel"
+            mc_rect = loc.target_rect
+            clicked = _tap_consent_at(
+                (int(loc.position[0]), int(loc.position[1]), mc_method),
+                debug=locate_debug,
+                rect_override=mc_rect,
+            )
+    except Exception as e:
+        SLog.w(TAG, f"consent multichannel probe failed: {e}")
+
+    if not clicked and not single_tap:
+        geometry_tap = resolve_consent_agree_tap(engine, screen_w, screen_h)
+        if geometry_tap:
+            clicked = _tap_consent_at(geometry_tap, debug=locate_debug)
+
+    if not clicked and not single_tap:
+        clip_hit = _clip_tap_label(
+            engine,
+            screen_w,
+            screen_h,
+            "同意",
+            icon_targets=icon_targets,
+            phase=phase,
+            source=source,
+            exact_label=exact_label,
+        )
+        locate_debug = clip_hit.get("locate_debug")
+        if clip_hit.get("gesture"):
+            gestures.append(clip_hit["gesture"])
+        if clip_hit.get("ok"):
+            method = clip_hit.get("method") or "clip"
+            cx, cy = int(clip_hit.get("x") or 0), int(clip_hit.get("y") or 0)
+            if _consent_dismiss_succeeded(engine, tap_ok=True):
+                clicked = True
+            else:
+                SLog.w(TAG, "consent dialog still up after clip fallback")
+
+    if not clicked and _consent_dialog_gone(engine):
+        SLog.i(TAG, "consent dialog gone (screen advanced); treat as success")
+        clicked = True
+        if not method or method == "none":
+            method = "screen_advanced"
+
+    if clicked and (cx <= 0 or cy <= 0) and method != "screen_advanced":
+        SLog.w(TAG, "consent agree invalid tap coords; treat as failure")
+        clicked = False
+
+    last_rect = gestures[-1].get("target_rect") if gestures else None
+    last_gesture = gestures[-1] if gestures else None
+    return {
+        "ok": clicked,
+        "method": method,
+        "x": cx,
+        "y": cy,
+        "msg": (
+            f"Tap「同意」@({cx},{cy}) [{method}]"
+            if clicked
+            else (
+                "无法安全定位 consent「同意」按钮（请检查弹窗是否可见）"
+                if not geometry_tap
+                else f"consent「同意」未生效 @({cx},{cy}) [{method}]"
+            )
+        ),
+        "gesture": last_gesture,
+        "gestures": gestures,
+        "target_rect": last_rect,
+        "locate_debug": locate_debug,
+    }
 
 
 def run_consent_agree_tap(
@@ -1888,13 +2005,11 @@ def run_consent_agree_tap(
     *,
     icon_targets: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """安全点击 consent「同意」：CLIP-first，绝不点正文《用户协议》链接。"""
+    """安全点击 consent「同意」：几何/OCR 优先，CLIP 兜底。"""
     gestures: List[Dict[str, Any]] = []
     try:
         import builtins
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-
-        from script.sleep import mSleep
 
         builtins.TARGET_DEVICE_SN = sn
         engine, (screen_w, screen_h) = bootstrap_mobile_engine(sn, platform)
@@ -1910,94 +2025,19 @@ def run_consent_agree_tap(
                 "method": "skip_phone_login",
                 "gestures": gestures,
             }
-        clicked = False
-        method = "none"
-        cx, cy = 0, 0
 
-        def _tap_consent_at(tap: Tuple[int, int, str]) -> bool:
-            nonlocal cx, cy, method, clicked
-            cx, cy, method = tap
-            from server.services.regression_run_context import finish_gesture, record_gesture
-
-            gesture = record_gesture(
-                "click",
-                "Tap · 同意",
-                method=method or "geometry_consent",
-                x=cx,
-                y=cy,
-                label="同意",
-                source="geometry_consent",
-                phase="consent_dismiss",
-                extra={"action_name": "Tap"},
-            )
-            coord_ok = False
-            try:
-                if hasattr(engine, "click"):
-                    coord_ok = bool(
-                        engine.click(
-                            None,
-                            position=(cx, cy),
-                            label="同意",
-                            skip_label_lookup=True,
-                            exact_label=True,
-                            consent_dismiss=True,
-                        )
-                    )
-            except Exception as e:
-                SLog.w(TAG, f"consent geometry tap failed: {e}")
-            half = 44
-            gesture["screen_size"] = {"w": screen_w, "h": screen_h}
-            gesture["target_rect"] = {
-                "left": max(0, cx - half),
-                "top": max(0, cy - half),
-                "width": half * 2,
-                "height": half * 2,
-                "center": [cx, cy],
-                "label": "同意",
-            }
-            effective = _consent_dismiss_succeeded(engine, tap_ok=coord_ok)
-            finish_gesture(
-                gesture,
-                ok=effective,
-                msg=f"Tap「同意」@({cx},{cy}) [{method}]",
-                settle_ms=900,
-            )
-            gestures.append(gesture)
-            return effective
-
-        tap = resolve_consent_agree_tap(engine, screen_w, screen_h)
-        if tap:
-            clicked = _tap_consent_at(tap)
-
-        if not clicked:
-            clip_hit = _clip_tap_label(
-                engine,
-                screen_w,
-                screen_h,
-                "同意",
-                icon_targets=icon_targets,
-                phase="consent_dismiss",
-                source="clip_consent",
-            )
-            if clip_hit.get("gesture"):
-                gestures.append(clip_hit["gesture"])
-            if clip_hit.get("ok"):
-                method = clip_hit.get("method") or "clip"
-                cx, cy = int(clip_hit.get("x") or 0), int(clip_hit.get("y") or 0)
-                if _consent_dismiss_succeeded(engine, tap_ok=True):
-                    clicked = True
-                else:
-                    SLog.w(TAG, "consent dialog still up after clip fallback")
-
-        if not clicked and _consent_dialog_gone(engine):
-            SLog.i(TAG, "consent dialog gone (screen advanced); treat as success")
-            clicked = True
-            if not method or method == "none":
-                method = "screen_advanced"
-
-        if clicked and (cx <= 0 or cy <= 0) and method != "screen_advanced":
-            SLog.w(TAG, "consent agree invalid tap coords; treat as failure")
-            clicked = False
+        hit = tap_consent_agree_on_engine(
+            engine,
+            screen_w,
+            screen_h,
+            icon_targets=icon_targets,
+            phase="consent_dismiss",
+            source="geometry_consent",
+        )
+        gestures = list(hit.get("gestures") or [])
+        clicked = bool(hit.get("ok"))
+        method = hit.get("method") or "none"
+        cx, cy = int(hit.get("x") or 0), int(hit.get("y") or 0)
 
         if clicked:
             try:
@@ -2009,7 +2049,6 @@ def run_consent_agree_tap(
                 SLog.w(TAG, f"consent follow-up permission clear failed: {e}")
 
         SLog.i(TAG, f"consent agree tap ({cx},{cy}) method={method} ok={clicked}")
-        last_rect = (gestures[-1].get("target_rect") if gestures else None)
         payload = {
             "method": method,
             "x": cx,
@@ -2018,21 +2057,11 @@ def run_consent_agree_tap(
             "target_label": "同意",
             "action_name": "Tap",
             "screen_size": {"w": screen_w, "h": screen_h},
-            "target_rect": last_rect,
+            "target_rect": hit.get("target_rect"),
         }
         if not clicked:
-            return {
-                **payload,
-                "ok": False,
-                "msg": "无法安全定位 consent「同意」按钮（请检查弹窗是否可见）"
-                if not tap
-                else f"consent「同意」未生效 @({cx},{cy}) [{method}]",
-            }
-        return {
-            **payload,
-            "ok": True,
-            "msg": f"Tap「同意」@({cx},{cy}) [{method}]",
-        }
+            return {**payload, "ok": False, "msg": hit.get("msg") or "consent 点击失败"}
+        return {**payload, "ok": True, "msg": hit.get("msg") or f"Tap「同意」@({cx},{cy})"}
     except Exception as e:
         SLog.w(TAG, f"consent agree tap failed: {e}")
         return {"ok": False, "msg": str(e), "method": "consent_agree", "gestures": gestures}
@@ -2045,9 +2074,9 @@ def _consent_agree_step(
 ) -> Dict[str, Any]:
     return {
         "kind": "click",
-        "consent_dismiss": True,
         "label": "同意",
         "summary": "Tap · 同意",
+        "exact_label": True,
     }
 
 
@@ -2572,9 +2601,12 @@ def ensure_page_ready_before_action(
     try:
         from server.services.regression_run_context import get_ctx
 
-        in_regression = bool(get_ctx() and get_ctx().get("run_id"))
+        gctx = get_ctx()
+        in_regression = bool(gctx and gctx.get("run_id"))
     except Exception:
         pass
+    if run_id and not in_regression:
+        in_regression = True
 
     steps = _recovery_steps_for_screen(
         screen_text,
@@ -2617,6 +2649,29 @@ def ensure_page_ready_before_action(
             "current_page_before": page_before,
             "screen_text": screen_text[:500],
             "screen_state": state,
+        }
+
+    # 回归执行：阻塞弹窗由 Plan 内 Overlay Guard 逐步处置，不在此预执行固定点击序列
+    if in_regression:
+        page_before = identify_page_for_trace(
+            app_id,
+            engine,
+            session=session,
+            frame_count=1,
+            screen_text=screen_text,
+            sn=sn,
+            platform=platform,
+            run_id=run_id,
+            tag="pre_action_before",
+        )
+        return {
+            "attempted": False,
+            "overlay_guard_delegated": True,
+            "reason": "阻塞弹窗由 Overlay Guard 按当前屏逐步处置",
+            "current_page_before": page_before,
+            "screen_text": screen_text[:500],
+            "screen_state": state,
+            "planned_recovery_steps": steps,
         }
 
     page_before = identify_page_for_trace(
@@ -2684,6 +2739,8 @@ def try_dismiss_blocking_overlay(
 ) -> Optional[Dict[str, Any]]:
     """操作失败时尝试关闭协议/弹层，便于重试点击。"""
     if not app_id or not sn:
+        return None
+    if run_id:
         return None
     import builtins
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine

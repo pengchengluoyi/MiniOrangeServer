@@ -1,0 +1,128 @@
+# !/usr/bin/env python
+# -*-coding:utf-8 -*-
+"""
+CLIP / OCR 分路查询表（一期：造好物登录链路 curated；二期：resolver 直接消费 ClipQueryPlan）。
+
+设计：
+- clip_query / clip_aliases：视觉语义，供 CLIP 通道与图标库 embedding
+- ocr_queries：屏上文字匹配，供 OCR / Hierarchy 文本通道
+- 不按业务写专用定位器；新控件靠表项 + 图标库 aliases 扩展
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class ClipQueryPlan:
+    label_key: str
+    clip_query: str
+    clip_aliases: Tuple[str, ...] = ()
+    ocr_queries: Tuple[str, ...] = ()
+    region: Optional[str] = None
+    icon_row: bool = False
+
+
+def _plan(
+    label_key: str,
+    clip_query: str,
+    *,
+    clip_aliases: Optional[List[str]] = None,
+    ocr_queries: Optional[List[str]] = None,
+    region: Optional[str] = None,
+    icon_row: bool = False,
+) -> ClipQueryPlan:
+    return ClipQueryPlan(
+        label_key=label_key,
+        clip_query=clip_query,
+        clip_aliases=tuple(clip_aliases or ()),
+        ocr_queries=tuple(ocr_queries or ()),
+        region=region,
+        icon_row=icon_row,
+    )
+
+
+# 造好物 com.mathmagic.zaohaowu 登录链路（一期）
+ZAOHAOWU_LOGIN_CHAIN: Dict[str, ClipQueryPlan] = {
+    "consent_agree": _plan(
+        "同意",
+        "同意",
+        clip_aliases=["agree button", "同意按钮", "确认同意"],
+        ocr_queries=["同意", "确认", "接受"],
+        region="full",
+    ),
+    "system_permission_while_using": _plan(
+        "仅在使用中允许",
+        "仅在使用中允许",
+        clip_aliases=["while using the app", "allow while using", "使用时允许"],
+        ocr_queries=["仅在使用中允许", "使用时允许", "仅使用期间"],
+        region="full",
+    ),
+    "system_permission_always": _plan(
+        "始终允许",
+        "始终允许",
+        clip_aliases=["always allow", "allow always"],
+        ocr_queries=["始终允许", "一律允许"],
+        region="full",
+    ),
+    "agreement_checkbox": _plan(
+        "底部协议勾选框",
+        "empty checkbox",
+        clip_aliases=[
+            "round checkbox",
+            "unchecked checkbox",
+            "agreement checkbox bottom",
+            "small circle checkbox",
+        ],
+        ocr_queries=["协议", "勾选", "用户协议", "隐私政策"],
+        region="bottom",
+    ),
+    "one_click_login": _plan(
+        "本机号码一键登录",
+        "本机号码一键登录",
+        clip_aliases=[
+            "一键登录",
+            "one click login button",
+            "本机号码",
+            "登录按钮",
+            "手机号一键登录",
+        ],
+        ocr_queries=["本机号码", "一键登录", "手机号"],
+        region="full",
+    ),
+}
+
+_LABEL_MATCHERS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"勾选.*协议|协议.*勾选|底部.*勾选", re.I), "agreement_checkbox"),
+    (re.compile(r"^同意$|点击.*同意|点.*同意", re.I), "consent_agree"),
+    (re.compile(r"仅在使用中允许|使用时允许", re.I), "system_permission_while_using"),
+    (re.compile(r"始终允许|一律允许", re.I), "system_permission_always"),
+    (re.compile(r"一键登录|本机号码", re.I), "one_click_login"),
+]
+
+
+def lookup_clip_query_plan(label: str) -> Optional[ClipQueryPlan]:
+    """按自然语言 label 匹配一期 query 表；未命中返回 None（走通用 _clip_search_params）。"""
+    raw = (label or "").strip()
+    if not raw:
+        return None
+    for pat, key in _LABEL_MATCHERS:
+        if pat.search(raw):
+            return ZAOHAOWU_LOGIN_CHAIN.get(key)
+    return None
+
+
+def clip_params_from_plan(plan: ClipQueryPlan, raw_label: str) -> Tuple[str, List[str], Optional[str]]:
+    """供 _clip_search_params / resolver 使用的 (query, aliases, region)。"""
+    aliases = list(plan.clip_aliases)
+    if raw_label and raw_label not in aliases and raw_label != plan.clip_query:
+        aliases.append(raw_label)
+    return plan.clip_query, list(dict.fromkeys(aliases)), plan.region
+
+
+def ocr_query_from_plan(plan: ClipQueryPlan, fallback: str = "") -> str:
+    if plan.ocr_queries:
+        return plan.ocr_queries[0]
+    return fallback
