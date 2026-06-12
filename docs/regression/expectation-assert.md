@@ -24,9 +24,44 @@
 2. 检查最终业务行是否 `ok=False`（如 `stop_on_failure` 后无成功行）
 3. 检查复合指令多 index 是否有一个失败
 
+## 用例文本 LLM 解析（统一入口）
+
+模块：`server/services/case_text_semantic_service.py`
+
+| 飞书列 | 函数 | LLM 做什么 |
+|--------|------|------------|
+| **前置条件** | `parse_precondition_items` | 拆条 + 分类 `kind` / `phase`（清缓存、SIM、已登录…） |
+| **测试步骤** | `parse_numbered_field(..., step)` | 按编号拆步骤，保留完整可执行语义 |
+| **测试步骤（执行）** | `normalize_step_command` | 单条步骤 → Copilot 指令（补全点击/滑动等动词） |
+| **预期效果（列）** | `parse_numbered_field(..., expected)` | 与步骤编号对齐的预期条目 |
+| **预期效果（校验）** | `parse_expectation_claims` | 单条预期 → 原子断言（OCR/图谱校验） |
+
+开关（任一关闭则全链路规则回退）：
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `CASE_TEXT_PARSE_LLM` | 继承 `EXPECTATION_PARSE_LLM` | 总开关，优先于后者 |
+| `EXPECTATION_PARSE_LLM` | `1` | 预期原子断言是否走 LLM |
+| `EXPECTATION_SPLIT_COMMA` | 关 | 规则模式下预期是否在逗号处切分 |
+
+需配置：`LLM_API_KEY` + `LLM_API_BASE`（可选 `LLM_MODEL`）。
+
+飞书同步时步骤/预期列即走 LLM；执行时前置条件、步骤规范化、预期校验共用同一套配置。
+
+## 预期拆解（LLM + 规则）
+
+一条「预期 N」先经 `parse_expectation_claims` 拆成原子断言，再逐条 `_check_expected`：
+
+| 方式 | 说明 |
+|------|------|
+| **LLM** | 理解并列/从属，避免在逗号处误拆 |
+| **规则回退** | 仅在 `；;、` 等处拆分，且两侧都含断言关键词；**默认不按逗号切** |
+
+操作规划（`copilot_service.plan_message`）仍是 regex + `copilot_semantic` Tab 展开；**用例列解析**与 **预期原子断言** 走 `case_text_semantic_service` / `expectation_semantic_service`。
+
 ## 校验流水线
 
-`_verify_step_expected` → `_check_expected`：
+`_verify_step_expected` → `parse_expectation_texts` → `_check_expected`（每条 claim）：
 
 1. `business_step_results_ok` — 不通过则短路，附当前页图谱信息
 2. `evaluate_dynamic_expectation` — 文案/数量/导航类

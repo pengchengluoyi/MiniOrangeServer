@@ -8,25 +8,24 @@
 |---|----------------|---------------|
 | 适用范围 | 主要登录页 | **任意页面** |
 | Y 范围 | 固定 66%–88% 屏高 | **全屏**聚类 |
-| 触发 | `infer_region_hint` 关键词 | `PageProfile.prefer_icon_row` + `TargetKind.ICON` |
-| 实现 | `clip_locate_service._locate_login_row` | hierarchy 聚类 + CLIP patch 打分 |
+| 触发 | `infer_region_hint` + 固定 Y 带 | **全屏**；`gather_all_candidates(enable_icon_row=True)` |
+| 实现 | `clip_locate_service._locate_login_row` | `icon_row.py` + `channels.collect_icon_row_channel` |
 
 ## 检测规则
 
-从 hierarchy 可点击节点中筛选：
+从 **全屏** hierarchy 可点击节点中筛选：
 
-- 宽高的上限相对屏宽/高（非固定像素带）  
-- 排除长中文文案（协议、用户协议等）  
+- 尺寸像图标（宽高上限相对屏宽/高，非 Y 带）  
+- 排除长中文文案（协议链接等）  
 - 按 `cy` 聚类为水平行，每行 ≥ 2 个图标  
 
-输出按 **x 从左到右** 排序，供 CLIP 对每个 patch 打分。
+输出按 **x 从左到右** 排序，CLIP 对每个 patch 打分，top-5 进入候选池。
 
-## 何时启用
+## 何时参与仲裁
 
-1. `PageProfile.prefer_icon_row == True`（默认 login）  
-2. 或 `TargetKind.ICON`（指令含「xx登录方式」「图标」等）  
-
-其他页面若存在工具栏图标行，可将对应 profile 的 `prefer_icon_row` 设为 `True`。
+- `resolver` 默认 `enable_icon_row=True`，与 profile **无关**  
+- `page_profiles.yaml` 中 `prefer_icon_row` **已废弃**（仅保留字段兼容，不门控收集）  
+- 与 OCR / CLIP / gallery 等通道按权重公平竞争，取得分最高者
 
 ## 日志
 

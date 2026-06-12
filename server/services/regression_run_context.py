@@ -185,9 +185,9 @@ def invalidate_screen_cache() -> None:
         ctx.pop("screen_ocr", None)
         ctx.pop("screen_wm", None)
     try:
-        from server.services.page_context_service import invalidate_engine_screen_cache
+        from server.services.screen_frame_service import invalidate_screen_frame
 
-        invalidate_engine_screen_cache()
+        invalidate_screen_frame()
     except Exception:
         pass
 

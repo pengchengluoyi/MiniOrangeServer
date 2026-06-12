@@ -1,0 +1,568 @@
+# 主流应用包名注册表
+# 用于：前台 App 识别、打开应用、前置条件、定位 debug 展示
+# 环境变量 LOCATE_APP_PACKAGES_PATH 可指向自定义文件
+version: 1
+
+apps:
+  # ── 国内 · 社交 / 通讯 ──────────────────────────────────
+  - key: wechat
+    name: 微信
+    name_en: WeChat
+    category: social
+    android_packages:
+      - com.tencent.mm
+    ios_bundle_ids:
+      - com.tencent.xin
+    aliases:
+      - 微信
+      - wechat
+      - weixin
+    page_supplements:
+      - profile: chat
+        screen_text_patterns:
+          - 通讯录
+          - 朋友圈
+          - 发现
+          - 扫一扫
+      - profile: payment
+        screen_text_patterns:
+          - 微信支付
+          - 钱包
+          - 收付款
+
+  - key: qq
+    name: QQ
+    name_en: QQ
+    category: social
+    android_packages:
+      - com.tencent.mobileqq
+    ios_bundle_ids:
+      - com.tencent.mqq
+    aliases:
+      - QQ
+      - qq
+      - 腾讯QQ
+    page_supplements:
+      - profile: chat
+        screen_text_patterns:
+          - 消息
+          - 联系人
+          - 动态
+
+  - key: wecom
+    name: 企业微信
+    name_en: WeCom
+    category: work
+    android_packages:
+      - com.tencent.wework
+    ios_bundle_ids:
+      - com.tencent.ww
+    aliases:
+      - 企业微信
+      - WeCom
+      - wework
+
+  - key: dingtalk
+    name: 钉钉
+    name_en: DingTalk
+    category: work
+    android_packages:
+      - com.alibaba.android.rimet
+    ios_bundle_ids:
+      - com.laiwang.DingTalk
+    aliases:
+      - 钉钉
+      - DingTalk
+
+  - key: feishu
+    name: 飞书
+    name_en: Feishu
+    category: work
+    android_packages:
+      - com.ss.android.lark
+      - com.bytedance.ee.lark
+    ios_bundle_ids:
+      - com.bytedance.ee.lark
+    aliases:
+      - 飞书
+      - Feishu
+      - Lark
+
+  - key: xiaohongshu
+    name: 小红书
+    name_en: RED
+    category: social
+    android_packages:
+      - com.xingin.xhs
+    ios_bundle_ids:
+      - com.xingin.discover
+    aliases:
+      - 小红书
+      - 红薯
+      - xhs
+      - RED
+    page_supplements:
+      - profile: home
+        screen_text_patterns:
+          - 发现
+          - 关注
+          - 笔记
+      - profile: search
+        screen_text_patterns:
+          - 搜索笔记
+          - 大家都在搜
+
+  - key: douyin
+    name: 抖音
+    name_en: Douyin
+    category: social
+    android_packages:
+      - com.ss.android.ugc.aweme
+    ios_bundle_ids:
+      - com.ss.iphone.ugc.Aweme
+    aliases:
+      - 抖音
+      - douyin
+      - TikTok中国
+    page_supplements:
+      - profile: home
+        screen_text_patterns:
+          - 推荐
+          - 关注
+          - 朋友
+
+  - key: kuaishou
+    name: 快手
+    name_en: Kuaishou
+    category: social
+    android_packages:
+      - com.smile.gifmaker
+      - com.kuaishou.nebula
+    ios_bundle_ids:
+      - com.jiangjia.gif
+    aliases:
+      - 快手
+      - kuaishou
+
+  - key: weibo
+    name: 微博
+    name_en: Weibo
+    category: social
+    android_packages:
+      - com.sina.weibo
+    ios_bundle_ids:
+      - com.sina.weibo
+    aliases:
+      - 微博
+      - weibo
+      - 新浪微博
+
+  - key: bilibili
+    name: 哔哩哔哩
+    name_en: Bilibili
+    category: media
+    android_packages:
+      - tv.danmaku.bili
+      - com.bilibili.app.in
+    ios_bundle_ids:
+      - tv.danmaku.bilianime
+    aliases:
+      - 哔哩哔哩
+      - B站
+      - bilibili
+      - b站
+
+  - key: zhihu
+    name: 知乎
+    name_en: Zhihu
+    category: social
+    android_packages:
+      - com.zhihu.android
+    ios_bundle_ids:
+      - com.zhihu.ios
+    aliases:
+      - 知乎
+      - zhihu
+
+  # ── 国内 · 电商 / 生活 ──────────────────────────────────
+  - key: taobao
+    name: 淘宝
+    name_en: Taobao
+    category: shopping
+    android_packages:
+      - com.taobao.taobao
+    ios_bundle_ids:
+      - com.taobao.taobao4iphone
+    aliases:
+      - 淘宝
+      - taobao
+
+  - key: jd
+    name: 京东
+    name_en: JD
+    category: shopping
+    android_packages:
+      - com.jingdong.app.mall
+    ios_bundle_ids:
+      - com.360buy.jdmobile
+    aliases:
+      - 京东
+      - JD
+      - jd
+
+  - key: pinduoduo
+    name: 拼多多
+    name_en: Pinduoduo
+    category: shopping
+    android_packages:
+      - com.xunmeng.pinduoduo
+    ios_bundle_ids:
+      - com.xunmeng.pinduoduo
+    aliases:
+      - 拼多多
+      - pdd
+
+  - key: alipay
+    name: 支付宝
+    name_en: Alipay
+    category: finance
+    android_packages:
+      - com.eg.android.AlipayGphone
+    ios_bundle_ids:
+      - com.alipay.iphoneclient
+    aliases:
+      - 支付宝
+      - alipay
+    page_supplements:
+      - profile: payment
+        screen_text_patterns:
+          - 付款
+          - 收钱
+          - 转账
+          - 余额宝
+
+  - key: meituan
+    name: 美团
+    name_en: Meituan
+    category: lifestyle
+    android_packages:
+      - com.sankuai.meituan
+    ios_bundle_ids:
+      - com.meituan.imeituan
+    aliases:
+      - 美团
+      - meituan
+
+  - key: dianping
+    name: 大众点评
+    name_en: Dianping
+    category: lifestyle
+    android_packages:
+      - com.dianping.v1
+    ios_bundle_ids:
+      - com.dianping.dpscope
+    aliases:
+      - 大众点评
+      - 点评
+
+  # ── 国内 · 地图 / 出行 ──────────────────────────────────
+  - key: amap
+    name: 高德地图
+    name_en: Amap
+    category: map
+    android_packages:
+      - com.autonavi.minimap
+    ios_bundle_ids:
+      - com.autonavi.amap
+    aliases:
+      - 高德
+      - 高德地图
+      - amap
+
+  - key: baidu_map
+    name: 百度地图
+    name_en: Baidu Maps
+    category: map
+    android_packages:
+      - com.baidu.BaiduMap
+    ios_bundle_ids:
+      - com.baidu.map
+    aliases:
+      - 百度地图
+
+  - key: didi
+    name: 滴滴出行
+    name_en: DiDi
+    category: travel
+    android_packages:
+      - com.sdu.didi.psnger
+    ios_bundle_ids:
+      - com.xiaojukeji.didi
+    aliases:
+      - 滴滴
+      - 滴滴出行
+
+  # ── 国内 · 浏览器 / 搜索 ────────────────────────────────
+  - key: baidu
+    name: 百度
+    name_en: Baidu
+    category: search
+    android_packages:
+      - com.baidu.searchbox
+    ios_bundle_ids:
+      - com.baidu.BaiduMobile
+    aliases:
+      - 百度
+      - baidu
+
+  - key: chrome
+    name: Chrome
+    name_en: Google Chrome
+    category: browser
+    android_packages:
+      - com.android.chrome
+      - com.google.android.apps.chrome
+    ios_bundle_ids:
+      - com.google.chrome.ios
+    aliases:
+      - Chrome
+      - 谷歌浏览器
+
+  # ── 国际 · 社交 / 通讯 ──────────────────────────────────
+  - key: whatsapp
+    name: WhatsApp
+    name_en: WhatsApp
+    category: social
+    android_packages:
+      - com.whatsapp
+    ios_bundle_ids:
+      - net.whatsapp.WhatsApp
+    aliases:
+      - WhatsApp
+      - whatsapp
+    page_supplements:
+      - profile: chat
+        screen_text_patterns:
+          - Chats
+          - 聊天
+          - Status
+
+  - key: telegram
+    name: Telegram
+    name_en: Telegram
+    category: social
+    android_packages:
+      - org.telegram.messenger
+      - org.telegram.messenger.web
+    ios_bundle_ids:
+      - ph.telegra.Telegraph
+    aliases:
+      - Telegram
+      - telegram
+
+  - key: line
+    name: LINE
+    name_en: LINE
+    category: social
+    android_packages:
+      - jp.naver.line.android
+    ios_bundle_ids:
+      - jp.naver.line
+    aliases:
+      - LINE
+      - line
+
+  - key: facebook
+    name: Facebook
+    name_en: Facebook
+    category: social
+    android_packages:
+      - com.facebook.katana
+      - com.facebook.lite
+    ios_bundle_ids:
+      - com.facebook.Facebook
+    aliases:
+      - Facebook
+      - facebook
+      - FB
+
+  - key: instagram
+    name: Instagram
+    name_en: Instagram
+    category: social
+    android_packages:
+      - com.instagram.android
+    ios_bundle_ids:
+      - com.burbn.instagram
+    aliases:
+      - Instagram
+      - ins
+      - IG
+
+  - key: x
+    name: X
+    name_en: X
+    category: social
+    android_packages:
+      - com.twitter.android
+    ios_bundle_ids:
+      - com.atebits.Tweetie2
+    aliases:
+      - X
+      - Twitter
+      - 推特
+      - twitter
+
+  - key: messenger
+    name: Messenger
+    name_en: Messenger
+    category: social
+    android_packages:
+      - com.facebook.orca
+    ios_bundle_ids:
+      - com.facebook.Messenger
+    aliases:
+      - Messenger
+      - Facebook Messenger
+
+  - key: tiktok
+    name: TikTok
+    name_en: TikTok
+    category: social
+    android_packages:
+      - com.zhiliaoapp.musically
+      - com.ss.android.ugc.trill
+    ios_bundle_ids:
+      - com.zhiliaoapp.musically
+    aliases:
+      - TikTok
+      - tiktok
+      - 抖音国际版
+
+  # ── 国际 · 办公 / 邮件 ──────────────────────────────────
+  - key: gmail
+    name: Gmail
+    name_en: Gmail
+    category: mail
+    android_packages:
+      - com.google.android.gm
+    ios_bundle_ids:
+      - com.google.Gmail
+    aliases:
+      - Gmail
+      - gmail
+
+  - key: outlook
+    name: Outlook
+    name_en: Outlook
+    category: mail
+    android_packages:
+      - com.microsoft.office.outlook
+    ios_bundle_ids:
+      - com.microsoft.Office.Outlook
+    aliases:
+      - Outlook
+      - outlook
+
+  - key: teams
+    name: Microsoft Teams
+    name_en: Teams
+    category: work
+    android_packages:
+      - com.microsoft.teams
+    ios_bundle_ids:
+      - com.microsoft.skype.teams
+    aliases:
+      - Teams
+      - Microsoft Teams
+
+  - key: zoom
+    name: Zoom
+    name_en: Zoom
+    category: work
+    android_packages:
+      - us.zoom.videomeetings
+    ios_bundle_ids:
+      - us.zoom.videomeetings
+    aliases:
+      - Zoom
+      - zoom
+
+  # ── 媒体 / 音乐 ─────────────────────────────────────────
+  - key: youtube
+    name: YouTube
+    name_en: YouTube
+    category: media
+    android_packages:
+      - com.google.android.youtube
+    ios_bundle_ids:
+      - com.google.ios.youtube
+    aliases:
+      - YouTube
+      - youtube
+
+  - key: netease_music
+    name: 网易云音乐
+    name_en: NetEase Music
+    category: media
+    android_packages:
+      - com.netease.cloudmusic
+    ios_bundle_ids:
+      - com.netease.cloudmusic
+    aliases:
+      - 网易云音乐
+      - 网易云
+
+  - key: qq_music
+    name: QQ音乐
+    name_en: QQ Music
+    category: media
+    android_packages:
+      - com.tencent.qqmusic
+    ios_bundle_ids:
+      - com.tencent.QQMusic
+    aliases:
+      - QQ音乐
+
+  - key: spotify
+    name: Spotify
+    name_en: Spotify
+    category: media
+    android_packages:
+      - com.spotify.music
+    ios_bundle_ids:
+      - com.spotify.client
+    aliases:
+      - Spotify
+      - spotify
+
+  # ── 被测 / 示例 ─────────────────────────────────────────
+  - key: zaohaowu
+    name: 造好物
+    name_en: Zaohaowu
+    category: product
+    android_packages:
+      - com.mathmagic.zaohaowu
+    aliases:
+      - 造好物
+      - zaohaowu
+
+  # ── 系统 / 商店 ─────────────────────────────────────────
+  - key: google_play
+    name: Google Play
+    name_en: Google Play Store
+    category: system
+    android_packages:
+      - com.android.vending
+    aliases:
+      - Google Play
+      - Play商店
+
+  - key: app_store
+    name: App Store
+    name_en: App Store
+    category: system
+    ios_bundle_ids:
+      - com.apple.AppStore
+    aliases:
+      - App Store

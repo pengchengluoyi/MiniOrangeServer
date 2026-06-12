@@ -18,6 +18,7 @@ TAG = "OverlayGuard"
 
 OVERLAY_TYPE_TITLES = {
     "consent": "隐私同意弹窗",
+    "login_confirm": "登录确认弹窗",
     "system_permission": "系统权限弹窗",
     "agreement": "协议全文页",
     "generic_overlay": "应用弹层",
@@ -49,14 +50,30 @@ def is_guard_plan_index(plan_index: int) -> bool:
 def detect_blocking_overlay(engine) -> Optional[Dict[str, Any]]:
     """检测当前屏幕是否被阻塞弹窗占用。无阻塞返回 None。"""
     from server.services.page_navigation_service import (
+        _engine_screen_size,
+        _hierarchy_has_app_consent_modal,
         _screen_is_overlay,
         _screen_is_system_permission_dialog,
         _screen_is_user_agreement_page,
-        classify_blocking_screen,
+        get_blocking_screen_state,
         is_blocking_consent_screen,
+        is_blocking_login_confirm_screen,
     )
 
-    state = classify_blocking_screen(engine)
+    screen_w, screen_h = _engine_screen_size(engine) if engine is not None else (1080, 1920)
+
+    if engine is not None and _hierarchy_has_app_consent_modal(engine, screen_w, screen_h):
+        state = get_blocking_screen_state(engine, force=True)
+        ocr = (state.get("ocr_text") or "").strip()
+        return {
+            "type": "consent",
+            "blocked": True,
+            "reason": "hierarchy_consent_pair",
+            "ocr_snip": ocr[:200],
+            "state": state,
+        }
+
+    state = get_blocking_screen_state(engine, force=True)
     ocr = (state.get("ocr_text") or "").strip()
 
     if state.get("screen_not_ready"):
@@ -73,6 +90,15 @@ def detect_blocking_overlay(engine) -> Optional[Dict[str, Any]]:
             "type": "consent",
             "blocked": True,
             "reason": state.get("reason") or "consent",
+            "ocr_snip": ocr[:200],
+            "state": state,
+        }
+
+    if is_blocking_login_confirm_screen(screen_state=state, screen_text=ocr, engine=engine):
+        return {
+            "type": "login_confirm",
+            "blocked": True,
+            "reason": state.get("reason") or "login_confirm_sheet",
             "ocr_snip": ocr[:200],
             "state": state,
         }
@@ -216,9 +242,10 @@ def _execute_guard_action(
             "duration_ms": int((time.time() - t0) * 1000),
         }
 
-    if otype == "consent":
+    if otype in ("consent", "login_confirm"):
         from server.services.page_navigation_service import tap_consent_agree_on_engine
 
+        agree_label = "同意并继续" if otype == "login_confirm" else "同意"
         hit = tap_consent_agree_on_engine(
             engine,
             screen_w,
@@ -228,14 +255,16 @@ def _execute_guard_action(
             source="overlay_guard",
             exact_label=True,
             single_tap=True,
+            agree_label=agree_label,
         )
         return {
             "ok": bool(hit.get("ok")),
             "method": hit.get("method") or "consent_agree",
-            "msg": hit.get("msg") or ("点击「同意」" if hit.get("ok") else "未找到可点击目标"),
+            "msg": hit.get("msg")
+            or (f"点击「{agree_label}」" if hit.get("ok") else "未找到可点击目标"),
             "plan": plan,
             "summary": _action_summary_for_overlay(
-                otype, action_label="同意" if hit.get("ok") else ""
+                otype, action_label=agree_label if hit.get("ok") else ""
             ),
             "x": hit.get("x"),
             "y": hit.get("y"),
@@ -246,7 +275,11 @@ def _execute_guard_action(
         }
 
     if otype == "system_permission":
-        from server.services.page_navigation_service import tap_system_permission_on_engine
+        from server.services.page_navigation_service import (
+            _hierarchy_has_app_consent_modal,
+            tap_consent_agree_on_engine,
+            tap_system_permission_on_engine,
+        )
 
         hit = tap_system_permission_on_engine(
             engine,
@@ -256,9 +289,28 @@ def _execute_guard_action(
             phase="overlay_guard",
             source="overlay_guard",
         )
+        guard_type = otype
+        if not hit.get("ok") and _hierarchy_has_app_consent_modal(engine, screen_w, screen_h):
+            SLog.w(
+                TAG,
+                "system_permission guard missed; hierarchy shows consent pair — fallback",
+            )
+            plan = _plan_for_overlay({"type": "consent"})
+            guard_type = "consent"
+            hit = tap_consent_agree_on_engine(
+                engine,
+                screen_w,
+                screen_h,
+                icon_targets=icon_targets,
+                phase="overlay_guard",
+                source="overlay_guard",
+                exact_label=True,
+                single_tap=True,
+                agree_label="同意",
+            )
         act_label = ""
         if hit.get("ok") and hit.get("msg"):
-            for prefer in ("仅在使用中允许", "始终允许", "允许"):
+            for prefer in ("仅在使用中允许", "始终允许", "允许", "同意", "同意并继续"):
                 if prefer in str(hit.get("msg")):
                     act_label = prefer
                     break
@@ -268,7 +320,10 @@ def _execute_guard_action(
             "msg": hit.get("msg") or "系统权限弹窗未命中允许按钮",
             "plan": plan,
             "summary": _action_summary_for_overlay(
-                otype, action_label=act_label or ("允许" if hit.get("ok") else "")
+                guard_type,
+                action_label=act_label
+                or ("允许" if guard_type == "system_permission" and hit.get("ok") else "")
+                or ("同意" if guard_type == "consent" and hit.get("ok") else ""),
             ),
             "x": hit.get("x"),
             "y": hit.get("y"),
@@ -549,6 +604,21 @@ def apply_reactive_guard_round(
             "step_rows": [],
             "planned_steps": [],
         }
+
+    try:
+        from server.services.page_navigation_service import is_planned_overlay_step_label
+
+        if is_planned_overlay_step_label(step_summary):
+            return {
+                "attempted": False,
+                "ok": True,
+                "can_retry_click": False,
+                "step_rows": [],
+                "planned_steps": [],
+                "msg": "业务步骤自行处理同意/不同意，跳过守卫",
+            }
+    except Exception:
+        pass
 
     one = run_one_guard_round(
         engine,

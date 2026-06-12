@@ -1,0 +1,585 @@
+# 多通道定位 · 页面类型（PageProfile）资源包
+# 修改本文件后重启服务生效；也可设置环境变量 LOCATE_PROFILES_PATH 指向自定义路径
+#
+# 匹配顺序：自上而下，首个命中（label 或 screen_text）生效；generic 兜底。
+# 更具体的页面类型必须写在更宽泛的 login / home 之前。
+version: 2
+
+bootstrap_rules:
+  # OCR 全文优先（在遍历 profiles 之前）
+  - profile: system_dialog
+    screen_text_patterns:
+      - "仅在使用中允许|始终允许|是否.{0,8}允许|获取已安装|获取.*应用.*信息"
+  - profile: verify_code
+    screen_text_patterns:
+      - "输入验证码|请输入验证码|填写验证码|6位验证码|四位验证码|短信验证码|验证码已发送"
+  - profile: phone_login
+    screen_text_patterns:
+      - "请输入手机号|输入手机号码|手机号登录|短信登录|验证码登录|获取验证码"
+  - profile: one_click_login
+    screen_text_patterns:
+      - "本机号码一键登录|手机号一键登录|运营商.*一键登录|认证服务由.*提供"
+  - profile: password_login
+    screen_text_patterns:
+      - "请输入密码|账号密码登录|密码登录|邮箱登录|用户名或邮箱"
+  - profile: phone_register
+    screen_text_patterns:
+      - "注册账号|手机号注册|新用户注册|设置登录密码|确认密码"
+
+profiles:
+  # ── 弹窗 / 系统 ─────────────────────────────────────────
+  - key: consent
+    title: 隐私同意弹窗
+    label_patterns:
+      - consent
+      - 隐私同意
+      - 协议弹
+      - 用户协议与隐私
+    screen_text_patterns:
+      - 不同意
+      - 造物者
+      - 隐私条款
+      - 用户协议
+      - 点击.*同意
+      - 同意并继续
+    weights:
+      clip: 0.24
+      ocr: 0.42
+      hierarchy: 0.38
+      gallery: 0.12
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 首次启动协议弹窗；同意/不同意按钮，优先 OCR/hierarchy
+
+  - key: system_dialog
+    title: 系统权限 / 系统弹窗
+    label_patterns:
+      - 系统权限
+      - 权限弹窗
+      - permission
+      - 允许访问
+    screen_text_patterns:
+      - 仅在使用中允许
+      - 始终允许
+      - 是否.*允许
+      - 获取.*信息
+      - 拒绝
+      - 要允许.*吗
+    weights:
+      clip: 0.22
+      ocr: 0.38
+      hierarchy: 0.42
+      gallery: 0.18
+      icon_row: 0.12
+      anchor: 0.55
+    prefer_icon_row: false
+    description: Android/iOS 系统权限框
+
+  - key: modal
+    title: 业务弹窗 / 对话框
+    label_patterns:
+      - 弹窗
+      - 对话框
+      - modal
+      - dialog
+      - 提示框
+    screen_text_patterns:
+      - 确定要
+      - 是否确认
+      - 温馨提示
+      - 取消
+      - 知道了
+    weights:
+      clip: 0.26
+      ocr: 0.40
+      hierarchy: 0.34
+      gallery: 0.14
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: App 内居中/底部业务弹窗（非系统权限、非协议全屏）
+
+  # ── 登录 / 注册链路（细粒度，须在 login 之前）────────────
+  - key: verify_code
+    title: 验证码输入页
+    label_patterns:
+      - 验证码
+      - 短信验证
+      - verify\s*code
+      - sms\s*code
+      - 输入验证码
+    screen_text_patterns:
+      - 输入验证码
+      - 请输入验证码
+      - 重新获取
+      - 秒后重发
+      - 验证码已发送
+      - 6位验证码
+    weights:
+      clip: 0.20
+      ocr: 0.38
+      hierarchy: 0.40
+      gallery: 0.12
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 六位/四位短信验证码输入、重发倒计时
+
+  - key: phone_register
+    title: 手机号注册页
+    label_patterns:
+      - 手机号注册
+      - 新用户注册
+      - 注册账号
+      - 注册页
+      - register
+      - sign\s*up
+    screen_text_patterns:
+      - 注册账号
+      - 手机号注册
+      - 设置密码
+      - 确认密码
+      - 创建账号
+      - 立即注册
+    weights:
+      clip: 0.24
+      ocr: 0.40
+      hierarchy: 0.36
+      gallery: 0.14
+      icon_row: 0.10
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 注册表单；手机号+密码/验证码注册
+
+  - key: password_login
+    title: 账号密码登录页
+    label_patterns:
+      - 密码登录
+      - 账号密码
+      - 邮箱密码
+      - 帐号密码
+      - password\s*login
+      - 用户名登录
+      - 邮箱登录
+    screen_text_patterns:
+      - 请输入密码
+      - 忘记密码
+      - 账号密码登录
+      - 用户名或邮箱
+      - 邮箱/手机号
+    weights:
+      clip: 0.24
+      ocr: 0.42
+      hierarchy: 0.36
+      gallery: 0.14
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 账号+密码表单；找回密码链接
+
+  - key: phone_login
+    title: 手机号登录页
+    label_patterns:
+      - 手机号登录
+      - 手机登录
+      - 短信登录
+      - 验证码登录
+      - phone\s*login
+      - mobile\s*login
+      - 手机号码登录
+    screen_text_patterns:
+      - 请输入手机号
+      - 输入手机号
+      - 获取验证码
+      - 手机号登录
+      - 短信验证码登录
+      - 下一步
+    weights:
+      clip: 0.26
+      ocr: 0.40
+      hierarchy: 0.34
+      gallery: 0.16
+      icon_row: 0.10
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 输入手机号 + 获取验证码；造好物等常见子页
+
+  - key: one_click_login
+    title: 一键登录页
+    label_patterns:
+      - 一键登录
+      - 本机号码
+      - one\s*click
+      - 本机号码一键
+      - 手机号一键
+      - 运营商登录
+    screen_text_patterns:
+      - 本机号码一键登录
+      - 手机号一键登录
+      - 认证服务
+      - 中国电信
+      - 中国移动
+      - 中国联通
+    weights:
+      clip: 0.34
+      ocr: 0.30
+      hierarchy: 0.22
+      gallery: 0.36
+      icon_row: 0.28
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 运营商取号一键登录主按钮页
+
+  - key: bind_phone
+    title: 绑定手机号页
+    label_patterns:
+      - 绑定手机
+      - 绑定手机号
+      - 更换手机
+      - 换绑手机
+    screen_text_patterns:
+      - 绑定手机号
+      - 更换绑定
+      - 验证原手机号
+    weights:
+      clip: 0.24
+      ocr: 0.40
+      hierarchy: 0.36
+      gallery: 0.12
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 账号安全、换绑场景
+
+  - key: login
+    title: 登录入口 / 方式选择页
+    label_patterns:
+      - 登录注册
+      - 登录页
+      - 登录界面
+      - 登录窗口
+      - 登录弹窗
+      - login
+      - sign\s*in
+      - 登陆
+    screen_text_patterns:
+      - 其他登录方式
+      - 更多登录
+      - 访客浏览
+      - 游客进入
+      - 微信登录
+      - 手机号登录方式
+      - 邮箱登录
+    weights:
+      clip: 0.32
+      ocr: 0.28
+      hierarchy: 0.22
+      gallery: 0.38
+      icon_row: 0.40
+      anchor: 0.55
+    prefer_icon_row: true
+    description: 登录方式选择、第三方无字图标行、进入子登录页前的主入口
+
+  # ── 条款 / 引导 ───────────────────────────────────────
+  - key: terms
+    title: 协议 / 条款详情页
+    label_patterns:
+      - 用户协议
+      - 隐私政策
+      - 服务条款
+      - terms
+      - privacy
+    screen_text_patterns:
+      - 第一章
+      - 本协议
+      - 隐私保护
+      - 法律声明
+    weights:
+      clip: 0.18
+      ocr: 0.44
+      hierarchy: 0.38
+      gallery: 0.08
+      icon_row: 0.06
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 可滚动协议正文（非底部勾选、非同意弹窗）
+
+  - key: onboarding
+    title: 新手引导 / 开屏引导
+    label_patterns:
+      - 引导
+      - onboarding
+      - 新手教程
+      - 开屏
+    screen_text_patterns:
+      - 跳过
+      - 立即体验
+      - 下一步
+      - 开始使用
+    weights:
+      clip: 0.30
+      ocr: 0.34
+      hierarchy: 0.28
+      gallery: 0.22
+      icon_row: 0.12
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 多页引导、功能介绍轮播
+
+  # ── 主流程页面 ─────────────────────────────────────────
+  - key: search
+    title: 搜索页
+    label_patterns:
+      - 搜索
+      - search
+      - 查找
+    screen_text_patterns:
+      - 搜索历史
+      - 热门搜索
+      - 请输入关键词
+      - 猜你想搜
+    weights:
+      clip: 0.22
+      ocr: 0.42
+      hierarchy: 0.36
+      gallery: 0.14
+      icon_row: 0.10
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 搜索框 + 历史/推荐词
+
+  - key: home
+    title: 首页 / Feed
+    label_patterns:
+      - 首页
+      - home
+      - feed
+      - 推荐
+      - 发现
+      - 造物秀
+    screen_text_patterns:
+      - 造物秀
+      - 关注
+      - 推荐流
+      - AI\s*创意
+    weights:
+      clip: 0.28
+      ocr: 0.35
+      hierarchy: 0.30
+      gallery: 0.30
+      icon_row: 0.25
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 信息流、顶部分段 Tab
+
+  - key: detail
+    title: 详情页
+    label_patterns:
+      - 详情
+      - detail
+      - 商品详情
+      - 内容详情
+    screen_text_patterns:
+      - 立即购买
+      - 加入购物车
+      - 评论
+      - 详情介绍
+    weights:
+      clip: 0.28
+      ocr: 0.36
+      hierarchy: 0.30
+      gallery: 0.28
+      icon_row: 0.12
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 图文/商品/帖子详情
+
+  - key: publish
+    title: 发布 / 编辑页
+    label_patterns:
+      - 发布
+      - 编辑
+      - publish
+      - compose
+      - 创作
+    screen_text_patterns:
+      - 发布作品
+      - 添加标题
+      - 存草稿
+    weights:
+      clip: 0.26
+      ocr: 0.38
+      hierarchy: 0.32
+      gallery: 0.20
+      icon_row: 0.10
+      anchor: 0.55
+    prefer_icon_row: false
+    description: UGC 发布、表单编辑
+
+  - key: form
+    title: 通用表单页
+    label_patterns:
+      - 表单
+      - form
+      - 填写信息
+      - 资料完善
+    screen_text_patterns:
+      - 请填写
+      - 必填
+      - 提交
+    weights:
+      clip: 0.22
+      ocr: 0.42
+      hierarchy: 0.36
+      gallery: 0.12
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 多字段表单（非登录注册专用）
+
+  - key: payment
+    title: 支付 / 收银台
+    label_patterns:
+      - 支付
+      - 收银台
+      - checkout
+      - 订单确认
+      - 付款
+    screen_text_patterns:
+      - 立即支付
+      - 微信支付
+      - 支付宝
+      - 确认付款
+      - 应付金额
+    weights:
+      clip: 0.24
+      ocr: 0.40
+      hierarchy: 0.34
+      gallery: 0.18
+      icon_row: 0.10
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 下单支付、支付方式选择
+
+  - key: chat
+    title: 聊天 / 消息
+    label_patterns:
+      - 聊天
+      - 消息
+      - chat
+      - im
+      - 会话
+    screen_text_patterns:
+      - 发送
+      - 请输入消息
+      - 对方正在输入
+    weights:
+      clip: 0.22
+      ocr: 0.40
+      hierarchy: 0.36
+      gallery: 0.12
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: IM 对话、消息列表
+
+  - key: notification
+    title: 通知中心
+    label_patterns:
+      - 通知
+      - 消息中心
+      - notification
+      - inbox
+    screen_text_patterns:
+      - 系统通知
+      - 全部已读
+      - 暂无消息
+    weights:
+      clip: 0.22
+      ocr: 0.42
+      hierarchy: 0.36
+      gallery: 0.10
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 站内信、推送列表
+
+  - key: profile
+    title: 我的 / 个人中心
+    label_patterns:
+      - 我的
+      - 个人中心
+      - mine
+      - 用户中心
+      - 账户页
+    screen_text_patterns:
+      - 退出登录
+      - 我的订单
+      - 我的收藏
+      - 编辑资料
+    weights:
+      clip: 0.28
+      ocr: 0.34
+      hierarchy: 0.30
+      gallery: 0.32
+      icon_row: 0.22
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 个人主页、账户入口（注意与 key profile 非 page_context 的 profile 字段混淆）
+
+  - key: settings
+    title: 设置页
+    label_patterns:
+      - 设置
+      - settings
+      - 偏好
+      - 账号与安全
+    screen_text_patterns:
+      - 通知设置
+      - 隐私设置
+      - 通用设置
+      - 关于我们
+    weights:
+      clip: 0.22
+      ocr: 0.40
+      hierarchy: 0.35
+      gallery: 0.20
+      icon_row: 0.15
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 文字列表型设置项
+
+  - key: webview
+    title: H5 / 内嵌网页
+    label_patterns:
+      - webview
+      - h5
+      - 网页
+      - 内置浏览器
+    screen_text_patterns:
+      - 加载中
+      - 网页无法打开
+    weights:
+      clip: 0.26
+      ocr: 0.36
+      hierarchy: 0.30
+      gallery: 0.20
+      icon_row: 0.08
+      anchor: 0.55
+    prefer_icon_row: false
+    description: WebView 容器；定位仍依赖 OCR/hierarchy
+
+  - key: generic
+    title: 通用页面
+    label_patterns: []
+    screen_text_patterns: []
+    weights:
+      clip: 0.30
+      ocr: 0.30
+      hierarchy: 0.25
+      gallery: 0.35
+      icon_row: 0.35
+      anchor: 0.55
+    prefer_icon_row: false
+    description: 未命中任何页面类型时的默认权重

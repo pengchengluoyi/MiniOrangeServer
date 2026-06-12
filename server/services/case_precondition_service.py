@@ -10,10 +10,30 @@ from script.log import SLog
 
 TAG = "CasePrecondition"
 
-WECHAT_PKG = "com.tencent.mm"
+def _wechat_pkg() -> str:
+    try:
+        from server.services.locate.app_packages import package_for_app_key
+
+        pkg = package_for_app_key("wechat")
+        if pkg:
+            return pkg
+    except Exception:
+        pass
+    return "com.tencent.mm"
+
+
+WECHAT_PKG = _wechat_pkg()
 
 
 def split_precondition_lines(text: str) -> List[str]:
+    try:
+        from server.services.case_text_semantic_service import parse_precondition_lines
+
+        lines = parse_precondition_lines(text)
+        if lines:
+            return lines
+    except Exception:
+        pass
     raw = (text or "").strip()
     if not raw:
         return []
@@ -103,6 +123,14 @@ def _read_sim_phone_number(engine) -> str:
     return ""
 
 
+_SIM_READY_STATES = frozenset({"READY", "LOADED", "PIN_REQUIRED", "PUK_REQUIRED"})
+_SIM_ABSENT_STATES = frozenset({"ABSENT", "NOT_READY", "UNKNOWN", "UNAVAILABLE", ""})
+
+
+def _parse_sim_slot_states(raw: str) -> List[str]:
+    return [p.strip().upper() for p in (raw or "").split(",") if p.strip()]
+
+
 def _check_sim(engine) -> Tuple[bool, str, Dict[str, Any]]:
     meta: Dict[str, Any] = {"sim_state": "", "operator": "", "phone_number": ""}
     state = (engine.shell("getprop gsm.sim.state") or "").strip().upper()
@@ -114,20 +142,21 @@ def _check_sim(engine) -> Tuple[bool, str, Dict[str, Any]]:
     phone = _read_sim_phone_number(engine)
     meta["phone_number"] = phone
 
-    parts: List[str] = []
-    if state in ("READY", "LOADED", "PIN_REQUIRED", "PUK_REQUIRED"):
-        parts.append(f"SIM 已就绪（{state}）")
+    slots = _parse_sim_slot_states(state)
+    ready_slots = [s for s in slots if s in _SIM_READY_STATES]
+    if not ready_slots:
+        if not slots or all(s in _SIM_ABSENT_STATES for s in slots):
+            return False, f"未检测到可用 SIM 卡（gsm.sim.state={state or '空'}）", meta
+        return False, f"SIM 未就绪（gsm.sim.state={state or '空'}）", meta
+
+    parts: List[str] = [f"SIM 已就绪（{','.join(ready_slots)}）"]
     if operator:
         parts.append(f"运营商: {operator}")
     if phone:
         parts.append(f"号码: {phone}")
     else:
         parts.append("号码: 系统未暴露本机号码")
-    if parts:
-        return True, "；".join(parts), meta
-    if operator:
-        return True, f"检测到运营商: {operator}", meta
-    return False, f"未检测到可用 SIM 卡（gsm.sim.state={state or '空'}）", meta
+    return True, "；".join(parts), meta
 
 
 def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
@@ -248,6 +277,15 @@ def precondition_cleared_app_cache(items: List[Dict[str, Any]]) -> bool:
 
 
 def has_precondition_phase(precondition_raw: str, phase: str) -> bool:
+    try:
+        from server.services.case_text_semantic_service import parse_precondition_items
+
+        for item in parse_precondition_items(precondition_raw):
+            if item.get("phase") == phase:
+                return True
+        return False
+    except Exception:
+        pass
     for line in split_precondition_lines(precondition_raw):
         _, line_phase = _classify_line(line)
         if line_phase == phase:
@@ -267,13 +305,23 @@ def run_preconditions(
     执行指定阶段的前置条件。
     phase: before_launch（清缓存/SIM/微信/设备类型）| after_launch（已登录等）
     """
-    lines = split_precondition_lines(precondition_raw)
     tasks: List[Tuple[str, str]] = []
-    for line in lines:
-        kind, line_phase = _classify_line(line)
-        if line_phase != phase:
-            continue
-        tasks.append((kind, line))
+    try:
+        from server.services.case_text_semantic_service import parse_precondition_items
+
+        for item in parse_precondition_items(precondition_raw):
+            if item.get("phase") != phase:
+                continue
+            kind = item.get("kind") or _classify_line(item.get("text") or "")[0]
+            tasks.append((kind, item.get("text") or ""))
+    except Exception:
+        tasks = []
+    if not tasks:
+        for line in split_precondition_lines(precondition_raw):
+            kind, line_phase = _classify_line(line)
+            if line_phase != phase:
+                continue
+            tasks.append((kind, line))
 
     if not tasks:
         return {"ok": True, "items": [], "msg": ""}

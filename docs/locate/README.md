@@ -9,19 +9,19 @@
 新模块采用：
 
 1. **多通道并行打分**：CLIP、OCR、Hierarchy、图标库、通用无字图标行  
-2. **仲裁取最高**：按页面类型权重 + 目标类型加成  
-3. **空间约束**：九宫格方位词（右上、左下、中间…）过滤所有通道  
-4. **页面类型 Profile**：login / home / profile / settings / generic，可扩展  
+2. **仲裁取最高**：各通道算分后按 PageProfile 权重排序，**取第一名**（无全局分数门槛）  
+3. **空间约束**：仅 `spatial.py` 九宫格方位词过滤；扫描本身 **全屏**  
+4. **页面类型 Profile**：login / home / consent / generic 等，YAML 可扩展  
 
-**不包含**（按产品要求已从主路径移除）：底栏 Tab 专用解析、无障碍 `click_by_label` 兜底。
+**已移除主路径**：Y 带裁剪、`_kind_channel_boost`、`LOCATE_MIN_SCORE` 准入、底栏 Tab 专用解析、登录 `login_row` 固定 Y 带。
 
 ## 快速开关
 
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
 | `LOCATE_ARBITRATOR` | `1` | `0` 时回退旧版 `_resolve_click_target` 管道 |
-| `LOCATE_MIN_SCORE` | `0.55` | 仲裁最终分阈值 |
 | `CLIP_ENABLED` | `1` | 关闭后 CLIP / 图标行 CLIP 通道不参与 |
+| `LOCATE_PROFILES_PATH` | 内置 YAML | 自定义页面 profile 权重包 |
 
 ## 入口
 
@@ -51,10 +51,12 @@ Copilot 在 `_resolve_click_target` 中已默认调用（`LOCATE_ARBITRATOR=1`�
 
 | 文件 | 内容 |
 |------|------|
+| **[strategy.md](./strategy.md)** | **多通道定位策略总览（profile/kind/通道/阈值，供评审）** |
+| [app-packages.md](./app-packages.md) | 主流应用包名注册表（微信/QQ/WhatsApp/X/小红书…） |
+| [page-profiles.md](./page-profiles.md) | 页面类型 profile 与 YAML 资源包 |
 | [architecture.md](./architecture.md) | 架构、通道、仲裁公式 |
 | [overlay-guard.md](./overlay-guard.md) | Plan 内阻塞弹窗守卫 |
 | [spatial-zones.md](./spatial-zones.md) | 九宫格空间约束 |
-| [page-profiles.md](./page-profiles.md) | 页面类型与权重 |
 | [icon-row.md](./icon-row.md) | 通用无字图标行（原 login_row 能力扩展） |
 | [extending.md](./extending.md) | 扩展页面类型、自定义权重、与图谱/Figma 集成 |
 | [../regression/expectation-assert.md](../regression/expectation-assert.md) | 飞书用例预期校验 |

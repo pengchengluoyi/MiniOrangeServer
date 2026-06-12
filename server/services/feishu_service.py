@@ -316,37 +316,34 @@ def _strip_leading_number(text: str) -> str:
     return t
 
 
-def _parse_numbered_items(text: str) -> List[Dict[str, Any]]:
+def _parse_numbered_items(text: str, field: str = "") -> List[Dict[str, Any]]:
     """
     解析飞书单元格中带编号的条目，保留原始编号。
     预期列可能写 2. 3. 4. 而步骤列写 1. 2. 3. 4. — 需按编号对齐而非数组下标。
+    field: step | expected — 启用 LLM 语义解析（CASE_TEXT_PARSE_LLM）。
     """
+    if field in ("step", "expected"):
+        try:
+            from server.services.case_text_semantic_service import (
+                FIELD_EXPECTED,
+                FIELD_STEP,
+                parse_numbered_field,
+            )
+
+            f = FIELD_STEP if field == "step" else FIELD_EXPECTED
+            return parse_numbered_field(text, f)
+        except Exception as e:
+            SLog.w(TAG, f"semantic numbered parse failed, fallback rules: {e}")
+    try:
+        from server.services.case_text_semantic_service import parse_numbered_items_rules
+
+        return parse_numbered_items_rules(text)
+    except Exception:
+        pass
     raw = (text or "").strip()
     if not raw:
         return []
-    pattern = re.compile(r"(?:^|\n)\s*(\d+)[.、．)\）]\s*")
-    matches = list(pattern.finditer(raw))
-    if not matches:
-        # 无 "1." 前缀的单行内容仍视为第 1 条，避免同步后丢失序号
-        return [{"num": 1, "text": raw}]
-    items: List[Dict[str, Any]] = []
-    prefix = raw[: matches[0].start()].strip()
-    if prefix:
-        items.append({"num": 1, "text": prefix})
-    for idx, match in enumerate(matches):
-        try:
-            num = int(match.group(1))
-        except ValueError:
-            continue
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
-        body = _strip_leading_number(raw[start:end].strip())
-        if body:
-            items.append({"num": num, "text": body})
-    if not items:
-        return [{"num": 1, "text": _strip_leading_number(raw)}]
-    # 仅一条预期/步骤且多步用例：整段预期通常对应最后一步（如一键登录）
-    return items
+    return [{"num": 1, "text": _strip_leading_number(raw)}]
 
 
 def _rebalance_single_expected(
@@ -364,7 +361,10 @@ def _rebalance_single_expected(
 
 def _expected_by_step_number(text: str) -> Dict[int, str]:
     """编号 → 预期文案（飞书预期列可跳号，如 2/3/4 无 1）。"""
-    return {int(item["num"]): item["text"] for item in _parse_numbered_items(text)}
+    return {
+        int(item["num"]): item["text"]
+        for item in _parse_numbered_items(text, field="expected")
+    }
 
 
 def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
@@ -376,7 +376,7 @@ def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
             out["step_nums"] = [int(x) for x in out["step_nums"]]
         else:
             raw_steps = out.get("steps_raw") or ""
-            items = _parse_numbered_items(raw_steps)
+            items = _parse_numbered_items(raw_steps, field="step")
             out["step_nums"] = (
                 [int(it["num"]) for it in items]
                 if items
@@ -389,10 +389,10 @@ def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
     step_items = (
         [{"num": int(n), "text": t} for n, t in zip(out.get("step_nums") or [], steps)]
         if steps and out.get("step_nums")
-        else (_parse_numbered_items(raw_steps) if raw_steps else [])
+        else (_parse_numbered_items(raw_steps, field="step") if raw_steps else [])
     )
     expected_items = _rebalance_single_expected(
-        step_items, _parse_numbered_items(expected_raw)
+        step_items, _parse_numbered_items(expected_raw, field="expected")
     )
     if expected_items:
         out["expected"] = [it["text"] for it in expected_items]
@@ -433,10 +433,10 @@ def parse_cases_from_rows(rows: List[List[Any]]) -> List[Dict[str, Any]]:
         if _norm_header(case_id) in ("用例编号", "编号") and not steps_raw:
             continue
 
-        step_items = _parse_numbered_items(steps_raw)
+        step_items = _parse_numbered_items(steps_raw, field="step")
         expected_raw = _cell(row, col_map, "expected")
         expected_items = _rebalance_single_expected(
-            step_items, _parse_numbered_items(expected_raw)
+            step_items, _parse_numbered_items(expected_raw, field="expected")
         )
         if not (case_id or "").strip():
             for cell in row:

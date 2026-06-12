@@ -8,7 +8,7 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from script.log import SLog
 
@@ -87,9 +87,6 @@ def discover_clickables_from_hierarchy(
         SLog.w(TAG, f"dump hierarchy failed: {e}")
         return targets
 
-    y_top = int(screen_h * 0.08)
-    y_bottom = int(screen_h * 0.92)
-
     seen: set = set()
     for node in root.iter("node"):
         if node.get("clickable") != "true":
@@ -99,9 +96,6 @@ def discover_clickables_from_hierarchy(
             continue
         x, y, w, h = rect
         if w < 12 or h < 12:
-            continue
-        cy = y + h // 2
-        if cy < y_top or cy > y_bottom:
             continue
         if w * h > screen_w * screen_h * 0.35:
             continue
@@ -144,6 +138,14 @@ def _ocr_shot_cache_key(shot_or_path) -> str:
 
     if shot_or_path is None:
         return ""
+    try:
+        from server.services.screen_frame_service import screen_frame_watermark
+
+        wm = screen_frame_watermark()
+        if wm >= 0:
+            return f"regwm:{wm}"
+    except Exception:
+        pass
     if isinstance(shot_or_path, str):
         if not os.path.exists(shot_or_path):
             return ""
@@ -203,6 +205,49 @@ def _ocr_analyze_shot(shot_or_path) -> list:
     return items
 
 
+def _ocr_item_bounds(item: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+    coords = item.get("coordinates") or {}
+    box = coords.get("box") or item.get("box")
+    if not box:
+        return None
+    try:
+        xs = [int(p[0]) for p in box]
+        ys = [int(p[1]) for p in box]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not xs or not ys:
+        return None
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def clickables_from_ocr_items(
+    items: List[Dict[str, Any]],
+    screen_w: int,
+    screen_h: int,
+    *,
+    max_items: int = 40,
+) -> List[ClickTarget]:
+    """由已 OCR 的条目构造可点目标（不再重复 analyze）。"""
+    targets: List[ClickTarget] = []
+
+    for it in items or []:
+        text = (it.get("text") or "").strip()
+        bounds = _ocr_item_bounds(it)
+        if not text or bounds is None:
+            continue
+        x1, y1, w, h = bounds
+        if w < 20 or h < 14:
+            continue
+        targets.append(
+            ClickTarget(x=x1, y=y1, w=w, h=h, label=text[:32], source="ocr")
+        )
+        if len(targets) >= max_items:
+            break
+    return targets
+
+
 def discover_clickables_ocr(
     shot_or_path,
     screen_w: int,
@@ -212,33 +257,4 @@ def discover_clickables_ocr(
 ) -> List[ClickTarget]:
     """OCR 文本块作为可点区域（兜底）。shot_or_path 为文件路径或 PIL 截图。"""
     items = _ocr_analyze_shot(shot_or_path)
-    targets: List[ClickTarget] = []
-    y_top = int(screen_h * 0.1)
-    y_bottom = int(screen_h * 0.9)
-
-    for it in items:
-        text = (it.get("text") or "").strip()
-        box = it.get("box")
-        if not text or box is None:
-            continue
-        try:
-            if len(box) < 4:
-                continue
-        except TypeError:
-            continue
-        xs = [p[0] for p in box]
-        ys = [p[1] for p in box]
-        x1, x2 = int(min(xs)), int(max(xs))
-        y1, y2 = int(min(ys)), int(max(ys))
-        w, h = x2 - x1, y2 - y1
-        if w < 20 or h < 14:
-            continue
-        cy = y1 + h // 2
-        if cy < y_top or cy > y_bottom:
-            continue
-        targets.append(
-            ClickTarget(x=x1, y=y1, w=w, h=h, label=text[:32], source="ocr")
-        )
-        if len(targets) >= max_items:
-            break
-    return targets
+    return clickables_from_ocr_items(items, screen_w, screen_h, max_items=max_items)

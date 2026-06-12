@@ -140,8 +140,6 @@ def discover_toggle_candidates(
     if not d:
         return []
 
-    y_top = int(screen_h * 0.06)
-    y_bottom = int(screen_h * 0.96)
     out: List[Dict[str, Any]] = []
     seen: set = set()
 
@@ -157,9 +155,6 @@ def discover_toggle_candidates(
         text: str = "",
     ) -> None:
         if not _is_small_toggle(x1, y1, x2, y2, screen_w, screen_h):
-            return
-        cy = (y1 + y2) // 2
-        if cy < y_top or cy > y_bottom:
             return
         key = (x1 // 6, y1 // 6, x2 // 6, y2 // 6)
         if key in seen:
@@ -321,9 +316,9 @@ def _find_toggle_anchor_bounds(
 
 
 def _grid_scan_bottom_band(screen_w: int, screen_h: int) -> List[Dict[str, Any]]:
-    """底栏协议勾选区网格，供无 CheckBox 节点时 CLIP 视觉匹配。"""
-    y_lo, y_hi = 0.76, 0.96
-    x_lo, x_hi = 0.04, 0.42
+    """全屏网格，供无 CheckBox 节点时 CLIP 视觉匹配（方位由 spatial / anchor 约束）。"""
+    y_lo, y_hi = 0.0, 1.0
+    x_lo, x_hi = 0.0, 1.0
     cell = max(40, int(screen_w * 0.07))
     step = max(16, cell // 2)
     out: List[Dict[str, Any]] = []
@@ -418,12 +413,9 @@ def _try_clip_on_toggles(
         svc = get_clip_service()
         if not svc.available():
             return None
-        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
-        if shot is None:
-            return None
-        from server.services.clip_locate_service import _screenshot_to_bgr
+        from server.services.screen_frame_service import get_frame_bgr
 
-        frame = _screenshot_to_bgr(shot)
+        frame = get_frame_bgr(engine)
         if frame is None:
             return None
         query, aliases = toggle_clip_queries(intent)
@@ -489,27 +481,20 @@ def _clip_agreement_checkbox_pos(
             "small unchecked checkbox",
             "checkbox next to user agreement",
         ]
-        y_lo = int(screen_h * 0.68)
-        for region in ("login_row", "bottom", "full"):
-            pos, method, detail, _rect = try_clip_locate(
-                engine,
-                screen_w,
-                screen_h,
-                label="协议勾选框",
-                query=query,
-                aliases=aliases,
-                region=region,
-            )
-            if not pos:
-                continue
+        pos, method, detail, _rect = try_clip_locate(
+            engine,
+            screen_w,
+            screen_h,
+            label="协议勾选框",
+            query=query,
+            aliases=aliases,
+            region="full",
+        )
+        if pos:
             cx, cy = int(pos[0]), int(pos[1])
-            if cy < y_lo:
-                continue
-            if cx > int(screen_w * 0.45):
-                continue
             SLog.i(
                 TAG,
-                f"agreement checkbox clip @({cx},{cy}) region={region} method={method} {detail}",
+                f"agreement checkbox clip @({cx},{cy}) method={method} {detail}",
             )
             return cx, cy, method or "clip_agreement_checkbox"
     except Exception as e:

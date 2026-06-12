@@ -1,9 +1,8 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""多通道打分仲裁：按页面 profile 权重 + 目标类型加成，取最高分。"""
+"""多通道打分：各通道独立算分，仲裁只取得分最高者（无准入门槛、无 kind 互斥）。"""
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -12,7 +11,7 @@ from typing import List, Optional, Tuple
 from script.log import SLog
 
 from server.services.locate.channels import LocateCandidate
-from server.services.locate.page_profiles import ChannelWeights, PageProfile
+from server.services.locate.page_profiles import PageProfile
 
 TAG = "LocateArbitrator"
 
@@ -25,73 +24,26 @@ class TargetKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-def _min_final_score(
-    kind: TargetKind = TargetKind.UNKNOWN,
-    *,
-    profile_key: str = "generic",
-) -> float:
-    if profile_key == "consent":
-        if kind in (TargetKind.TEXT, TargetKind.BUTTON):
-            return 0.18
-    if profile_key == "system_dialog":
-        if kind in (TargetKind.TEXT, TargetKind.BUTTON):
-            return 0.18
-    if kind == TargetKind.CHECKBOX:
-        try:
-            return float(os.getenv("LOCATE_MIN_SCORE_CHECKBOX", "0.14"))
-        except ValueError:
-            return 0.14
-    try:
-        return float(os.getenv("LOCATE_MIN_SCORE", "0.55"))
-    except ValueError:
-        return 0.55
+def _boosted_raw(c: LocateCandidate) -> float:
+    raw = float(c.score)
+    if c.channel in ("clip", "icon_row", "gallery") and raw < 0.5:
+        raw = min(1.0, raw * 1.35)
+    return raw
 
 
 def classify_target_kind(label: str, core_text: str) -> TargetKind:
+    """仅用于回放诊断展示，不参与打分与是否可点击。"""
     raw = (label or "").strip()
     if re.search(r"勾选|勾上|checkbox|复选|协议.*框|单选|radio", raw, re.I):
         return TargetKind.CHECKBOX
-    if re.search(r"图标|icon", raw, re.I):
+    if re.search(r"图标|\bicon\b", raw, re.I):
         return TargetKind.ICON
-    if re.search(r"方式$", raw) and re.search(r"登录|微信|手机|邮箱|apple|账号", raw, re.I):
-        return TargetKind.ICON
-    try:
-        from server.services.copilot_service import _classify_login_method_intent
-
-        if _classify_login_method_intent(raw):
-            return TargetKind.ICON
-    except Exception:
-        pass
     if re.search(r"按钮|一键|提交|确定|继续|下一步", raw):
         return TargetKind.BUTTON
     core = core_text or raw
     if core and re.search(r"[\u4e00-\u9fff]", core) and len(core) <= 24:
         return TargetKind.TEXT
     return TargetKind.UNKNOWN
-
-
-def _kind_channel_boost(kind: TargetKind, channel: str) -> float:
-    boosts = {
-        TargetKind.TEXT: {"ocr": 1.15, "hierarchy": 1.12, "clip": 0.85, "icon_row": 0.7, "gallery": 0.9},
-        TargetKind.ICON: {
-            "anchor": 1.35,
-            "icon_row": 1.2,
-            "gallery": 1.15,
-            "clip": 1.1,
-            "ocr": 0.75,
-            "hierarchy": 0.8,
-        },
-        TargetKind.BUTTON: {"clip": 1.1, "ocr": 1.05, "hierarchy": 1.0, "gallery": 0.95, "icon_row": 0.85},
-        TargetKind.CHECKBOX: {
-            "clip": 1.45,
-            "hierarchy": 1.25,
-            "ocr": 0.85,
-            "gallery": 1.1,
-            "icon_row": 0.65,
-        },
-        TargetKind.UNKNOWN: {},
-    }
-    return boosts.get(kind, {}).get(channel, 1.0)
 
 
 @dataclass
@@ -108,13 +60,10 @@ def score_candidate(
     profile: PageProfile,
     target_kind: TargetKind,
 ) -> float:
+    _ = target_kind
     weights = profile.weights.as_dict()
     w = weights.get(c.channel, 0.25)
-    boost = _kind_channel_boost(target_kind, c.channel)
-    raw = float(c.score)
-    if c.channel in ("clip", "icon_row", "gallery") and raw < 0.5:
-        raw = min(1.0, raw * 1.35)
-    return raw * w * boost
+    return _boosted_raw(c) * w
 
 
 def arbitrate(
@@ -126,43 +75,26 @@ def arbitrate(
     ranked: List[Tuple[LocateCandidate, float]] = [
         (c, score_candidate(c, profile=profile, target_kind=target_kind)) for c in candidates
     ]
-
     ranked.sort(key=lambda x: x[1], reverse=True)
-    min_score = _min_final_score(target_kind, profile_key=profile.key)
-    winner: Optional[LocateCandidate] = None
-    margin_need = 0.008 if target_kind == TargetKind.CHECKBOX else 0.04
 
-    if ranked:
-        if profile.key == "consent":
-            try:
-                from server.services.copilot_service import _is_disagree_label
+    if profile.key == "consent":
+        try:
+            from server.services.copilot_service import _is_disagree_label
 
-                ranked = [
-                    (c, s)
-                    for c, s in ranked
-                    if not _is_disagree_label(c.label or "")
-                ]
-            except Exception:
-                pass
-        best_c, best_s = ranked[0] if ranked else (None, 0.0)
-        second_s = ranked[1][1] if len(ranked) > 1 else 0.0
-        margin = best_s - second_s
-        if best_c and best_s >= min_score and (
-            margin >= margin_need or best_s >= min_score + 0.08 or len(ranked) == 1
-        ):
-            winner = best_c
-        else:
-            SLog.i(
-                TAG,
-                f"reject ambiguous arbitration top={best_s:.3f} margin={margin:.3f} "
-                f"kind={target_kind.value} profile={profile.key}",
-            )
+            ranked = [
+                (c, s) for c, s in ranked if not _is_disagree_label(c.label or "")
+            ]
+        except Exception:
+            pass
+
+    winner: Optional[LocateCandidate] = ranked[0][0] if ranked else None
 
     if winner:
         SLog.i(
             TAG,
             f"pick channel={winner.channel} method={winner.method} "
-            f"score={ranked[0][1]:.3f} profile={profile.key} kind={target_kind.value}",
+            f"raw={_boosted_raw(winner):.3f} weighted={ranked[0][1]:.3f} "
+            f"profile={profile.key}",
         )
 
     return ArbitrationResult(

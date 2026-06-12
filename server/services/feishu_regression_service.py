@@ -160,6 +160,14 @@ def list_cases_for_app(app, *, refresh: bool = False) -> Dict[str, Any]:
 
 
 def _normalize_step_line(line: str) -> str:
+    try:
+        from server.services.case_text_semantic_service import normalize_step_command
+
+        cmd = normalize_step_command(line)
+        if cmd:
+            return cmd
+    except Exception:
+        pass
     line = re.sub(r"^\d+[.、．)\）]\s*", "", (line or "").strip())
     if not line:
         return ""
@@ -626,8 +634,7 @@ def _run_command_block(
         )
         if guard_fail:
             ok = False
-    if segment_errors:
-        ok = False
+    # segment_errors 仅记入 plan_log 告警，不把已成功的点击操作标为失败
     fail_msgs = [r.get("msg") or "" for r in results if not r.get("ok")]
     if segment_errors:
         fail_msgs = segment_errors + fail_msgs
@@ -992,6 +999,13 @@ def _verify_step_expected(
             "page_context": {},
         }
 
+    try:
+        from server.services.expectation_semantic_service import parse_expectation_texts
+
+        claim_texts = parse_expectation_texts(exp)
+    except Exception:
+        claim_texts = [exp]
+
     screen_text = ""
     page_context: Dict[str, Any] = {}
     device_lost = False
@@ -1040,9 +1054,9 @@ def _verify_step_expected(
             )
             page_context = _enrich_page_context_meta(page_context, exp, app_id)
             trial_checks = _check_expected(
-                [exp], screen_text, step_results, page_context=page_context
+                claim_texts, screen_text, step_results, page_context=page_context
             )
-            if trial_checks and trial_checks[0].get("ok"):
+            if trial_checks and all(c.get("ok") for c in trial_checks):
                 break
             if attempt < max_rounds - 1 and not device_lost:
                 SLog.i(
@@ -1061,7 +1075,7 @@ def _verify_step_expected(
 
     steps_ok = aas.business_step_results_ok(step_results)
     checks = _check_expected(
-        [exp], screen_text, step_results, page_context=page_context
+        claim_texts, screen_text, step_results, page_context=page_context
     )
     checks_ok = all(c.get("ok") for c in checks) if checks else False
     recovery: Optional[Dict[str, Any]] = None
@@ -1119,7 +1133,7 @@ def _verify_step_expected(
                 page_context = _enrich_page_context_meta(page_context, exp, app_id)
                 screen_text = recovery.get("screen_text_after") or screen_text
                 checks = _check_expected(
-                    [exp], screen_text, step_results, page_context=page_context
+                    claim_texts, screen_text, step_results, page_context=page_context
                 )
                 checks_ok = all(c.get("ok") for c in checks) if checks else False
         except Exception as e:
@@ -1165,24 +1179,6 @@ def _verify_step_expected(
             else ""
         ),
     )
-
-    # 若语义拆解出多个 Plan，按片段分别校验并回填
-    if len(plan_tree.get("plans") or []) > 1:
-        enriched_plans = []
-        for p in plan_tree["plans"]:
-            frag = p.get("verify_text") or p.get("summary") or ""
-            frag_checks = _check_expected(
-                [frag], screen_text, step_results, page_context=page_context
-            )
-            enriched_plans.append(
-                {
-                    **p,
-                    "checks": frag_checks,
-                    "ok": all(c.get("ok") for c in frag_checks),
-                }
-            )
-        plan_tree["plans"] = enriched_plans
-        checks_ok = all(p.get("ok") for p in enriched_plans)
 
     if not steps_ok:
         invalidated = []

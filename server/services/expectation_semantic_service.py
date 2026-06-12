@@ -174,6 +174,232 @@ def _llm_configured() -> bool:
     return bool(key and base)
 
 
+def _llm_parse_enabled() -> bool:
+    case_flag = (os.environ.get("CASE_TEXT_PARSE_LLM") or "").strip().lower()
+    if case_flag:
+        return case_flag not in ("0", "false", "no", "off")
+    flag = (os.environ.get("EXPECTATION_PARSE_LLM") or "1").strip().lower()
+    return flag not in ("0", "false", "no", "off")
+
+
+_CLAIM_KINDS = frozenset(
+    {
+        "page_nav",
+        "text_present",
+        "text_absent",
+        "numeric",
+        "state_change",
+        "login_outcome",
+        "generic",
+    }
+)
+
+_ASSERTION_HINT_RE = re.compile(
+    r"进入|打开|切换|跳转|显示|展示|包含|不包含|不再|数量|成功|失败|登录|页|校验|确认|变为|变成",
+    re.I,
+)
+
+_PARSE_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_PARSE_CACHE_MAX = 128
+
+_NUMBERED_STEP_RE = re.compile(r"(?:^|\s)\d+[.、．)\）]\s*")
+
+
+def _strip_expected_prefix(text: str) -> str:
+    return re.sub(r"^\d+[.、．)\）]\s*", "", (text or "").strip())
+
+
+def _protect_quoted_segments(text: str) -> tuple[str, Dict[str, str]]:
+    """保护引号内文案，避免误切分。"""
+    protected: Dict[str, str] = {}
+
+    def _shield(match: re.Match) -> str:
+        key = f"__Q{len(protected)}__"
+        protected[key] = match.group(0)
+        return key
+
+    shielded = re.sub(r"[「『\"']([^」』\"']+)[」』\"']", _shield, text)
+    return shielded, protected
+
+
+def _restore_protected(text: str, protected: Dict[str, str]) -> str:
+    out = text
+    for key, val in protected.items():
+        out = out.replace(key, val)
+    return out
+
+
+def _looks_like_independent_claims(parts: List[str]) -> bool:
+    if len(parts) <= 1:
+        return False
+    scored = 0
+    for p in parts:
+        if len(p.strip()) < 2:
+            return False
+        if _ASSERTION_HINT_RE.search(p):
+            scored += 1
+    return scored >= len(parts)
+
+
+def _parse_expectation_claims_rules(expected_text: str) -> List[Dict[str, Any]]:
+    """
+    规则拆解预期（无 LLM 时的回退）。
+    默认不在逗号处切分，避免「进入首页，推荐流正常」被误拆。
+    """
+    exp = _strip_expected_prefix(expected_text)
+    if not exp:
+        return []
+
+    if _NUMBERED_STEP_RE.search(exp):
+        chunks = _NUMBERED_STEP_RE.split(exp)
+        parts = [_strip_expected_prefix(c) for c in chunks if c and c.strip()]
+        parts = [p for p in parts if p]
+        if _looks_like_independent_claims(parts):
+            return [
+                {"text": p, "kind": "generic", "parse_method": "rules"}
+                for p in parts
+            ]
+
+    shielded, protected = _protect_quoted_segments(exp)
+    delims = r"[；;、]"
+    if (os.environ.get("EXPECTATION_SPLIT_COMMA") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        delims = r"[；;、,，]"
+
+    parts = [p.strip() for p in re.split(delims, shielded) if p.strip()]
+    parts = [_restore_protected(p, protected) for p in parts]
+
+    if len(parts) <= 1:
+        return [{"text": exp, "kind": "generic", "parse_method": "rules"}]
+    if not _looks_like_independent_claims(parts):
+        return [{"text": exp, "kind": "generic", "parse_method": "rules"}]
+    return [{"text": p, "kind": "generic", "parse_method": "rules"} for p in parts]
+
+
+def _llm_chat_json(
+    *,
+    system: str,
+    user_payload: Dict[str, Any],
+    max_tokens: int = 400,
+    timeout: int = 25,
+) -> Optional[Dict[str, Any]]:
+    if not _llm_configured():
+        return None
+    api_key = (os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    base = (os.environ.get("LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+    model = (os.environ.get("LLM_MODEL") or "qwen-plus").strip()
+    try:
+        resp = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+            },
+            timeout=timeout,
+        )
+        if not resp.ok:
+            SLog.w(TAG, f"LLM HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start < 0 or end <= start:
+            return None
+        return json.loads(content[start:end])
+    except Exception as e:
+        SLog.w(TAG, f"LLM chat failed: {e}")
+        return None
+
+
+def _llm_parse_expectation_claims(expected_text: str) -> Optional[List[Dict[str, Any]]]:
+    """用大模型把一条预期拆成可独立校验的原子断言。"""
+    exp = _strip_expected_prefix(expected_text)
+    if not exp:
+        return []
+
+    system = (
+        "你是移动 App 自动化测试用例编写助手。"
+        "用户给出一条「预期效果」自然语言，请拆成若干条可独立用 OCR/页面识别校验的原子断言。"
+        "规则：\n"
+        "1. 若整句只需一次校验，claims 只含一条，text 保留原意完整表述。\n"
+        "2. 不要在无意义的逗号处强行拆分；「进入首页，推荐正常」若是一条综合预期可保留一条。\n"
+        "3. 明确并列的多条预期（分号、顿号、并且/同时/且 连接的两件独立事）才拆多条。\n"
+        "4. kind 取值：page_nav|text_present|text_absent|numeric|state_change|login_outcome|generic。\n"
+        "5. 只输出 JSON：{\"claims\":[{\"text\":\"...\",\"kind\":\"...\"}]}"
+    )
+    data = _llm_chat_json(system=system, user_payload={"expected": exp})
+    if not data:
+        return None
+    rows = data.get("claims") or []
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = _strip_expected_prefix(str(row.get("text") or "").strip())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        kind = str(row.get("kind") or "generic").strip().lower()
+        if kind not in _CLAIM_KINDS:
+            kind = "generic"
+        out.append({"text": text, "kind": kind, "parse_method": "llm"})
+    if not out:
+        return None
+    if len(out) == 1 and out[0]["text"] == exp:
+        return out
+    if len(out) == 1:
+        return out
+    SLog.i(TAG, f"LLM parsed expectation into {len(out)} claims: {exp[:40]!r}")
+    return out
+
+
+def parse_expectation_claims(
+    expected_text: str,
+    *,
+    use_llm: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    将一条预期拆解为原子断言列表。
+    优先 LLM（EXPECTATION_PARSE_LLM=1 且已配置 LLM_API_KEY/BASE），否则规则回退。
+    """
+    exp = _strip_expected_prefix(expected_text)
+    if not exp:
+        return []
+
+    cache_key = f"{int(use_llm and _llm_parse_enabled())}:{exp}"
+    if cache_key in _PARSE_CACHE:
+        return [dict(c) for c in _PARSE_CACHE[cache_key]]
+
+    claims: Optional[List[Dict[str, Any]]] = None
+    if use_llm and _llm_parse_enabled() and _llm_configured():
+        claims = _llm_parse_expectation_claims(exp)
+    if not claims:
+        claims = _parse_expectation_claims_rules(exp)
+
+    if len(_PARSE_CACHE) >= _PARSE_CACHE_MAX:
+        _PARSE_CACHE.clear()
+    _PARSE_CACHE[cache_key] = [dict(c) for c in claims]
+    return [dict(c) for c in claims]
+
+
+def parse_expectation_texts(expected_text: str, *, use_llm: bool = True) -> List[str]:
+    """仅返回断言文案列表（兼容旧 _split_expected_fragments 调用方）。"""
+    return [c["text"] for c in parse_expectation_claims(expected_text, use_llm=use_llm)]
+
+
 def _llm_judge_page_expectation(
     expected: str,
     current_label: str,

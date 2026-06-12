@@ -140,9 +140,9 @@ Consent / 系统权限处置见 [overlay-guard.md](../locate/overlay-guard.md)�
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `LOCATE_ARBITRATOR` | `1` | 多通道仲裁 |
-| `LOCATE_MIN_SCORE` | `0.55` | 通用最低分 |
-| consent profile | ~0.18 | 同意按钮 |
+| `LOCATE_ARBITRATOR` | `1` | 多通道仲裁（加权取最高，无全局 min_score） |
+| `CLIP_ENABLED` | `1` | CLIP / icon_row 视觉通道 |
+| `LOCATE_PROFILES_PATH` | 内置 YAML | 页面 profile 权重 |
 
 ## 6. 源码索引
 

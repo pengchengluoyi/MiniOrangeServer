@@ -527,13 +527,25 @@ def build_operation_plan_tree(
 
         plan_shot = ""
         plan_elapsed = ""
+        plan_elapsed_ms = 0
         if actions_raw:
+            last_a = actions_raw[-1]
             plan_shot = (
-                actions_raw[0].get("screenshot_before")
-                or actions_raw[-1].get("screenshot_after")
+                last_a.get("screenshot_before")
+                or last_a.get("screenshot_after")
+                or actions_raw[0].get("screenshot_before")
+                or actions_raw[0].get("screenshot_after")
                 or ""
             )
-            plan_elapsed = actions_raw[0].get("run_elapsed") or ""
+            for a in reversed(actions_raw):
+                ms = int(a.get("run_elapsed_ms") or 0)
+                if ms > 0:
+                    plan_elapsed_ms = ms
+                    plan_elapsed = a.get("run_elapsed") or plan_elapsed
+                    break
+            if not plan_elapsed:
+                plan_elapsed = actions_raw[0].get("run_elapsed") or ""
+                plan_elapsed_ms = int(actions_raw[0].get("run_elapsed_ms") or 0)
 
         ps_summary = (ps.get("summary") or ps.get("kind") or "").strip()
         if ps_summary.startswith("守卫 ·"):
@@ -555,6 +567,7 @@ def build_operation_plan_tree(
             "detail": ps.get("detail") or {},
             "screenshot": plan_shot,
             "run_elapsed": plan_elapsed,
+            "run_elapsed_ms": plan_elapsed_ms,
             "ok": actions_raw[-1].get("ok") if actions_raw else None,
         }
         plans.append({**plan_item, "actions": []})
@@ -609,7 +622,8 @@ def build_operation_plan_tree(
 
 
 def _action_flat_item(plan_index: int, action: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    ms = int(action.get("run_elapsed_ms") or 0)
+    item: Dict[str, Any] = {
         "type": "action",
         "plan_index": plan_index,
         "index": action.get("index"),
@@ -619,6 +633,11 @@ def _action_flat_item(plan_index: int, action: Dict[str, Any]) -> Dict[str, Any]
         "click_attempt": action.get("click_attempt"),
         "guard_round": action.get("guard_round"),
     }
+    if ms > 0:
+        item["run_elapsed_ms"] = ms
+        if action.get("run_elapsed"):
+            item["run_elapsed"] = action.get("run_elapsed")
+    return item
 
 
 def _plan_flat_item(plan_index: int, run_elapsed_ms: int) -> Dict[str, Any]:
@@ -657,10 +676,15 @@ def _build_flat_items_by_execution_order(
     emitted_business_initial: set = set()
 
     for _ms, pi, act in timeline:
+        act_ms = int(act.get("run_elapsed_ms") or _ms or 0)
         is_guard = act.get("phase") == "overlay_guard" or is_guard_plan_index(pi)
         if is_guard:
+            biz_before = int(act.get("guard_before_step") if act.get("guard_before_step") is not None else -1)
+            if biz_before >= 0 and biz_before not in emitted_business_initial:
+                flat.append(_plan_flat_item(biz_before, act_ms))
+                emitted_business_initial.add(biz_before)
             if pi not in emitted_guard_plans:
-                flat.append(_plan_flat_item(pi, _ms))
+                flat.append(_plan_flat_item(pi, act_ms))
                 emitted_guard_plans.add(pi)
             flat.append(_action_flat_item(pi, act))
             last_was_guard = True
@@ -670,9 +694,9 @@ def _build_flat_items_by_execution_order(
         if is_guard_plan_index(biz_pi):
             biz_pi = int(act.get("guard_before_step") or 0)
         if last_was_guard:
-            flat.append(_plan_flat_item(biz_pi, _ms))
+            flat.append(_plan_flat_item(biz_pi, act_ms))
         elif biz_pi not in emitted_business_initial:
-            flat.append(_plan_flat_item(biz_pi, _ms))
+            flat.append(_plan_flat_item(biz_pi, act_ms))
             emitted_business_initial.add(biz_pi)
         flat.append(_action_flat_item(biz_pi, act))
         last_was_guard = False
@@ -691,10 +715,18 @@ def _sort_flat_items_chronologically(
 
 
 def _split_expected_fragments(expected_text: str) -> List[str]:
+    try:
+        from server.services.expectation_semantic_service import parse_expectation_texts
+
+        texts = parse_expectation_texts(expected_text)
+        if texts:
+            return texts
+    except Exception:
+        pass
     exp = re.sub(r"^\d+[.、．)\）]\s*", "", (expected_text or "").strip())
     if not exp:
         return []
-    parts = [p.strip() for p in re.split(r"[、,，;；]", exp) if p.strip() and len(p.strip()) >= 2]
+    parts = [p.strip() for p in re.split(r"[；;、]", exp) if p.strip() and len(p.strip()) >= 2]
     return parts if parts else [exp]
 
 
@@ -706,6 +738,14 @@ def build_expected_plan_tree(
 ) -> Dict[str, Any]:
     """预期动作 → Plan → 校验项。"""
     fragments = _split_expected_fragments(expected_text)
+    claim_kinds: Dict[str, str] = {}
+    try:
+        from server.services.expectation_semantic_service import parse_expectation_claims
+
+        for row in parse_expectation_claims(expected_text):
+            claim_kinds[row["text"]] = row.get("kind") or "generic"
+    except Exception:
+        pass
     check_by_text = {(c.get("text") or "").strip(): c for c in (checks or [])}
     plans: List[Dict[str, Any]] = []
 
@@ -724,6 +764,7 @@ def build_expected_plan_tree(
                 "summary": frag,
                 "title": f"Plan - 校验{frag}",
                 "verify_text": frag,
+                "claim_kind": claim_kinds.get(frag, "generic"),
                 "checks": verify_checks,
                 "ok": all(c.get("ok") for c in verify_checks),
             }

@@ -243,8 +243,8 @@ def _refine_login_row_candidates(
 
 def _grid_scan_full(screen_w: int, screen_h: int) -> List[Dict[str, Any]]:
     """全屏网格候选：hierarchy 无节点时仍做 CLIP 视觉匹配（与具体 App 无关）。"""
-    y_lo, y_hi = 0.18, 0.82
-    x_lo, x_hi = 0.08, 0.92
+    y_lo, y_hi = 0.0, 1.0
+    x_lo, x_hi = 0.0, 1.0
     cell = max(56, int(screen_w * 0.14))
     step_x = max(20, cell // 2)
     step_y = max(18, cell // 2)
@@ -309,22 +309,17 @@ def _grid_scan_login_row(
 
 
 def _login_row_intent_slot(query: str, n: int) -> Optional[int]:
-    """登录图标行槽位（左→右），用于 CLIP 分数接近时的通用 tie-break。"""
+    """图标行槽位 tie-break：按 query 文案启发式，不依赖登录专用分类器。"""
     if n <= 0:
         return None
-    try:
-        from server.services.copilot_service import _classify_login_method_intent
-
-        intent = _classify_login_method_intent(query)
-    except Exception:
-        intent = None
-    if intent == "wechat":
+    q = (query or "").strip()
+    if re.search(r"微信", q, re.I):
         return 0
-    if intent == "phone_sms":
+    if re.search(r"手机|电话|sms|phone", q, re.I):
         return n // 2
-    if intent == "email_password":
+    if re.search(r"邮箱|密码|账号|email|password", q, re.I):
         return min(2, n - 1)
-    if intent == "apple":
+    if re.search(r"苹果|apple", q, re.I):
         return n - 1
     return None
 
@@ -446,18 +441,15 @@ def _collect_candidates_from_hierarchy(
     screen_w: int,
     screen_h: int,
     *,
-    region: str,
-    max_items: int = 48,
+    region: str = "full",
+    max_items: int = 96,
 ) -> List[Dict[str, Any]]:
+    _ = region
     try:
         from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
 
-        band = REGION_BANDS.get(region, REGION_BANDS["full"])
         out: List[Dict[str, Any]] = []
         for t in discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=max_items):
-            cy = t.y + t.h // 2
-            if not _y_in_band(cy, screen_h, band):
-                continue
             out.append(
                 {
                     "x": int(t.x),
@@ -555,12 +547,6 @@ def _clip_hit_matches_query(query: str, hit: Dict[str, Any], *, region: str, scr
             return True
         if not label or _is_generic_icon_name(label):
             return float(hit.get("score") or 0) >= _score_threshold()
-    if region != "full" and screen_h > 0:
-        band = REGION_BANDS.get(region, REGION_BANDS["full"])
-        if not _y_in_band(int(cy), screen_h, band):
-            SLog.i(TAG, f"reject clip hit: out of region={region} cy={cy}")
-            return False
-
     if _is_generic_icon_name(label) and method.startswith("clip_gallery"):
         SLog.i(TAG, f"reject clip hit: generic gallery label={label!r} query={query!r}")
         return False
@@ -664,73 +650,35 @@ def locate_on_screenshot(
     if text_vec is None:
         return None
 
-    band = REGION_BANDS.get(region, REGION_BANDS["full"])
     threshold = _score_threshold()
     gallery_threshold = _gallery_threshold()
     best: Optional[Dict[str, Any]] = None
 
-    login_row_icons: List[Dict[str, Any]] = []
-    if region == "login_row" and engine is not None:
-        row_hit, login_row_icons = _locate_login_row(
-            frame,
-            query=query,
-            screen_w=screen_w,
-            screen_h=screen_h,
-            text_vec=text_vec,
-            svc=svc,
-            threshold=threshold,
-            engine=engine,
-        )
-        if row_hit is not None:
-            best = row_hit
-
     candidates: List[Dict[str, Any]] = list(extra_candidates or [])
-    if login_row_icons:
-        candidates.extend(login_row_icons)
-    elif engine is not None:
-        for c in _collect_candidates_from_hierarchy(engine, screen_w, screen_h, region=region):
+    if engine is not None:
+        for c in _collect_candidates_from_hierarchy(engine, screen_w, screen_h):
             if c not in candidates:
                 candidates.append(c)
 
-    if region == "login_row" and best is None and not login_row_icons:
-        refined = _refine_login_row_candidates(candidates, screen_w, screen_h)
-        if refined:
-            candidates = refined
-        else:
-            row_y = int(screen_h * sum(REGION_BANDS["login_row"]) / 2)
-            candidates = _grid_scan_login_row(screen_w, screen_h, row_y=row_y)
-
     scored_patches: List[Tuple[float, Dict[str, Any]]] = []
-    if best is None:
-        for score, c in _score_patch_candidates(frame, candidates, text_vec, svc, query=query):
+    for score, c in _score_patch_candidates(frame, candidates, text_vec, svc, query=query):
+        scored_patches.append((score, c))
+        if best is None or score > best["score"]:
+            method = "clip_patch" if c.get("source") != "grid" else "clip_grid"
+            best = _hit_from_candidate(c, score, query=query, method=method)
+
+    if not scored_patches or (best and best["score"] < threshold):
+        grid = _grid_scan_full(screen_w, screen_h)
+        grid_scored = _score_patch_candidates(frame, grid, text_vec, svc, query=query, pad=4)
+        for score, c in grid_scored:
             scored_patches.append((score, c))
             if best is None or score > best["score"]:
-                method = "clip_patch" if c.get("source") != "grid" else "clip_grid"
-                best = _hit_from_candidate(c, score, query=query, method=method)
-
-        if region == "full" and (not scored_patches or (best and best["score"] < threshold)):
-            grid = _grid_scan_full(screen_w, screen_h)
-            grid_scored = _score_patch_candidates(frame, grid, text_vec, svc, query=query, pad=4)
-            for score, c in grid_scored:
-                scored_patches.append((score, c))
-                if best is None or score > best["score"]:
-                    best = _hit_from_candidate(c, score, query=query, method="clip_grid")
-            if grid_scored:
-                SLog.i(
-                    TAG,
-                    f"full grid fallback n={len(grid)} top={grid_scored[0][0]:.3f}",
-                )
-
-    if scored_patches and len(scored_patches) >= 2 and best is not None:
-        scored_patches.sort(key=lambda x: x[0], reverse=True)
-        top_s, second_s = scored_patches[0][0], scored_patches[1][0]
-        margin = top_s - second_s
-        if margin < 0.045 and top_s < 0.38:
+                best = _hit_from_candidate(c, score, query=query, method="clip_grid")
+        if grid_scored:
             SLog.i(
                 TAG,
-                f"reject ambiguous clip top={top_s:.3f} margin={margin:.3f} query={query!r}",
+                f"full grid fallback n={len(grid)} top={grid_scored[0][0]:.3f}",
             )
-            best = None
 
     gallery = _gallery_entries(icon_targets, text_vec, query=query)
     if gallery:
@@ -787,7 +735,7 @@ def locate_on_screenshot(
                 if gw <= 0 or gh <= 0:
                     gx, gy, gw, gh = 0, 0, 0, 0
                 cx, cy = gx + gw // 2, gy + gh // 2
-                if gw > 0 and gh > 0 and (_y_in_band(cy, screen_h, band) or region == "full"):
+                if gw > 0 and gh > 0:
                     if g_score >= gallery_threshold:
                         coord_hit = {
                             "x": gx,
@@ -805,11 +753,8 @@ def locate_on_screenshot(
                         if best is None or coord_hit["score"] > best["score"]:
                             best = coord_hit
 
-    effective_threshold = (
-        max(threshold, _login_row_threshold()) if region == "login_row" else threshold
-    )
-    if best and best["score"] >= effective_threshold:
-        if not _clip_hit_matches_query(query, best, region=region, screen_h=screen_h):
+    if best:
+        if not _clip_hit_matches_query(query, best, region="full", screen_h=screen_h):
             SLog.i(
                 TAG,
                 f"locate rejected query={query!r} region={region} "
@@ -824,14 +769,7 @@ def locate_on_screenshot(
             f"method={best.get('method')} label={best.get('label')!r}",
         )
         return best
-    if best:
-        SLog.i(
-            TAG,
-            f"locate below threshold query={query!r} region={region} "
-            f"best={best['score']:.3f}<{threshold:.2f} label={best.get('label')!r}",
-        )
-    else:
-        SLog.i(TAG, f"locate no candidate query={query!r} region={region}")
+    SLog.i(TAG, f"locate no candidate query={query!r} region={region}")
     return None
 
 
@@ -849,22 +787,25 @@ def try_clip_locate(
     """供 copilot _resolve_click_target 调用的薄封装。"""
     if not label and not query:
         return None, "none", "", None
-    shot = None
     try:
-        if hasattr(engine, "screenshot"):
-            shot = engine.screenshot()
+        from server.services.screen_frame_service import get_screen_frame
+
+        frame = get_screen_frame(engine)
+        if frame.get("screen_not_ready"):
+            return None, "none", "屏未就绪", None
+        shot = frame.get("shot")
     except Exception as e:
-        SLog.w(TAG, f"screenshot failed: {e}")
+        SLog.w(TAG, f"screen frame failed: {e}")
         return None, "none", f"CLIP 截图失败: {e}", None
     if shot is None:
         return None, "none", "CLIP 无截图", None
 
     q = (query or label or "").strip()
-    region_key = region or infer_region_hint(q or label)
+    _ = region
     alias_list: List[str] = [str(a).strip() for a in (aliases or []) if str(a).strip()]
     SLog.i(
         TAG,
-        f"try label={label!r} query={q!r} region={region_key} "
+        f"try label={label!r} query={q!r} region=full "
         f"icons={len(icon_targets or [])} aliases={len(alias_list)}",
     )
 
@@ -873,7 +814,7 @@ def try_clip_locate(
         q,
         screen_w=screen_w,
         screen_h=screen_h,
-        region=region_key,
+        region="full",
         aliases=alias_list,
         icon_targets=icon_targets,
         engine=engine,
@@ -882,7 +823,7 @@ def try_clip_locate(
         return (
             None,
             "none",
-            f"CLIP 未命中「{q}」（region={region_key}，threshold={_score_threshold():.2f}）",
+            f"CLIP 未命中「{q}」（region=full，threshold={_score_threshold():.2f}）",
             None,
         )
     cx, cy = hit["center"]

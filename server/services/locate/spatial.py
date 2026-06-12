@@ -87,9 +87,6 @@ def point_in_zones(
 
 
 def clip_region_hint(zones: Set[str]) -> str:
-    """供 CLIP 通道的粗粒度 region（精确过滤由 zones 完成）。"""
-    if not zones:
-        return "full"
-    if zones <= {"bottom_left", "bottom_center", "bottom_right"}:
-        return "bottom"
+    """CLIP 始终全屏检索；方位约束仅由 point_in_zones + zones 完成。"""
+    _ = zones
     return "full"

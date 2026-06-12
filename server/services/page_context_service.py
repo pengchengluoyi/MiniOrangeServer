@@ -247,6 +247,12 @@ def identify_page_for_trace(
         frame_count=frame_count,
         screen_text=screen_text,
     )
+    try:
+        from server.services.locate.app_packages import attach_foreground_app_to_context
+
+        pc = attach_foreground_app_to_context(pc, engine)
+    except Exception:
+        pass
     return enrich_page_context_screenshot(
         pc, sn=sn, platform=platform, run_id=run_id, tag=tag
     )
@@ -377,111 +383,29 @@ def identify_for_app(
 
 
 def _screen_cache_watermark() -> int:
-    try:
-        from server.services.regression_run_context import get_ctx
+    from server.services.screen_frame_service import screen_frame_watermark
 
-        ctx = get_ctx()
-        if ctx is not None:
-            return len(ctx.get("gestures") or [])
-    except Exception:
-        pass
-    return -1
+    return screen_frame_watermark()
 
 
 def invalidate_engine_screen_cache(engine=None) -> None:
-    """手势或强制刷新后清除引擎上的屏快照。"""
-    if engine is not None:
-        try:
-            delattr(engine, "_mo_screen_snap")
-        except Exception:
-            pass
-    try:
-        from driver.agent.Crawl.device_bootstrap import _ENGINE_CACHE
+    """手势或强制刷新后清除统一屏帧缓存。"""
+    from server.services.screen_frame_service import invalidate_screen_frame
 
-        for entry in _ENGINE_CACHE.values():
-            eng = entry.get("engine")
-            if eng is not None:
-                try:
-                    delattr(eng, "_mo_screen_snap")
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    invalidate_screen_frame(engine)
 
 
 def get_engine_screen_snapshot(engine, *, force: bool = False) -> Dict[str, Any]:
-    """
-    单次截图 + 单次 OCR + 层级文本，同一手势水位内复用。
-    返回 {ocr_text, blob, shot, wm}。
-    """
-    wm = _screen_cache_watermark()
-    if not force and engine is not None:
-        cached = getattr(engine, "_mo_screen_snap", None)
-        if isinstance(cached, dict) and cached.get("wm") == wm and cached.get("blob"):
-            return cached
+    """兼容别名 → screen_frame_service.get_screen_frame。"""
+    from server.services.screen_frame_service import get_screen_frame
 
-    w, h = 1080, 1920
-    try:
-        if hasattr(engine, "screen_size"):
-            w, h = engine.screen_size()
-        elif hasattr(engine, "_display_size"):
-            w, h = engine._display_size()
-    except Exception:
-        pass
+    return get_screen_frame(engine, force=force)
 
-    hierarchy_lines: List[str] = []
-    try:
-        from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
 
-        for t in discover_clickables_from_hierarchy(engine, w, h, max_items=80):
-            if t.label:
-                hierarchy_lines.append(t.label)
-    except Exception as e:
-        SLog.w(TAG, f"hierarchy collect failed: {e}")
-
-    ocr_lines: List[str] = []
-    shot = None
-    try:
-        if hasattr(engine, "screenshot"):
-            shot = engine.screenshot()
-            if shot is not None:
-                from driver.agent.Crawl.ui_discovery import _ocr_analyze_shot
-
-                for it in _ocr_analyze_shot(shot) or []:
-                    t = (it.get("text") or "").strip()
-                    if t:
-                        ocr_lines.append(t)
-    except Exception as e:
-        SLog.w(TAG, f"screen ocr failed: {e}")
-
-    ocr_text = "\n".join(ocr_lines)
-    parts = []
-    if hierarchy_lines:
-        parts.append("\n".join(hierarchy_lines))
-    if ocr_lines:
-        parts.append(ocr_text)
-    blob = "\n".join(parts)
-
-    snap: Dict[str, Any] = {
-        "wm": wm,
-        "ocr_text": ocr_text,
-        "blob": blob,
-        "screen_w": w,
-        "screen_h": h,
-    }
-    if engine is not None:
-        engine._mo_screen_snap = snap
-    try:
-        from server.services.regression_run_context import get_ctx
-
-        ctx = get_ctx()
-        if ctx is not None:
-            ctx["screen_blob"] = blob
-            ctx["screen_ocr"] = ocr_text
-            ctx["screen_wm"] = wm
-    except Exception:
-        pass
-    return snap
+def get_cached_ocr_items(engine, *, force: bool = False) -> List[Dict[str, Any]]:
+    """定位/阻塞检测共用：返回当前水位内已 OCR 的带框条目（不重复 analyze）。"""
+    snap = get_engine_screen_snapshot(engine, force=force)
+    return list(snap.get("ocr_items") or [])
 
 
 def _collect_full_screen_text(engine, *, force: bool = False) -> str:

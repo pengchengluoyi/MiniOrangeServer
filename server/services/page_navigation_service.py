@@ -299,25 +299,65 @@ def _hierarchy_find_consent_agree_button(
     return None
 
 
-def classify_blocking_screen(engine) -> Dict[str, Any]:
-    """
-    判断当前是否被 consent 弹窗 / 协议全文页阻塞。
-    基于 OCR 空间语义打分：居中弹窗文案 vs 底栏登录控件，不依赖 hierarchy 按钮对。
-    """
-    screen_w, screen_h = _engine_screen_size(engine)
-    blank = False
-    locked = False
-    try:
-        if hasattr(engine, "screenshot"):
-            shot = engine.screenshot()
-            if shot is not None and hasattr(engine, "_is_mostly_black_image"):
-                blank = engine._is_mostly_black_image(shot)
-        if hasattr(engine, "_is_keyguard_showing"):
-            locked = engine._is_keyguard_showing()
-    except Exception:
-        pass
+def _hierarchy_has_app_consent_modal(
+    engine,
+    screen_w: Optional[int] = None,
+    screen_h: Optional[int] = None,
+) -> bool:
+    """无障碍树同时存在「不同意」「同意」→ 应用隐私弹窗（不依赖 OCR 全文）。"""
+    if engine is None:
+        return False
+    if screen_w is None or screen_h is None:
+        screen_w, screen_h = _engine_screen_size(engine)
+    disagree, agree = _hierarchy_find_consent_button_pair(engine, screen_w, screen_h)
+    return bool(disagree and agree)
 
-    if blank or locked:
+
+def get_blocking_screen_state(engine, *, force: bool = False) -> Dict[str, Any]:
+    """
+    判断当前是否被 consent / 协议 / 权限弹窗阻塞。
+    同一手势水位内缓存，与 get_engine_screen_snapshot 共用一次 OCR。
+    """
+    try:
+        from server.services.page_context_service import get_engine_screen_snapshot
+        from server.services.screen_frame_service import screen_frame_watermark
+
+        wm = screen_frame_watermark()
+        if not force and engine is not None:
+            cached = getattr(engine, "_mo_blocking_state", None)
+            if isinstance(cached, dict) and cached.get("wm") == wm and cached.get("state"):
+                return dict(cached["state"])
+
+        snap = get_engine_screen_snapshot(engine, force=force)
+        screen_w = int(snap.get("screen_w") or 0) or _engine_screen_size(engine)[0]
+        screen_h = int(snap.get("screen_h") or 0) or _engine_screen_size(engine)[1]
+
+        if snap.get("screen_not_ready"):
+            state = {
+                "consent": False,
+                "agreement": False,
+                "ocr_text": "",
+                "ocr_len": 0,
+                "has_disagree_btn": False,
+                "has_agree_btn": False,
+                "reason": snap.get("reason") or "screen_not_ready",
+                "screen_w": screen_w,
+                "screen_h": screen_h,
+                "layer_scores": {},
+                "screen_not_ready": True,
+            }
+            if engine is not None:
+                engine._mo_blocking_state = {"wm": wm, "state": state}
+            return state
+
+        ocr_items = list(snap.get("ocr_items") or [])
+        state = _blocking_state_from_ocr_items(ocr_items, screen_w, screen_h)
+        if engine is not None:
+            engine._mo_blocking_state = {"wm": wm, "state": state}
+        return state
+    except Exception as e:
+        SLog.w(TAG, f"get_blocking_screen_state failed: {e}")
+        screen_w, screen_h = _engine_screen_size(engine)
         return {
             "consent": False,
             "agreement": False,
@@ -325,14 +365,25 @@ def classify_blocking_screen(engine) -> Dict[str, Any]:
             "ocr_len": 0,
             "has_disagree_btn": False,
             "has_agree_btn": False,
-            "reason": "keyguard" if locked else "screen_blank",
+            "reason": "error",
             "screen_w": screen_w,
             "screen_h": screen_h,
             "layer_scores": {},
-            "screen_not_ready": True,
+            "screen_not_ready": False,
         }
 
-    ocr_items, screen_w, screen_h = _collect_ocr_layout(engine)
+
+def classify_blocking_screen(engine) -> Dict[str, Any]:
+    """兼容旧调用方；内部走带缓存的 get_blocking_screen_state。"""
+    return get_blocking_screen_state(engine)
+
+
+def _blocking_state_from_ocr_items(
+    ocr_items: List[Dict[str, Any]],
+    screen_w: int,
+    screen_h: int,
+) -> Dict[str, Any]:
+    """由 OCR 条目计算阻塞屏状态（不重复截图）。"""
     ocr = "\n".join(
         (it.get("text") or "").strip()
         for it in ocr_items
@@ -341,6 +392,7 @@ def classify_blocking_screen(engine) -> Dict[str, Any]:
     layer = _analyze_consent_modal_layout(ocr_items, screen_h)
     scores = layer["scores"]
     consent_actions = layer.get("consent_actions") or set()
+    legal_in_modal = int(layer.get("legal_in_modal") or 0)
     has_disagree = "disagree" in consent_actions
     has_agree = "agree" in consent_actions
     is_consent_ocr = _screen_is_consent_dialog(ocr)
@@ -353,13 +405,31 @@ def classify_blocking_screen(engine) -> Dict[str, Any]:
     agreement = False
     reason = "none"
 
-    if _screen_is_login_surface(ocr) and not (has_disagree and has_agree):
+    # 隐私弹窗叠在登录页上时，中部「不同意+同意」优先于底栏登录控件
+    if _screen_is_login_confirm_sheet(ocr):
+        consent = False
+        reason = "login_confirm_sheet"
+    elif _screen_is_startup_consent_modal(ocr):
+        consent = True
+        reason = "startup_consent_modal"
+    elif has_disagree and has_agree and (
+        consent_score >= 5.0
+        or legal_in_modal >= 1
+        or consent_score >= login_score + 1.5
+    ):
+        consent = True
+        reason = "smart_consent_modal"
+    elif _screen_is_login_surface(ocr) and not (has_disagree and has_agree):
         consent = False
         if _screen_is_phone_login_form(ocr) or _screen_is_verification_code_page(ocr):
             reason = "phone_login_or_sms"
         elif _screen_is_login_home(ocr):
             reason = "login_home"
-    elif permission_score >= 2.0 and consent_score < 5.0:
+    elif (
+        permission_score >= 2.0
+        and consent_score < 5.0
+        and not _screen_is_app_consent_or_privacy_overlay(ocr)
+    ):
         reason = "system_permission"
     elif has_disagree and has_agree and consent_score >= 6.0 and consent_score >= login_score + 2.0:
         consent = True
@@ -527,15 +597,71 @@ def _screen_is_consent_dialog(screen_text: str) -> bool:
     """
     启动隐私弹窗：必须同时出现「不同意」类 + 「同意」类操作按钮。
     登录页底部协议勾选只有同意文案，不能判为 consent 弹窗。
+    弹窗叠在登录首页上时底栏仍可能被 OCR 读到，不能因 login_surface 误判为非阻塞。
     """
     blob = screen_text or ""
-    if _screen_is_login_surface(blob):
-        return False
     has_disagree = any(m in blob for m in _CONSENT_DISAGREE_LABELS)
     has_agree = any(m in blob for m in _CONSENT_AGREE_LABELS)
-    if has_disagree and has_agree:
+    return bool(has_disagree and has_agree)
+
+
+def _screen_is_startup_consent_modal(screen_text: str) -> bool:
+    """冷启动全屏隐私弹窗（造物者 + 协议文案，常含不同意/同意）。"""
+    blob = screen_text or ""
+    if _screen_is_login_confirm_sheet(blob):
+        return False
+    if _screen_is_consent_dialog(blob):
         return True
+    if "造物者" in blob and any(m in blob for m in _GENERIC_LEGAL_MARKERS):
+        if any(m in blob for m in _CONSENT_DISAGREE_LABELS) or "同意" in blob:
+            return True
     return False
+
+
+def _screen_is_login_confirm_sheet(screen_text: str) -> bool:
+    """
+    登录页底部二次确认 sheet（仅「同意并继续」，无「不同意」）。
+    与冷启动隐私弹窗区分：此时登录主界面（本机号码/一键登录）已可见。
+    """
+    blob = screen_text or ""
+    if any(m in blob for m in _CONSENT_DISAGREE_LABELS):
+        return False
+    if "同意并继续" not in blob:
+        return False
+    if not (_screen_is_login_home(blob) or _screen_is_login_surface(blob)):
+        return False
+    return any(
+        m in blob
+        for m in (
+            "本机号码",
+            "一键登录",
+            "+86",
+            "手机号登录",
+            "验证码登录",
+        )
+    )
+
+
+def is_blocking_login_confirm_screen(
+    engine=None,
+    *,
+    screen_state: Optional[Dict[str, Any]] = None,
+    screen_text: str = "",
+) -> bool:
+    """登录页「同意并继续」底 sheet 阻塞业务点击。"""
+    state = screen_state or (classify_blocking_screen(engine) if engine is not None else {})
+    blob = (state.get("ocr_text") or screen_text or "").strip()
+    if state.get("has_disagree_btn") or any(m in blob for m in _CONSENT_DISAGREE_LABELS):
+        return False
+    if (
+        state.get("consent")
+        or _screen_is_startup_consent_modal(blob)
+        or _screen_is_consent_dialog(blob)
+    ):
+        return False
+    if (state.get("reason") or "") == "login_confirm_sheet":
+        return True
+    return _screen_is_login_confirm_sheet(blob)
 
 
 def is_blocking_consent_screen(
@@ -547,11 +673,19 @@ def is_blocking_consent_screen(
     """当前是否被启动隐私弹窗阻塞（统一入口，避免各模块规则不一致）。"""
     state = screen_state or (classify_blocking_screen(engine) if engine is not None else {})
     blob = (state.get("ocr_text") or screen_text or "").strip()
-    if _screen_is_login_surface(blob):
+    if engine is not None and _hierarchy_has_app_consent_modal(engine):
+        return True
+    if is_blocking_login_confirm_screen(screen_state=state, screen_text=blob):
         return False
     if state.get("consent"):
-        return bool(state.get("has_disagree_btn") and state.get("has_agree_btn")) or _screen_is_consent_dialog(blob)
-    return _screen_is_consent_dialog(blob)
+        return True
+    if state.get("has_disagree_btn") and state.get("has_agree_btn"):
+        return True
+    if _screen_is_app_consent_or_privacy_overlay(blob):
+        return True
+    if _screen_is_login_surface(blob):
+        return False
+    return False
 
 
 def _screen_is_user_agreement_page(screen_text: str) -> bool:
@@ -611,20 +745,21 @@ _LOGIN_SURFACE_MARKERS = (
 )
 
 
-def _collect_ocr_layout(engine) -> Tuple[List[Dict[str, Any]], int, int]:
-    """单次截图 OCR，带文本框坐标，供屏态语义打分。"""
-    screen_w, screen_h = _engine_screen_size(engine)
-    items: List[Dict[str, Any]] = []
+def _collect_ocr_layout(engine, *, force: bool = False) -> Tuple[List[Dict[str, Any]], int, int]:
+    """复用屏快照 OCR 条目（带框），避免重复截图 analyze。"""
     try:
-        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
-        if shot is None:
-            return items, screen_w, screen_h
-        from driver.agent.Crawl.ui_discovery import _ocr_analyze_shot
+        from server.services.page_context_service import get_engine_screen_snapshot
 
-        items = list(_ocr_analyze_shot(shot) or [])
+        snap = get_engine_screen_snapshot(engine, force=force)
+        return (
+            list(snap.get("ocr_items") or []),
+            int(snap.get("screen_w") or 0) or _engine_screen_size(engine)[0],
+            int(snap.get("screen_h") or 0) or _engine_screen_size(engine)[1],
+        )
     except Exception as e:
         SLog.w(TAG, f"ocr layout collect failed: {e}")
-    return items, screen_w, screen_h
+        screen_w, screen_h = _engine_screen_size(engine)
+        return [], screen_w, screen_h
 
 
 def _ocr_item_ycenter_norm(item: Dict[str, Any], screen_h: int) -> Optional[float]:
@@ -1110,6 +1245,11 @@ def _try_u2_click_consent_agree(
 
 def _consent_dialog_gone(engine) -> bool:
     """隐私 consent 弹窗是否已关闭（系统权限弹窗/登录页视为 consent 已关）。"""
+    return _overlay_dismiss_target_cleared(engine, "同意")
+
+
+def _overlay_dismiss_target_cleared(engine, label: str) -> bool:
+    """同意/同意并继续类点击是否可跳过（屏上已无对应阻塞层）。"""
     try:
         import builtins
         from driver.agent.Crawl.device_bootstrap import is_adb_device_online
@@ -1121,19 +1261,41 @@ def _consent_dialog_gone(engine) -> bool:
         state = classify_blocking_screen(engine)
         ocr = (state.get("ocr_text") or "").strip()
         scores = (state.get("layer_scores") or {})
+        want = (label or "").strip()
+
+        if is_blocking_login_confirm_screen(screen_state=state, screen_text=ocr):
+            if want in ("同意并继续", "同意") or "同意并继续" in want:
+                return False
+        if is_blocking_consent_screen(screen_state=state, screen_text=ocr):
+            return False
+        if _screen_is_startup_consent_modal(ocr) or _screen_is_consent_dialog(ocr):
+            return False
 
         if _screen_is_system_permission_dialog(ocr, engine=engine):
             return True
-        if _screen_is_login_home(ocr) or _screen_is_phone_login_form(ocr):
-            if float(scores.get("consent") or 0) < 5.0:
-                return True
+        if "同意并继续" in want or want == "同意并继续":
+            if is_blocking_login_confirm_screen(screen_state=state, screen_text=ocr):
+                return False
+            if engine is not None and _hierarchy_has_app_consent_modal(engine):
+                return False
+            return False
         if _screen_is_verification_code_page(ocr):
+            return want in ("同意", "接受", "我知道了", "继续") and not is_blocking_login_confirm_screen(
+                screen_state=state, screen_text=ocr
+            )
+        if (_screen_is_login_home(ocr) or _screen_is_phone_login_form(ocr)) and float(
+            scores.get("consent") or 0
+        ) < 5.0:
+            if want in ("同意并继续",) or is_blocking_login_confirm_screen(
+                screen_state=state, screen_text=ocr
+            ):
+                return False
             return True
 
         if not ocr:
             return not bool(state.get("consent"))
 
-        if state.get("consent") or _screen_is_consent_dialog(ocr):
+        if state.get("consent"):
             return False
         if float(scores.get("consent") or 0) >= 8.0:
             return False
@@ -1247,12 +1409,47 @@ SYSTEM_ALLOW_LABELS = (
 )
 
 
-def is_overlay_dismiss_target_label(label: str) -> bool:
-    """守卫处置目标（同意 / 系统允许）：阻塞屏上仍需定位点击。"""
+def is_planned_overlay_step_label(label: str) -> bool:
+    """业务 Plan 自身要点同意/不同意类按钮时，守卫不应抢先点击。"""
+    import re
+
     t = (label or "").strip()
     if not t:
         return False
-    if t in ("同意", "同意并继续", "接受", "我知道了", "继续"):
+    if re.search(r"同意并继续", t):
+        return True
+    if re.search(r"^不同意$|点击.*不同意|点.*不同意", t):
+        return True
+    try:
+        from server.services.copilot_service import (
+            _extract_ui_text_core,
+            _is_consent_action_label,
+        )
+
+        core, _ = _extract_ui_text_core(t)
+        if _is_consent_action_label(core) or _is_consent_action_label(t):
+            return True
+        if core in ("不同意",) or (core and re.match(r"^不同意$", core)):
+            return True
+        if re.search(r"同意并继续", core or ""):
+            return True
+    except Exception:
+        pass
+    if re.search(r"[「『\"']同意[」』\"']", t) and "不同意" not in t:
+        return True
+    if re.search(r"[「『\"']同意并继续[」』\"']", t):
+        return True
+    return False
+
+
+def is_overlay_dismiss_target_label(label: str) -> bool:
+    """守卫处置目标（同意 / 系统允许）：阻塞屏上仍需定位点击。"""
+    if is_planned_overlay_step_label(label):
+        return True
+    t = (label or "").strip()
+    if not t:
+        return False
+    if t in ("同意", "同意并继续", "接受", "我知道了", "继续", "不同意"):
         return True
     return any(t == a or a in t for a in SYSTEM_ALLOW_LABELS)
 
@@ -1316,16 +1513,40 @@ def _u2_on_system_permission_screen(engine) -> bool:
     return False
 
 
+def _screen_is_app_consent_or_privacy_overlay(blob: str) -> bool:
+    """应用内隐私/协议弹层（非 Android 系统权限框）。"""
+    text = blob or ""
+    if _screen_is_startup_consent_modal(text) or _screen_is_consent_dialog(text):
+        return True
+    if any(m in text for m in _CONSENT_DISAGREE_LABELS) and any(
+        m in text for m in _CONSENT_AGREE_LABELS
+    ):
+        return True
+    if "造物者" in text and any(m in text for m in _GENERIC_LEGAL_MARKERS):
+        return True
+    return False
+
+
 def _screen_is_system_permission_dialog(ocr: str, *, engine=None) -> bool:
     blob = ocr or ""
     if _screen_looks_like_launcher_home(blob):
         return False
+    if engine is not None and _hierarchy_has_app_consent_modal(engine):
+        return False
+    if _screen_is_app_consent_or_privacy_overlay(blob):
+        return False
     if engine is not None and _u2_on_system_permission_screen(engine):
         return True
     if any(m in blob for m in SYSTEM_PERMISSION_STRONG_MARKERS):
-        return True
+        if "授予" in blob and (
+            _screen_is_app_consent_or_privacy_overlay(blob)
+            or any(m in blob for m in ("隐私", "协议", "条款", "造物者"))
+        ):
+            pass
+        else:
+            return True
     if any(m in blob for m in SYSTEM_PERMISSION_WEAK_MARKERS):
-        if any(ctx in blob for ctx in ("是否允许", "拒绝", "授予", "发送通知", "permission")):
+        if any(ctx in blob for ctx in ("是否允许", "发送通知", "permission")):
             return True
     if "是否允许" in blob and any(m in blob for m in ("允许", "拒绝")):
         return True
@@ -1847,8 +2068,10 @@ def tap_consent_agree_on_engine(
     source: str = "consent_agree",
     exact_label: bool = True,
     single_tap: bool = False,
+    agree_label: str = "同意",
 ) -> Dict[str, Any]:
-    """在当前 engine 上安全点击 consent「同意」：多通道仲裁优先，几何/OCR 兜底，始终附带 locate_debug。"""
+    """在当前 engine 上安全点击 consent「同意」/「同意并继续」：多通道仲裁优先，几何/OCR 兜底。"""
+    agree_label = (agree_label or "同意").strip() or "同意"
     if phase == "overlay_guard":
         single_tap = True
     gestures: List[Dict[str, Any]] = []
@@ -1870,11 +2093,11 @@ def tap_consent_agree_on_engine(
 
         gesture = record_gesture(
             "click",
-            "Tap · 同意",
+            f"Tap · {agree_label}",
             method=method or "geometry_consent",
             x=cx,
             y=cy,
-            label="同意",
+            label=agree_label,
             source=source,
             phase=phase,
             extra={"action_name": "Tap"},
@@ -1888,7 +2111,7 @@ def tap_consent_agree_on_engine(
                     engine.click(
                         None,
                         position=(cx, cy),
-                        label="同意",
+                        label=agree_label,
                         skip_label_lookup=True,
                         exact_label=exact_label,
                         consent_dismiss=True,
@@ -1904,42 +2127,50 @@ def tap_consent_agree_on_engine(
             "width": half * 2,
             "height": half * 2,
             "center": [cx, cy],
-            "label": "同意",
+            "label": agree_label,
         }
-        effective = _consent_dismiss_succeeded(engine, tap_ok=coord_ok)
+        effective = _overlay_dismiss_target_cleared(engine, agree_label) if coord_ok else False
         tap_ok = effective if not single_tap else coord_ok
         finish_gesture(
             gesture,
             ok=tap_ok,
-            msg=f"Tap「同意」@({cx},{cy}) [{method}]",
+            msg=f"Tap「{agree_label}」@({cx},{cy}) [{method}]",
             settle_ms=500 if single_tap else (700 if phase == "overlay_guard" else 900),
         )
         gestures.append(gesture)
         return tap_ok
 
+    labels_to_try = [agree_label]
+    if agree_label == "同意并继续":
+        labels_to_try.append("同意")
+
     try:
         from server.services.locate.resolver import resolve_locate_target
 
-        loc = resolve_locate_target(
-            engine,
-            screen_w,
-            screen_h,
-            label="同意",
-            icon_targets=icon_targets,
-        )
-        locate_debug = loc.debug
-        if loc.position and not _consent_multichannel_rejects_winner(loc):
-            mc_method = loc.method or "multichannel"
-            mc_rect = loc.target_rect
-            clicked = _tap_consent_at(
-                (int(loc.position[0]), int(loc.position[1]), mc_method),
-                debug=locate_debug,
-                rect_override=mc_rect,
+        for try_label in labels_to_try:
+            loc = resolve_locate_target(
+                engine,
+                screen_w,
+                screen_h,
+                label=try_label,
+                icon_targets=icon_targets,
             )
+            locate_debug = loc.debug
+            if loc.position and not _consent_multichannel_rejects_winner(loc):
+                mc_method = loc.method or "multichannel"
+                mc_rect = loc.target_rect
+                clicked = _tap_consent_at(
+                    (int(loc.position[0]), int(loc.position[1]), mc_method),
+                    debug=locate_debug,
+                    rect_override=mc_rect,
+                )
+                if clicked:
+                    break
     except Exception as e:
         SLog.w(TAG, f"consent multichannel probe failed: {e}")
 
-    if not clicked and not single_tap:
+    geometry_tap: Optional[Tuple[int, int, str]] = None
+    if not clicked:
         geometry_tap = resolve_consent_agree_tap(engine, screen_w, screen_h)
         if geometry_tap:
             clicked = _tap_consent_at(geometry_tap, debug=locate_debug)
@@ -1949,7 +2180,7 @@ def tap_consent_agree_on_engine(
             engine,
             screen_w,
             screen_h,
-            "同意",
+            agree_label,
             icon_targets=icon_targets,
             phase=phase,
             source=source,
@@ -1966,8 +2197,8 @@ def tap_consent_agree_on_engine(
             else:
                 SLog.w(TAG, "consent dialog still up after clip fallback")
 
-    if not clicked and _consent_dialog_gone(engine):
-        SLog.i(TAG, "consent dialog gone (screen advanced); treat as success")
+    if not clicked and _overlay_dismiss_target_cleared(engine, agree_label):
+        SLog.i(TAG, f"overlay dismiss target {agree_label!r} already cleared")
         clicked = True
         if not method or method == "none":
             method = "screen_advanced"
@@ -1984,12 +2215,12 @@ def tap_consent_agree_on_engine(
         "x": cx,
         "y": cy,
         "msg": (
-            f"Tap「同意」@({cx},{cy}) [{method}]"
+            f"Tap「{agree_label}」@({cx},{cy}) [{method}]"
             if clicked
             else (
-                "无法安全定位 consent「同意」按钮（请检查弹窗是否可见）"
+                f"无法安全定位「{agree_label}」按钮（请检查弹窗是否可见）"
                 if not geometry_tap
-                else f"consent「同意」未生效 @({cx},{cy}) [{method}]"
+                else f"「{agree_label}」未生效 @({cx},{cy}) [{method}]"
             )
         ),
         "gesture": last_gesture,

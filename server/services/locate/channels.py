@@ -200,37 +200,52 @@ def collect_text_channels(
     screen_h: int,
     query: str,
     spatial: SpatialConstraint,
+    *,
+    ocr_query: Optional[str] = None,
+    instruction_label: str = "",
 ) -> List[LocateCandidate]:
-    """OCR + Hierarchy 文本匹配通道。"""
+    """OCR + Hierarchy 全屏文字匹配；与 TargetKind 无关，只比文本相似度。"""
     from server.services.copilot_service import (
+        _label_variants,
         _make_target_rect,
         _pick_best_text_clickable,
     )
     from driver.agent.Crawl.ui_discovery import (
+        clickables_from_ocr_items,
         discover_clickables_from_hierarchy,
         discover_clickables_ocr,
     )
 
     out: List[LocateCandidate] = []
+    text_queries: List[str] = []
+    for q in (ocr_query, query, spatial.core_text, instruction_label):
+        q = (q or "").strip()
+        if q and q not in text_queries:
+            text_queries.append(q)
+    for q in list(text_queries):
+        for v in _label_variants(q):
+            if v and v not in text_queries:
+                text_queries.append(v)
 
     def _emit(pool, channel: str, method: str) -> None:
-        filtered = [
-            t
-            for t in pool
-            if point_in_zones(
-                t.center[0], t.center[1], screen_w, screen_h, spatial.zones
-            )
-        ]
-        consent_modal = query in ("同意", "同意并继续")
-        pick = _pick_best_text_clickable(
-            query,
-            filtered or pool,
-            screen_h=screen_h,
-            consent_modal=consent_modal,
-        )
-        if not pick:
+        if not pool:
             return
-        cx, cy, txt, score, t = pick
+        best_pick = None
+        best_score = 0.0
+        consent_modal = any(q in ("同意", "同意并继续") for q in text_queries)
+        for tq in text_queries:
+            pick = _pick_best_text_clickable(
+                tq,
+                pool,
+                screen_h=screen_h,
+                consent_modal=consent_modal,
+            )
+            if pick and float(pick[3]) > best_score:
+                best_score = float(pick[3])
+                best_pick = pick
+        if not best_pick:
+            return
+        cx, cy, txt, score, t = best_pick
         out.append(
             LocateCandidate(
                 cx=cx,
@@ -247,19 +262,41 @@ def collect_text_channels(
         )
 
     try:
-        hier = list(discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=72))
+        hier = list(
+            discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=96)
+        )
         _emit(hier, "hierarchy", "hierarchy")
     except Exception as e:
         SLog.w(TAG, f"hierarchy channel failed: {e}")
 
+    ocr_pool: List[Any] = []
     try:
-        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
-        if shot is not None:
-            ocr = list(discover_clickables_ocr(shot, screen_w, screen_h, max_items=40))
-            _emit(ocr, "ocr", "ocr")
-    except Exception as e:
-        SLog.w(TAG, f"ocr channel failed: {e}")
+        from server.services.page_context_service import get_cached_ocr_items
 
+        ocr_items = get_cached_ocr_items(engine)
+        if ocr_items:
+            ocr_pool = list(
+                clickables_from_ocr_items(
+                    ocr_items, screen_w, screen_h, max_items=96
+                )
+            )
+    except Exception as e:
+        SLog.w(TAG, f"ocr cache channel failed: {e}")
+
+    if not ocr_pool:
+        try:
+            from server.services.screen_frame_service import get_screen_frame
+
+            frame = get_screen_frame(engine)
+            shot = frame.get("shot") if frame else None
+            if shot is not None:
+                ocr_pool = list(
+                    discover_clickables_ocr(shot, screen_w, screen_h, max_items=96)
+                )
+        except Exception as e:
+            SLog.w(TAG, f"ocr screenshot channel failed: {e}")
+
+    _emit(ocr_pool, "ocr", "ocr")
     return out
 
 
@@ -269,17 +306,18 @@ def collect_icon_row_channel(
     screen_h: int,
     query: str,
     *,
+    instruction_label: str = "",
     icon_targets: Optional[List[Dict[str, Any]]] = None,
     profile: PageProfile,
+    spatial: Optional[SpatialConstraint] = None,
 ) -> List[LocateCandidate]:
-    """通用无字图标行 + CLIP patch 打分。"""
-    if not profile.prefer_icon_row:
-        return []
+    """全屏无字图标行聚类 + CLIP patch 打分（与页面 profile / 登录无关）。"""
+    _ = instruction_label, icon_targets, profile, spatial
     out: List[LocateCandidate] = []
     try:
         from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
         from server.core.vision.clip_service import clip_enabled, get_clip_service
-        from server.services.clip_locate_service import _score_patch_candidates, _screenshot_to_bgr
+        from server.services.clip_locate_service import _score_patch_candidates
 
         clickables = list(
             discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=96)
@@ -289,8 +327,9 @@ def collect_icon_row_channel(
         if not candidates or not clip_enabled():
             return out
 
-        shot = engine.screenshot() if hasattr(engine, "screenshot") else None
-        frame = _screenshot_to_bgr(shot)
+        from server.services.screen_frame_service import get_frame_bgr
+
+        frame = get_frame_bgr(engine)
         if frame is None:
             return out
         svc = get_clip_service()
@@ -436,29 +475,28 @@ def gather_all_candidates(
             screen_h=screen_h,
         )
     )
-    clip_regions = [clip_region]
-    try:
-        from server.services.toggle_locate_service import is_toggle_intent
-
-        if is_toggle_intent(label_raw):
-            clip_regions = list(
-                dict.fromkeys([clip_region, "bottom", "login_row", "full"])
-            )
-    except Exception:
-        pass
-    for region in clip_regions:
-        all_c.extend(
-            collect_clip_channel(
-                engine,
-                screen_w,
-                screen_h,
-                query,
-                aliases=aliases,
-                icon_targets=icon_targets,
-                region=region,
-            )
+    all_c.extend(
+        collect_clip_channel(
+            engine,
+            screen_w,
+            screen_h,
+            query,
+            aliases=aliases,
+            icon_targets=icon_targets,
+            region="full",
         )
-    all_c.extend(collect_text_channels(engine, screen_w, screen_h, text_query, spatial))
+    )
+    all_c.extend(
+        collect_text_channels(
+            engine,
+            screen_w,
+            screen_h,
+            text_query,
+            spatial,
+            ocr_query=ocr_query,
+            instruction_label=label_raw,
+        )
+    )
     all_c.extend(
         collect_gallery_channel(
             engine, screen_w, screen_h, query, icon_targets=icon_targets
@@ -471,8 +509,10 @@ def gather_all_candidates(
                 screen_w,
                 screen_h,
                 query,
+                instruction_label=label_raw,
                 icon_targets=icon_targets,
                 profile=profile,
+                spatial=spatial,
             )
         )
 

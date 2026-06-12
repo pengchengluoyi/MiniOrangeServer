@@ -3,14 +3,30 @@
 """
 页面类型配置注册表。
 
-login / home / feed / profile 等均为同一套 PageProfile 的实例；
-识别结果来自 page_context（图谱/Figma/OCR），再映射到 profile 调整通道权重。
+关键词与权重默认从资源包加载：
+  server/resources/locate/page_profiles.yaml
+可通过环境变量 LOCATE_PROFILES_PATH 覆盖。
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from script.log import SLog
+
+TAG = "PageProfiles"
+
+_DEFAULT_WEIGHTS = {
+    "clip": 0.30,
+    "ocr": 0.30,
+    "hierarchy": 0.25,
+    "gallery": 0.35,
+    "icon_row": 0.35,
+    "anchor": 0.55,
+}
 
 
 @dataclass(frozen=True)
@@ -56,71 +72,129 @@ class PageProfile:
         return False
 
 
-# 内置 profile；应用可在 DB/配置中扩展（见 docs/locate/extending.md）
-_BUILTIN_PROFILES: List[PageProfile] = [
-    PageProfile(
-        key="consent",
-        title="隐私同意弹窗",
-        label_patterns=[r"consent", r"隐私", r"协议弹"],
-        screen_text_patterns=[r"不同意", r"造物者", r"隐私条款", r"用户协议", r"点击.*同意"],
-        weights=ChannelWeights(clip=0.24, ocr=0.42, hierarchy=0.38, gallery=0.12, icon_row=0.08),
-        description="底部同意/不同意按钮，优先 OCR/hierarchy",
-    ),
-    PageProfile(
-        key="system_dialog",
-        title="系统权限 / 系统弹窗",
-        label_patterns=[r"权限", r"permission", r"允许"],
-        screen_text_patterns=[
-            r"仅在使用中允许",
-            r"始终允许",
-            r"是否.*允许",
-            r"获取.*信息",
-            r"拒绝",
-        ],
-        weights=ChannelWeights(clip=0.22, ocr=0.38, hierarchy=0.42, gallery=0.18, icon_row=0.12),
-        description="系统权限等短文案按钮，优先 hierarchy/OCR",
-    ),
-    PageProfile(
-        key="login",
-        title="登录页",
-        label_patterns=[r"登录", r"login", r"sign\s*in", r"一键登录"],
-        screen_text_patterns=[r"一键登录", r"本机号码", r"验证码", r"访客浏览"],
-        weights=ChannelWeights(clip=0.32, ocr=0.28, hierarchy=0.22, gallery=0.38, icon_row=0.40),
-        prefer_icon_row=True,
-        description="含第三方无字图标行、协议勾选、一键登录主按钮",
-    ),
-    PageProfile(
-        key="home",
-        title="首页 / Feed",
-        label_patterns=[r"首页", r"home", r"feed", r"推荐", r"发现"],
-        screen_text_patterns=[r"造物秀", r"关注", r"推荐流"],
-        weights=ChannelWeights(clip=0.28, ocr=0.35, hierarchy=0.30, gallery=0.30, icon_row=0.25),
-        description="信息流、卡片、顶部分段",
-    ),
-    PageProfile(
-        key="profile",
-        title="我的 / 个人中心",
-        label_patterns=[r"我的", r"个人", r"profile", r"mine", r"设置入口"],
-        screen_text_patterns=[r"设置", r"账号", r"退出登录"],
-        weights=ChannelWeights(clip=0.28, ocr=0.34, hierarchy=0.30, gallery=0.32, icon_row=0.22),
-    ),
-    PageProfile(
-        key="settings",
-        title="设置页",
-        label_patterns=[r"设置", r"settings", r"偏好"],
-        weights=ChannelWeights(clip=0.22, ocr=0.40, hierarchy=0.35, gallery=0.20, icon_row=0.15),
-        description="以文字列表项为主",
-    ),
-    PageProfile(
-        key="generic",
-        title="通用页面",
-        label_patterns=[],
-        weights=ChannelWeights(),
-        description="未识别页面类型时的默认权重",
-    ),
-]
+@dataclass(frozen=True)
+class BootstrapRule:
+    profile: str
+    screen_text_patterns: List[str]
 
-_PROFILE_BY_KEY: Dict[str, PageProfile] = {p.key: p for p in _BUILTIN_PROFILES}
+
+def default_profiles_resource_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "resources" / "locate" / "page_profiles.yaml"
+
+
+def _weights_from_mapping(raw: Optional[Dict[str, Any]]) -> ChannelWeights:
+    src = raw or {}
+    return ChannelWeights(
+        clip=float(src.get("clip", _DEFAULT_WEIGHTS["clip"])),
+        ocr=float(src.get("ocr", _DEFAULT_WEIGHTS["ocr"])),
+        hierarchy=float(src.get("hierarchy", _DEFAULT_WEIGHTS["hierarchy"])),
+        gallery=float(src.get("gallery", _DEFAULT_WEIGHTS["gallery"])),
+        icon_row=float(src.get("icon_row", _DEFAULT_WEIGHTS["icon_row"])),
+        anchor=float(src.get("anchor", _DEFAULT_WEIGHTS["anchor"])),
+    )
+
+
+def _profile_from_mapping(row: Dict[str, Any]) -> PageProfile:
+    key = str(row.get("key") or "").strip()
+    if not key:
+        raise ValueError("profile missing key")
+    return PageProfile(
+        key=key,
+        title=str(row.get("title") or key),
+        label_patterns=[str(p) for p in (row.get("label_patterns") or []) if str(p).strip()],
+        screen_text_patterns=[
+            str(p) for p in (row.get("screen_text_patterns") or []) if str(p).strip()
+        ],
+        weights=_weights_from_mapping(row.get("weights")),
+        prefer_icon_row=bool(row.get("prefer_icon_row")),
+        description=str(row.get("description") or ""),
+    )
+
+
+def _bootstrap_from_mapping(row: Dict[str, Any]) -> BootstrapRule:
+    profile = str(row.get("profile") or "").strip()
+    if not profile:
+        raise ValueError("bootstrap_rule missing profile")
+    return BootstrapRule(
+        profile=profile,
+        screen_text_patterns=[
+            str(p) for p in (row.get("screen_text_patterns") or []) if str(p).strip()
+        ],
+    )
+
+
+def load_profiles_resource(
+    path: Optional[os.PathLike | str] = None,
+) -> Tuple[List[PageProfile], List[BootstrapRule]]:
+    resource = Path(path) if path else default_profiles_resource_path()
+    if not resource.is_file():
+        raise FileNotFoundError(f"page profiles resource not found: {resource}")
+
+    import yaml
+
+    with resource.open("r", encoding="utf-8") as fh:
+        doc = yaml.safe_load(fh) or {}
+
+    profiles = [_profile_from_mapping(row) for row in (doc.get("profiles") or [])]
+    if not profiles:
+        raise ValueError(f"page profiles resource empty: {resource}")
+    if not any(p.key == "generic" for p in profiles):
+        profiles.append(
+            PageProfile(
+                key="generic",
+                title="通用页面",
+                label_patterns=[],
+                weights=ChannelWeights(),
+                description="fallback",
+            )
+        )
+
+    bootstrap = [
+        _bootstrap_from_mapping(row) for row in (doc.get("bootstrap_rules") or [])
+    ]
+    return profiles, bootstrap
+
+
+_BUILTIN_PROFILES: List[PageProfile] = []
+_PROFILE_BY_KEY: Dict[str, PageProfile] = {}
+_BOOTSTRAP_RULES: List[BootstrapRule] = []
+_LOADED_FROM: str = ""
+
+
+def reload_page_profiles(path: Optional[os.PathLike | str] = None) -> None:
+    """从资源包重载 profile（测试或热更新）。"""
+    global _BUILTIN_PROFILES, _PROFILE_BY_KEY, _BOOTSTRAP_RULES, _LOADED_FROM
+
+    env_path = os.getenv("LOCATE_PROFILES_PATH", "").strip()
+    resource = path or env_path or default_profiles_resource_path()
+    try:
+        profiles, bootstrap = load_profiles_resource(resource)
+        _LOADED_FROM = str(Path(resource).resolve())
+        SLog.i(TAG, f"loaded {len(profiles)} profiles from {_LOADED_FROM}")
+    except Exception as e:
+        SLog.w(TAG, f"load page profiles failed ({e}), using empty generic fallback")
+        profiles = [
+            PageProfile(
+                key="generic",
+                title="通用页面",
+                label_patterns=[],
+                weights=ChannelWeights(),
+                description="load failed fallback",
+            )
+        ]
+        bootstrap = []
+        _LOADED_FROM = "fallback"
+
+    _BUILTIN_PROFILES = profiles
+    _BOOTSTRAP_RULES = bootstrap
+    _PROFILE_BY_KEY = {p.key: p for p in profiles}
+
+
+def profiles_resource_path() -> str:
+    return _LOADED_FROM
+
+
+reload_page_profiles()
 
 
 def list_page_profiles() -> List[PageProfile]:
@@ -128,17 +202,28 @@ def list_page_profiles() -> List[PageProfile]:
 
 
 def get_page_profile(key: str) -> PageProfile:
-    return _PROFILE_BY_KEY.get(key) or _PROFILE_BY_KEY["generic"]
+    return _PROFILE_BY_KEY.get(key) or _PROFILE_BY_KEY.get("generic") or _BUILTIN_PROFILES[0]
+
+
+def _match_bootstrap(screen_text: str) -> Optional[PageProfile]:
+    blob = screen_text or ""
+    for rule in _BOOTSTRAP_RULES:
+        for pat in rule.screen_text_patterns:
+            if re.search(pat, blob, re.I):
+                return get_page_profile(rule.profile)
+    return None
 
 
 def resolve_page_profile(
     *,
     page_context: Optional[Dict] = None,
     screen_text: str = "",
+    foreground_package: str = "",
 ) -> PageProfile:
     """
     根据 page_context（identify_page_for_trace 返回值）解析页面类型。
     优先 label，其次 OCR 全文；均未命中则 generic。
+    若已知前台包名，可应用 app_packages.yaml 中的 page_supplements。
     """
     pc = page_context or {}
     label = (
@@ -148,13 +233,27 @@ def resolve_page_profile(
         or ""
     )
     blob = screen_text or pc.get("screen_text") or ""
+    fg_pkg = (foreground_package or pc.get("foreground_package") or "").strip()
 
-    if re.search(
-        r"仅在使用中允许|始终允许|是否.{0,8}允许|获取已安装|获取.*应用.*信息",
-        blob,
-        re.I,
-    ):
-        return get_page_profile("system_dialog")
+    boot = _match_bootstrap(blob)
+    if boot is not None:
+        return boot
+
+    if fg_pkg:
+        try:
+            from server.services.locate.app_packages import (
+                resolve_known_app_by_package,
+                resolve_profile_from_app_supplements,
+            )
+
+            known = resolve_known_app_by_package(fg_pkg)
+            sup_key = resolve_profile_from_app_supplements(
+                known, page_label=label, screen_text=blob
+            )
+            if sup_key:
+                return get_page_profile(sup_key)
+        except Exception:
+            pass
 
     for prof in _BUILTIN_PROFILES:
         if prof.key == "generic":
@@ -165,7 +264,66 @@ def resolve_page_profile(
 
 
 def register_page_profile(profile: PageProfile) -> None:
-    """运行时注册自定义页面类型（测试或插件）。"""
+    """运行时注册自定义页面类型（测试或插件）；写入内存，不修改资源包文件。"""
     global _BUILTIN_PROFILES, _PROFILE_BY_KEY
     _BUILTIN_PROFILES = [p for p in _BUILTIN_PROFILES if p.key != profile.key] + [profile]
     _PROFILE_BY_KEY = {p.key: p for p in _BUILTIN_PROFILES}
+
+
+def profile_key_for_login_step(label: str) -> Optional[str]:
+    """
+    按步骤文案细化登录链路 profile（覆盖 resolve 前的粗粒度 login）。
+    返回 None 表示非登录相关步骤，不覆盖。
+    """
+    raw = (label or "").strip()
+    if not raw:
+        return None
+    try:
+        from server.services.copilot_service import parse_bottom_tab_label
+
+        if parse_bottom_tab_label(raw) and re.search(r"底部|底栏|\btab\b", raw, re.I):
+            return "home"
+    except Exception:
+        pass
+    if re.search(r"微信.*图标|微信图标", raw):
+        return "login"
+    if re.search(r"手机.*图标|手机号.*图标", raw):
+        return "phone_login"
+    if re.search(r"绑定手机|换绑手机|更换手机", raw):
+        return "bind_phone"
+    if re.search(r"手机号注册|新用户注册|注册账号|注册页", raw) and not re.search(
+        r"登录注册", raw
+    ):
+        return "phone_register"
+    if re.search(r"验证码", raw):
+        return "verify_code"
+    if re.search(r"密码登录|账号密码|邮箱密码|帐号密码", raw):
+        return "password_login"
+    try:
+        from server.services.copilot_service import (
+            _classify_login_method_intent,
+            _is_one_click_login_label,
+        )
+
+        if _is_one_click_login_label(raw):
+            return "one_click_login"
+        intent = _classify_login_method_intent(raw)
+        if intent == "one_click":
+            return "one_click_login"
+        if intent == "phone_sms":
+            return "phone_login"
+        if intent == "email_password":
+            return "password_login"
+        if intent in ("wechat", "apple"):
+            return "login"
+        if intent:
+            return "login"
+    except Exception:
+        pass
+    if re.search(r"手机号.*登录|手机登录|短信登录", raw):
+        return "phone_login"
+    if re.search(r"一键登录|本机号码", raw):
+        return "one_click_login"
+    if re.search(r"登录|登陆|sign\s*in", raw, re.I):
+        return "login"
+    return None

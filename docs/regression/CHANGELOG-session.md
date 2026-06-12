@@ -1,7 +1,44 @@
-# 回归 / 守卫 / 回放 — 本轮改动总览
+# 回归 / 守卫 / 回放 — 改动总览
 
-> 造好物 `com.mathmagic.zaohaowu` 飞书用例（一键登录、手机号登录等）联调期间的后端 + 前端改动摘要。  
-> 代码以工作区未提交 diff 为准；本文仅描述设计与行为，不替代源码。
+> 造好物 `com.mathmagic.zaohaowu` 飞书用例联调期间的后端 + 前端改动摘要。
+
+---
+
+## v0.0.91（2026-06-08）— 全屏多通道定位与规划修复
+
+### 定位（Locate）
+
+| 变更 | 说明 |
+|------|------|
+| **仲裁简化** | `arbitrator.py` 仅按 `boosted_raw × profile_weight` 排序取第一；移除 `LOCATE_MIN_SCORE`、margin 歧义拒绝、`TargetKind` 通道 boost |
+| **全屏扫描** | OCR / Hierarchy / CLIP / icon_row / toggle 移除 Y 带裁剪；`ui_discovery` 可点击池 `max_items=96` 为候选数上限 |
+| **方位唯一入口** | 屏幕区域硬过滤仅在 `spatial.py` |
+| **icon_row** | 全屏聚类；不再由 `prefer_icon_row` 门控 |
+| **CLIP** | 全屏 grid；top patch 一律进候选池（「不同意」等 label 仍拒） |
+| **资源包** | `page_profiles.yaml`、`app_packages.yaml` + 加载器；`clip_query_plan` / `icon_intent` 扩展造好物登录链 |
+| **屏帧复用** | `screen_frame_service.py` 同一步骤单次截图供多通道 |
+
+### Copilot / 回归
+
+| 变更 | 说明 |
+|------|------|
+| **规划拆分** | `_split_commands` 保护 `同意并继续`、`不同意` 等复合短语，避免「未识别子指令：继续」 |
+| **操作成败** | `segment_errors` 不再单独令 `action_ok=false`；步骤执行成功即记通过 |
+| **反应式守卫** | 保留 v0.0.90 模型；consent 单次 Tap；`blocked_overlay` 快速 miss |
+| **预期语义** | `expectation_semantic_service` 增强；与操作结果分离判定 |
+
+### 文档
+
+- 新增 `docs/locate/strategy.md`、`app-packages.md`  
+- 删除/更正 `LOCATE_MIN_SCORE`、`prefer_icon_row` 门控、歧义拒绝等已移除行为描述  
+
+### 前端（MiniOrange）
+
+- `ExecutionReplayer.vue`：多通道定位面板、操作/预期分离展示  
+
+---
+
+## v0.0.90 — 反应式 Overlay Guard 与回放
 
 ## 1. 核心设计变更：反应式 Overlay Guard
 

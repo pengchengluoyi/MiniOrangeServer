@@ -92,11 +92,47 @@ ZAOHAOWU_LOGIN_CHAIN: Dict[str, ClipQueryPlan] = {
         ocr_queries=["本机号码", "一键登录", "手机号"],
         region="full",
     ),
+    "login_confirm_continue": _plan(
+        "同意并继续",
+        "同意并继续",
+        clip_aliases=[
+            "agree and continue button",
+            "同意并继续按钮",
+            "continue button purple",
+        ],
+        ocr_queries=["同意并继续", "同意并继续按钮"],
+        region="bottom",
+    ),
+    "wechat_icon": _plan(
+        "微信图标",
+        "wechat green chat bubble icon",
+        clip_aliases=["微信", "微信登录", "WeChat icon", "wechat icon"],
+        ocr_queries=[],
+        region="login_row",
+        icon_row=True,
+    ),
+    "bottom_tab_mine": _plan(
+        "我的",
+        "我的",
+        clip_aliases=[
+            "我的 tab",
+            "mine tab",
+            "profile tab",
+            "profile mine tab icon",
+            "个人中心",
+        ],
+        ocr_queries=["我的", "我"],
+        region="bottom",
+        icon_row=True,
+    ),
 }
 
 _LABEL_MATCHERS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"勾选.*协议|协议.*勾选|底部.*勾选", re.I), "agreement_checkbox"),
-    (re.compile(r"^同意$|点击.*同意|点.*同意", re.I), "consent_agree"),
+    (re.compile(r"同意并继续", re.I), "login_confirm_continue"),
+    (re.compile(r"^同意$|点击[^并]*同意$|点[^并]*同意$", re.I), "consent_agree"),
+    (re.compile(r"微信.*图标|微信图标", re.I), "wechat_icon"),
+    (re.compile(r"底部.*我的|我的.*tab|点击.*我的", re.I), "bottom_tab_mine"),
     (re.compile(r"仅在使用中允许|使用时允许", re.I), "system_permission_while_using"),
     (re.compile(r"始终允许|一律允许", re.I), "system_permission_always"),
     (re.compile(r"一键登录|本机号码", re.I), "one_click_login"),
@@ -115,11 +151,11 @@ def lookup_clip_query_plan(label: str) -> Optional[ClipQueryPlan]:
 
 
 def clip_params_from_plan(plan: ClipQueryPlan, raw_label: str) -> Tuple[str, List[str], Optional[str]]:
-    """供 _clip_search_params / resolver 使用的 (query, aliases, region)。"""
+    """供 _clip_search_params / resolver 使用的 (query, aliases, region)。region 恒为 None，方位只走 spatial。"""
     aliases = list(plan.clip_aliases)
     if raw_label and raw_label not in aliases and raw_label != plan.clip_query:
         aliases.append(raw_label)
-    return plan.clip_query, list(dict.fromkeys(aliases)), plan.region
+    return plan.clip_query, list(dict.fromkeys(aliases)), None
 
 
 def ocr_query_from_plan(plan: ClipQueryPlan, fallback: str = "") -> str:
