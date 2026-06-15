@@ -242,8 +242,9 @@ def _run_mobile_input(
     *,
     field_hint: str = "",
     platform: str = "android",
+    focus_rect: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """向当前页输入框填入文本（优先 u2 EditText，兜底 adb input text）。"""
+    """向当前页输入框填入文本（优先绑定上一步点击区域，再 u2 EditText，兜底 adb）。"""
     value = (text or "").strip()
     if not value:
         return {"ok": False, "msg": "输入内容为空", "method": "input"}
@@ -273,13 +274,75 @@ def _run_mobile_input(
             except Exception:
                 pass
 
-        hints = [field_hint, "手机号", "手机", "请输入", "验证码"]
+        hints = [field_hint, "手机号", "手机", "请输入", "验证码", "账号", "密码", "邮箱"]
+        if field_hint:
+            hints.extend([
+                field_hint.replace("输入框", ""),
+                f"{field_hint}输入框",
+            ])
         hints = [h for h in hints if h]
+        seen_hint = set()
+        deduped_hints = []
+        for h in hints:
+            key = h.strip()
+            if key and key not in seen_hint:
+                seen_hint.add(key)
+                deduped_hints.append(key)
+        hints = deduped_hints
         typed = False
         method = "input"
 
         d = engine._ensure_u2() if hasattr(engine, "_ensure_u2") else None
-        if d:
+
+        def _try_focus_rect_input() -> bool:
+            if not d or not focus_rect:
+                return False
+            center = focus_rect.get("center") or []
+            if not isinstance(center, (list, tuple)) or len(center) < 2:
+                return False
+            try:
+                cx, cy = int(center[0]), int(center[1])
+            except (TypeError, ValueError):
+                return False
+            if cy > int(screen_h * 0.72):
+                return False
+            try:
+                d.click(cx, cy)
+                time.sleep(0.35)
+                focused = d(focused=True)
+                if focused.exists(timeout=1.0):
+                    cls = (focused.info or {}).get("className") or ""
+                    if "Edit" in cls:
+                        try:
+                            focused.clear_text()
+                        except Exception:
+                            pass
+                        focused.set_text(value)
+                        return True
+                for spec in (
+                    {"className": "android.widget.EditText", "focused": True},
+                    {"className": "android.widget.EditText"},
+                ):
+                    sel = d(**spec)
+                    if not sel.exists(timeout=0.5):
+                        continue
+                    try:
+                        sel.click()
+                        time.sleep(0.2)
+                        sel.clear_text()
+                    except Exception:
+                        pass
+                    sel.set_text(value)
+                    return True
+            except Exception as e:
+                SLog.w(TAG, f"focus_rect input failed: {e}")
+            return False
+
+        if _try_focus_rect_input():
+            typed = True
+            method = "u2_focus_input"
+
+        if not typed and d:
             selectors = []
             for hint in hints:
                 selectors.extend([
@@ -770,6 +833,8 @@ def _classify_login_method_intent(label: str) -> Optional[str]:
         return "one_click"
     if re.search(r"微信", raw):
         return "wechat"
+    if re.search(r"输入框", raw):
+        return None
     if re.search(r"苹果|apple\s*id|appleid", raw, re.I):
         return "apple"
     if re.search(r"邮箱|账号密码|密码登录|密码方式|帐号密码|使用账号密码", raw):
@@ -893,6 +958,10 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
             return q, list(dict.fromkeys(extras + [raw])), region
     except Exception:
         pass
+
+    if is_form_input_label(raw):
+        q, _ = _extract_ui_text_core(raw)
+        return q or raw, list(dict.fromkeys([raw, q] if q else [raw])), None
 
     intent = _classify_login_method_intent(raw)
     if intent == "one_click":
@@ -2184,6 +2253,8 @@ def _plan_app_action(
 _COMPOUND_PHRASES = (
     "同意并继续",
     "不同意",
+    "切换到微信app, 并打开登录页面",
+    "切换到微信app，并打开登录页面",
 )
 
 # 多指令拆分：标点 / 连接词 / 连续动词
@@ -2199,7 +2270,7 @@ _SPLIT_DELIM_RE = re.compile(
 _VERB_BOUNDARY_RE = re.compile(
     r"(?=(?:"
     r"打开|启动|关闭|退出|关掉|"
-    r"输入|填写|填入|勾选|勾上|"
+    r"输入(?!框)|填写|填入|勾选|勾上|"
     r"点击|点一下|"
     r"上滑|下滑|左滑|右滑|滑动|滑一下|"
     r"截图|截屏|等待|返回|后退|"
@@ -2211,7 +2282,105 @@ _INPUT_TEXT_RE = re.compile(
     r"(?:输入|填写|填入)\s*(?:手机号|手机|电话|号码|验证码)?\s*(\d{4,15})",
     re.I,
 )
+_INPUT_COLON_RE = re.compile(
+    r"^(?:输入|填写|填入)\s*(?:到\s*)?(?:[「『\"']?([^」』\"'：:]+)[」』\"']?\s*)?[:：]\s*(.+)$",
+    re.I,
+)
+_CLICK_INPUT_PAIR_RE = re.compile(
+    r"(?:点击|点一下)\s*"
+    r"(?:[「『\"'](?P<field_q>[^」』\"']+)[」』\"']|(?P<field_p>[^,，]+?))"
+    r"(?:输入框)?"
+    r"\s*[,，]\s*"
+    r"输入\s*[:：]\s*"
+    r"(?:[「『\"'](?P<val_q>[^」』\"']+)[」』\"']|(?P<val_p>[^\s,，;；]+))",
+    re.I,
+)
+_CLICK_FIELD_SEG_RE = re.compile(r"^(?:点击|点一下)\s*.+", re.I)
 _NUMBERED_STEP_RE = re.compile(r"(?:^|\s)\d+[.、)\）]\s*")
+
+
+def _field_click_label(field: str) -> str:
+    name = (field or "").strip().strip("「」\"'")
+    if not name:
+        return "输入框"
+    if name.endswith("输入框"):
+        return name
+    return f"{name}输入框"
+
+
+def _field_hint_name(field: str) -> str:
+    name = (field or "").strip().strip("「」\"'")
+    return re.sub(r"输入框$", "", name).strip() or name
+
+
+def _plan_click_input_pairs(segment: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    解析「点击账号输入框,输入: xxx」链式片段（可重复多对）。
+    产出 click + input(bind_last_click) 原子步骤。
+    """
+    text = (segment or "").strip()
+    if not text:
+        return None
+    matches = list(_CLICK_INPUT_PAIR_RE.finditer(text))
+    if not matches:
+        return None
+
+    steps: List[Dict[str, Any]] = []
+    for m in matches:
+        field_raw = (m.group("field_q") or m.group("field_p") or "").strip()
+        value = (m.group("val_q") or m.group("val_p") or "").strip().strip("「」\"'")
+        if not field_raw or not value:
+            return None
+        click_label = _field_click_label(field_raw)
+        hint = _field_hint_name(field_raw)
+        steps.append(
+            {
+                "kind": "click",
+                "x": 0,
+                "y": 0,
+                "label": click_label,
+                "coords_explicit": False,
+                "summary": f"点击「{click_label}」",
+            }
+        )
+        steps.append(
+            {
+                "kind": "input",
+                "text": value,
+                "field_hint": hint,
+                "bind_last_click": True,
+                "summary": f"输入{hint} {value}",
+            }
+        )
+    return steps or None
+
+
+def _merge_click_input_segment_pairs(segments: List[str]) -> List[str]:
+    """合并被逗号拆开的「点击X输入框」+「输入: y」为单段，供模板解析。"""
+    merged: List[str] = []
+    i = 0
+    while i < len(segments):
+        seg = (segments[i] or "").strip()
+        if i + 2 < len(segments):
+            mid = (segments[i + 1] or "").strip()
+            nxt = (segments[i + 2] or "").strip()
+            if (
+                _CLICK_FIELD_SEG_RE.match(seg)
+                and mid == "输入框"
+                and _INPUT_COLON_RE.match(nxt)
+            ):
+                merged.append(f"{seg}{mid},{nxt}")
+                i += 3
+                continue
+        if i + 1 < len(segments):
+            nxt = (segments[i + 1] or "").strip()
+            if _CLICK_FIELD_SEG_RE.match(seg) and _INPUT_COLON_RE.match(nxt):
+                merged.append(f"{seg},{nxt}")
+                i += 2
+                continue
+        merged.append(seg)
+        i += 1
+    return merged
 
 
 def _normalize_segment(segment: str) -> str:
@@ -2240,6 +2409,9 @@ def _coalesce_split_segments(parts: List[str]) -> List[str]:
         if out and s.startswith("勾选框") and len(s) <= 8:
             out[-1] = f"{out[-1]}{s}"
             continue
+        if out and s == "输入框" and re.search(r"(?:点击|点一下)", out[-1]):
+            out[-1] = f"{out[-1]}{s}"
+            continue
         if out and s in ("继续", "并继续") and re.search(r"同意", out[-1]):
             out[-1] = f"{out[-1]}并继续" if s == "继续" else f"{out[-1]}{s}"
             continue
@@ -2262,6 +2434,7 @@ def _split_commands(text: str) -> List[str]:
 
     shielded = _PACKAGE_RE.sub(_protect, raw)
     shielded = re.sub(r"\d{2,4}\s*[,，]\s*\d{2,4}", _protect, shielded)
+    shielded = re.sub(r"[\w.+-]+@[\w.-]+\.\w+", _protect, shielded)
     for phrase in _COMPOUND_PHRASES:
         if phrase in shielded:
             key = f"__CP_{len(protected)}__"
@@ -2333,6 +2506,14 @@ def _plan_segment(
     if not segment:
         return {"steps": [], "reply_parts": [], "errors": []}
 
+    pair_steps = _plan_click_input_pairs(segment)
+    if pair_steps:
+        return {
+            "steps": pair_steps,
+            "reply_parts": [s.get("summary") or "" for s in pair_steps if s.get("summary")],
+            "errors": [],
+        }
+
     try:
         from server.services.copilot_semantic import semantic_split_segment
 
@@ -2381,17 +2562,30 @@ def _plan_segment(
                 steps.append(app_plan["step"])
                 reply_parts.append(app_plan["reply"])
 
-    input_m = _INPUT_TEXT_RE.search(segment)
-    if input_m:
-        value = input_m.group(1)
-        field_hint = "手机号" if re.search(r"手机|电话|号码", segment) else ""
-        steps.append({
-            "kind": "input",
-            "text": value,
-            "field_hint": field_hint,
-            "summary": f"输入{field_hint or '文本'} {value}",
-        })
-        reply_parts.append(steps[-1]["summary"])
+    colon_input = _INPUT_COLON_RE.match(segment.strip())
+    if colon_input:
+        field_hint = (colon_input.group(1) or "").strip()
+        value = (colon_input.group(2) or "").strip().strip("「」\"'")
+        if value:
+            steps.append({
+                "kind": "input",
+                "text": value,
+                "field_hint": field_hint,
+                "summary": f"输入{field_hint or '文本'} {value}",
+            })
+            reply_parts.append(steps[-1]["summary"])
+    else:
+        input_m = _INPUT_TEXT_RE.search(segment)
+        if input_m:
+            value = input_m.group(1)
+            field_hint = "手机号" if re.search(r"手机|电话|号码", segment) else ""
+            steps.append({
+                "kind": "input",
+                "text": value,
+                "field_hint": field_hint,
+                "summary": f"输入{field_hint or '文本'} {value}",
+            })
+            reply_parts.append(steps[-1]["summary"])
 
     toggle_m = re.search(
         r"(勾选|勾上|选中|单选)\s*[「『\"']?([^」』\"'\n,，]+)[」』\"']?",
@@ -2537,6 +2731,7 @@ def plan_message(
         return {"reply": f"切换到页面：{nav['path']}", "steps": [], "navigate": nav}
 
     segments = _split_commands(raw)
+    segments = _merge_click_input_segment_pairs(segments)
     steps: List[Dict[str, Any]] = []
     reply_parts: List[str] = []
     segment_errors: List[str] = []
@@ -2766,44 +2961,27 @@ def execute_steps(
     pkg_guard = (target_package or "").strip()
     use_reactive_guard = bool(enable_overlay_guard)
     skip_click_overlay_dismiss = bool(skip_overlay_clear or use_reactive_guard)
+    last_click_target: Optional[Dict[str, Any]] = None
 
     for i, step in enumerate(steps or []):
         t0 = time.time()
+        t_click = t0
         kind = step.get("kind", "")
         summary = step.get("summary", kind)
         SLog.i(TAG, f"Step {i} start: {summary}")
 
+        foreground_note = ""
         if sn and pkg_guard and kind not in ("open_app", "close_app", "verify", "ability"):
             try:
                 from server.services.app_automation_service import guard_test_app_foreground
 
-                fg = guard_test_app_foreground(sn, pkg_guard, platform)
-                if not fg.get("ok"):
-                    out_guard: Dict[str, Any] = {
-                        "index": i,
-                        "kind": kind,
-                        "summary": summary,
-                        "ok": False,
-                        "msg": fg.get("msg") or "被测应用不在前台",
-                        "method": "foreground_guard",
-                        "started_at": datetime.fromtimestamp(t0).isoformat(
-                            timespec="milliseconds"
-                        ),
-                        "duration_ms": int((time.time() - t0) * 1000),
-                    }
-                    try:
-                        from server.services.regression_run_context import stamp_run_timing
-
-                        stamp_run_timing(out_guard)
-                    except Exception:
-                        pass
-                    results.append(out_guard)
-                    SLog.w(TAG, f"Step {i} aborted: {out_guard['msg']}")
-                    if stop_on_failure:
-                        break
-                    continue
+                fg = guard_test_app_foreground(
+                    sn, pkg_guard, platform, phase=f"step_{i}_{kind}"
+                )
+                if fg.get("drift") and fg.get("msg"):
+                    foreground_note = str(fg.get("msg"))
             except Exception as e:
-                SLog.w(TAG, f"foreground guard failed: {e}")
+                SLog.w(TAG, f"foreground observe failed: {e}")
         out: Dict[str, Any] = {
             "index": i,
             "kind": kind,
@@ -2966,6 +3144,7 @@ def execute_steps(
                         except Exception as e:
                             SLog.w(TAG, f"proactive guard before click failed: {e}")
 
+                    t_click = time.time()
                     SLog.i(
                         TAG,
                         f"Step {i} click attempt={click_attempt} label={step.get('label')!r} "
@@ -3112,6 +3291,11 @@ def execute_steps(
                         out.update(r)
                         break
 
+                if out.get("ok") and out.get("target_rect"):
+                    last_click_target = out.get("target_rect")
+                else:
+                    last_click_target = None
+
         elif kind == "swipe":
             if not sn:
                 out["msg"] = "未选择设备"
@@ -3139,6 +3323,9 @@ def execute_steps(
                     step.get("text") or "",
                     field_hint=step.get("field_hint") or "",
                     platform=platform,
+                    focus_rect=last_click_target
+                    if step.get("bind_last_click")
+                    else None,
                 )
                 out.update(r)
 
@@ -3194,7 +3381,14 @@ def execute_steps(
         else:
             out["msg"] = f"未知步骤类型 {kind}"
 
-        out["duration_ms"] = int((time.time() - t0) * 1000)
+        if foreground_note:
+            out["foreground_drift"] = True
+            out["foreground_note"] = foreground_note
+            base_msg = (out.get("msg") or "").strip()
+            out["msg"] = f"{base_msg}；{foreground_note}" if base_msg else foreground_note
+
+        dur_t0 = t_click if kind == "click" else t0
+        out["duration_ms"] = int((time.time() - dur_t0) * 1000)
         out["started_at"] = datetime.fromtimestamp(t0).isoformat(timespec="milliseconds")
 
         try:

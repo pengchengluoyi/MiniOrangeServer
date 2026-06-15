@@ -67,19 +67,41 @@ def begin_run(
     sn: str = "",
     platform: str = "android",
     capture_screenshots: bool = True,
+    test_package: str = "",
 ) -> None:
     _run_ctx.set(
         {
             "run_id": run_id or "",
             "sn": sn or "",
             "platform": platform or "android",
+            "test_package": (test_package or "").strip(),
             "capture": bool(capture_screenshots and run_id and sn),
             "gestures": [],
             "watermark": 0,
             "run_t0": time.time(),
             "case_t0": time.time(),
+            "foreground_drift_events": [],
+            "foreground_drift_ms": 0,
+            "_foreground_drift_open_since": None,
         }
     )
+
+
+def is_regression_run() -> bool:
+    """当前是否在飞书/回归批量执行上下文中。"""
+    ctx = _run_ctx.get()
+    return bool(ctx and ctx.get("run_id"))
+
+
+def is_device_prep_done() -> bool:
+    ctx = _run_ctx.get()
+    return bool(ctx and ctx.get("device_prep_done"))
+
+
+def mark_device_prep_done() -> None:
+    ctx = _run_ctx.get()
+    if ctx is not None:
+        ctx["device_prep_done"] = True
 
 
 def begin_case() -> None:
@@ -91,12 +113,85 @@ def begin_case() -> None:
     ctx["watermark"] = len(ctx.get("gestures") or [])
 
 
+def record_foreground_drift(
+    *,
+    expected_package: str,
+    actual_package: str,
+    phase: str = "",
+    note: str = "",
+) -> Dict[str, Any]:
+    """记录被测应用不在前台的时刻（不拉回应用）。"""
+    ctx = _run_ctx.get()
+    now = time.time()
+    event = {
+        "at": datetime.now().isoformat(timespec="milliseconds"),
+        "expected_package": (expected_package or "").strip(),
+        "actual_package": (actual_package or "").strip(),
+        "phase": (phase or "").strip(),
+        "note": (note or "").strip(),
+        "run_elapsed_ms": run_elapsed_ms(per_case=False),
+    }
+    if not ctx:
+        return event
+    open_since = ctx.get("_foreground_drift_open_since")
+    if open_since is None:
+        ctx["_foreground_drift_open_since"] = now
+    events = ctx.setdefault("foreground_drift_events", [])
+    if not events or events[-1].get("actual_package") != event["actual_package"]:
+        events.append(event)
+    return event
+
+
+def close_foreground_drift_segment() -> int:
+    """被测应用回到前台时，累计本次离屏时长（毫秒）。"""
+    ctx = _run_ctx.get()
+    if not ctx:
+        return 0
+    open_since = ctx.get("_foreground_drift_open_since")
+    if open_since is None:
+        return int(ctx.get("foreground_drift_ms") or 0)
+    delta_ms = max(0, int((time.time() - float(open_since)) * 1000))
+    ctx["foreground_drift_ms"] = int(ctx.get("foreground_drift_ms") or 0) + delta_ms
+    ctx["_foreground_drift_open_since"] = None
+    return int(ctx["foreground_drift_ms"])
+
+
+def get_foreground_drift_summary() -> Dict[str, Any]:
+    ctx = _run_ctx.get() or {}
+    events = list(ctx.get("foreground_drift_events") or [])
+    total_ms = int(ctx.get("foreground_drift_ms") or 0)
+    open_since = ctx.get("_foreground_drift_open_since")
+    if open_since is not None:
+        total_ms += max(0, int((time.time() - float(open_since)) * 1000))
+    packages = sorted({e.get("actual_package") for e in events if e.get("actual_package")})
+    msg = ""
+    if total_ms > 0 or events:
+        sec = total_ms / 1000.0
+        where = "、".join(packages[:4]) if packages else "其它应用"
+        msg = f"被测应用累计 {sec:.1f}s 不在前台（当前前台曾为：{where}）"
+    return {
+        "total_ms": total_ms,
+        "event_count": len(events),
+        "events": events[-20:],
+        "message": msg,
+    }
+
+
 def end_run() -> List[Dict[str, Any]]:
     ctx = _run_ctx.get()
     _run_ctx.set(None)
     if not ctx:
         return []
     return list(ctx.get("gestures") or [])
+
+
+def take_foreground_drift_summary() -> Dict[str, Any]:
+    """结束 run 前取出离屏统计并清零上下文。"""
+    summary = get_foreground_drift_summary()
+    ctx = _run_ctx.get()
+    if ctx:
+        ctx["foreground_drift_summary"] = summary
+    return summary
 
 
 def get_ctx() -> Optional[Dict[str, Any]]:

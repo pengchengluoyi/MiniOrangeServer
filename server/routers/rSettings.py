@@ -3,7 +3,7 @@
 """服务端全局设置 API。"""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -30,6 +30,19 @@ class FeishuBotSettingsUpdate(BaseModel):
     """兼容旧接口。"""
     app_id: str = ""
     app_secret: str = ""
+    clear_secret: bool = False
+
+
+class RobotIntegrationCreate(BaseModel):
+    platform: str = "lark"
+    name: str = ""
+    credentials: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RobotIntegrationUpdate(BaseModel):
+    platform: Optional[str] = None
+    name: Optional[str] = None
+    credentials: Dict[str, Any] = Field(default_factory=dict)
     clear_secret: bool = False
 
 
@@ -73,6 +86,48 @@ def delete_feishu_bot(bot_id: str):
         return {"code": 200, "msg": "已删除"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/robots/bots")
+def list_robot_bots():
+    return {"code": 200, "data": {"bots": ss.list_robot_integrations()}}
+
+
+@router.post("/robots/bots")
+def create_robot_bot(body: RobotIntegrationCreate):
+    try:
+        row = ss.create_robot_integration(
+            platform=body.platform,
+            name=body.name,
+            credentials=body.credentials,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "msg": "机器人已添加", "data": row}
+
+
+@router.put("/robots/bots/{bot_id}")
+def update_robot_bot(bot_id: str, body: RobotIntegrationUpdate):
+    try:
+        row = ss.update_robot_integration(
+            bot_id,
+            platform=body.platform,
+            name=body.name,
+            credentials=body.credentials,
+            clear_secret=body.clear_secret,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "msg": "已保存", "data": row}
+
+
+@router.delete("/robots/bots/{bot_id}")
+def delete_robot_bot(bot_id: str):
+    try:
+        ss.delete_robot_integration(bot_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "msg": "已删除"}
 
 
 @router.get("/feishu")
@@ -204,3 +259,85 @@ def test_figma_settings(body: FigmaTestBody):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"code": 200, "msg": "Token 有效", "data": info}
+
+
+class AIProviderSaveBody(BaseModel):
+    name: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    enabled: bool = True
+    clear_key: bool = False
+    set_default: bool = False
+
+
+class AIUsageSaveBody(BaseModel):
+    copilot_enabled: bool = False
+    case_execution_enabled: bool = False
+    mode: str = "local_first"
+
+
+@router.get("/ai/providers")
+def list_ai_providers():
+    return {"code": 200, "data": ss.list_ai_provider_settings()}
+
+
+@router.put("/ai/providers/{provider_id}")
+def save_ai_provider(provider_id: str, body: AIProviderSaveBody):
+    try:
+        row = ss.save_ai_provider_settings(
+            provider_id,
+            name=body.name,
+            api_key=body.api_key,
+            base_url=body.base_url,
+            model=body.model,
+            enabled=body.enabled,
+            clear_key=body.clear_key,
+            set_default=body.set_default,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "msg": "已保存", "data": row}
+
+
+@router.delete("/ai/providers/{provider_id}")
+def delete_ai_provider(provider_id: str):
+    ss.delete_ai_provider_settings(provider_id)
+    return {"code": 200, "msg": "已删除"}
+
+
+@router.put("/ai/usage")
+def save_ai_usage(body: AIUsageSaveBody):
+    data = ss.save_ai_usage_settings(
+        copilot_enabled=body.copilot_enabled,
+        case_execution_enabled=body.case_execution_enabled,
+        mode=body.mode,
+    )
+    return {"code": 200, "msg": "已保存", "data": data}
+
+
+@router.get("/ai/plan-prompt")
+def get_ai_plan_prompt():
+    from server.services.ai_plan_prompt import AI_PLAN_SYSTEM_PROMPT, AI_PLAN_USER_PROMPT_TEMPLATE
+
+    return {
+        "code": 200,
+        "data": {
+            "system": AI_PLAN_SYSTEM_PROMPT,
+            "user_template": AI_PLAN_USER_PROMPT_TEMPLATE,
+        },
+    }
+
+
+@router.get("/skills")
+def get_skills_catalog():
+    from server.services.skills_registry import list_skills_catalog
+
+    return {"code": 200, "data": list_skills_catalog()}
+
+
+@router.get("/skills/tools/anthropic")
+def get_anthropic_tool_use_catalog():
+    from server.services.skills_registry import list_anthropic_tool_use_catalog
+
+    return {"code": 200, "data": list_anthropic_tool_use_catalog()}

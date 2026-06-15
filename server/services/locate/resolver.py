@@ -53,6 +53,7 @@ def resolve_locate_target(
     ocr_query: Optional[str] = None
 
     region_hint: Optional[str] = None
+    plan = None
     try:
         from server.services.locate.clip_query_plan import (
             clip_params_from_plan,
@@ -133,6 +134,8 @@ def resolve_locate_target(
     target_kind = classify_target_kind(label, spatial.core_text)
     _ = region_hint
 
+    enable_icon_row = bool(plan.icon_row) if plan else True
+
     candidates = gather_all_candidates(
         engine,
         screen_w,
@@ -145,8 +148,20 @@ def resolve_locate_target(
         spatial=spatial,
         profile=profile,
         clip_region="full",
-        enable_icon_row=True,
+        enable_icon_row=enable_icon_row,
     )
+
+    try:
+        from server.services.locate.clip_query_plan import (
+            form_input_keyboard_max_cy,
+            is_form_input_label,
+        )
+
+        if is_form_input_label(label):
+            max_cy = form_input_keyboard_max_cy(screen_h)
+            candidates = [c for c in candidates if c.cy <= max_cy]
+    except Exception:
+        pass
 
     result = arbitrate(candidates, profile=profile, target_kind=target_kind)
     debug = debug_payload(

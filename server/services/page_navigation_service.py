@@ -2854,15 +2854,15 @@ def ensure_page_ready_before_action(
     if not steps:
         page_before: Dict[str, Any]
         if in_regression:
-            from server.services.page_context_service import identify_for_app
+            from server.services.page_context_service import _identify_page_by_screen_keywords
 
-            page_before = identify_for_app(
-                app_id,
-                engine,
-                session=session,
-                frame_count=1,
-                screen_text=screen_text,
-            )
+            page_before = _identify_page_by_screen_keywords(screen_text) or {
+                "matched": False,
+                "label": "",
+                "score": 0.0,
+                "method": "keyword",
+                "source": "keyword",
+            }
         else:
             page_before = identify_page_for_trace(
                 app_id,
@@ -2884,17 +2884,15 @@ def ensure_page_ready_before_action(
 
     # 回归执行：阻塞弹窗由 Plan 内 Overlay Guard 逐步处置，不在此预执行固定点击序列
     if in_regression:
-        page_before = identify_page_for_trace(
-            app_id,
-            engine,
-            session=session,
-            frame_count=1,
-            screen_text=screen_text,
-            sn=sn,
-            platform=platform,
-            run_id=run_id,
-            tag="pre_action_before",
-        )
+        from server.services.page_context_service import _identify_page_by_screen_keywords
+
+        page_before = _identify_page_by_screen_keywords(screen_text) or {
+            "matched": False,
+            "label": "",
+            "score": 0.0,
+            "method": "keyword",
+            "source": "keyword",
+        }
         return {
             "attempted": False,
             "overlay_guard_delegated": True,

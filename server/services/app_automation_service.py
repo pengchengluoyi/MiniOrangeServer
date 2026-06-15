@@ -289,60 +289,138 @@ def _pkg_matches(expected: str, actual: str) -> bool:
 
 
 def guard_test_app_foreground(
-    sn: str, package: str, platform: str = "android"
+    sn: str,
+    package: str,
+    platform: str = "android",
+    *,
+    phase: str = "",
 ) -> Dict[str, Any]:
-    """步骤间轻量前台守护：若落在桌面/其它 App 则拉起被测包（不 stop_app）。"""
+    """
+    观察被测应用是否在前台：仅记录离屏，不再自动 start_app 拉回。
+    跨 App 授权（微信登录等）期间应保持当前前台应用。
+    """
     if not package or not sn:
-        return {"ok": True, "msg": "skip", "guarded": False}
+        return {"ok": True, "msg": "skip", "guarded": False, "drift": False}
     try:
         import builtins
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-        from script.sleep import mSleep
+        from server.services.regression_run_context import (
+            close_foreground_drift_segment,
+            record_foreground_drift,
+        )
 
         builtins.TARGET_DEVICE_SN = sn
         engine, _ = bootstrap_mobile_engine(sn, platform)
         before = _engine_current_package(engine)
         if _pkg_matches(package, before):
+            close_foreground_drift_segment()
             return {
                 "ok": True,
                 "msg": f"前台已是 {package}",
                 "guarded": False,
+                "drift": False,
                 "foreground_before": before,
                 "foreground_after": before,
             }
-        SLog.w(
-            TAG,
-            f"foreground drift sn={sn} expected={package} actual={before or '-'}, relaunch",
+
+        try:
+            from server.services.locate.app_packages import resolve_known_app_by_package
+
+            known = resolve_known_app_by_package(before)
+            actual_name = known.name if known else (before or "未知")
+        except Exception:
+            actual_name = before or "未知"
+
+        record_foreground_drift(
+            expected_package=package,
+            actual_package=before,
+            phase=phase,
+            note=f"当前前台为 {actual_name}",
         )
-        if hasattr(engine, "start_app"):
-            engine.start_app(package)
-            mSleep(1.8)
-        after = _engine_current_package(engine)
-        ok = _pkg_matches(package, after)
         msg = (
-            f"已拉回前台 {package}"
-            if ok
-            else f"前台守护失败：当前 {after or '未知'}，期望 {package}"
+            f"被测应用不在前台：当前 {actual_name}（{before or '-'}），"
+            f"已记录离屏，未自动拉回"
         )
+        SLog.i(TAG, f"foreground drift observe sn={sn} expected={package} actual={before or '-'}")
         return {
-            "ok": ok,
+            "ok": True,
             "msg": msg,
-            "guarded": True,
+            "guarded": False,
+            "drift": True,
             "foreground_before": before,
-            "foreground_after": after,
+            "foreground_after": before,
+            "foreground_app_name": actual_name,
         }
     except Exception as e:
-        SLog.w(TAG, f"foreground guard failed: {e}")
-        return {"ok": False, "msg": str(e), "guarded": True}
+        SLog.w(TAG, f"foreground observe failed: {e}")
+        return {"ok": True, "msg": str(e), "guarded": False, "drift": False}
 
 
-def ensure_app_foreground(sn: str, package: str, platform: str = "android") -> Dict[str, Any]:
+def _screen_suggests_test_app(
+    engine,
+    *,
+    package: str = "",
+    app_name: str = "",
+) -> bool:
+    """启动过渡期包名可能滞后；用屏上文案辅助判断目标应用是否已出现。"""
+    blob = ""
+    try:
+        w = int(getattr(engine, "screen_width", 0) or 0)
+        h = int(getattr(engine, "screen_height", 0) or 0)
+        if w > 0 and h > 0 and hasattr(engine, "ocr"):
+            blob = engine.ocr(w, h) or ""
+    except Exception:
+        blob = ""
+    if not blob:
+        try:
+            from server.services.page_context_service import _collect_full_screen_text
+
+            blob = _collect_full_screen_text(engine) or ""
+        except Exception:
+            blob = ""
+    if not blob:
+        return False
+
+    name = (app_name or "").strip()
+    if name and name in blob:
+        return True
+    pkg_tail = (package or "").split(".")[-1]
+    if pkg_tail and len(pkg_tail) >= 4 and pkg_tail in blob.lower():
+        return True
+
+    generic_markers = (
+        "造物者",
+        "造好物",
+        "同意并继续",
+        "隐私条款",
+        "用户协议",
+        "隐私政策",
+        "访客浏览",
+        "一键登录",
+        "手机号登录",
+    )
+    return any(m in blob for m in generic_markers)
+
+
+def ensure_app_foreground(
+    sn: str,
+    package: str,
+    platform: str = "android",
+    *,
+    app_name: str = "",
+) -> Dict[str, Any]:
+    """
+    尽力拉起被测应用。包名未立即匹配时不判失败、不阻断后续步骤；
+    启动过渡期前台可能短暂显示其它包名（如微信授权栈），仅记录提示。
+    """
     if not package or not sn:
         msg = "未配置应用包名" if not package else "未选择执行设备"
         SLog.w(TAG, f"ensure_app_foreground skipped: {msg}")
-        return {"ok": False, "msg": msg}
+        return {"ok": False, "msg": msg, "hard_fail": True}
     try:
         import builtins
+        import time as _time
+
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine, resolve_mobile_serial
         from script.sleep import mSleep
 
@@ -350,7 +428,7 @@ def ensure_app_foreground(sn: str, package: str, platform: str = "android") -> D
         builtins.TARGET_DEVICE_SN = mobile_sn
         engine, _ = bootstrap_mobile_engine(sn, platform)
         if not hasattr(engine, "start_app"):
-            return {"ok": False, "msg": "引擎不支持 start_app"}
+            return {"ok": False, "msg": "引擎不支持 start_app", "hard_fail": True}
 
         before = _engine_current_package(engine)
         SLog.i(TAG, f"Launch app sn={mobile_sn} package={package} before={before or '-'}")
@@ -363,22 +441,80 @@ def ensure_app_foreground(sn: str, package: str, platform: str = "android") -> D
                 SLog.w(TAG, f"stop_app before launch failed: {e}")
 
         engine.start_app(package)
-        mSleep(2.5)
-        after = _engine_current_package(engine)
 
-        if not _pkg_matches(package, after):
+        after = before
+        pkg_ok = False
+        screen_ok = False
+        deadline = _time.time() + 8.0
+        while _time.time() < deadline:
+            mSleep(0.45)
+            after = _engine_current_package(engine)
+            pkg_ok = _pkg_matches(package, after)
+            screen_ok = _screen_suggests_test_app(
+                engine, package=package, app_name=app_name
+            )
+            if pkg_ok or screen_ok:
+                break
+
+        if not pkg_ok and not screen_ok:
             SLog.w(TAG, f"Launch retry: expected={package} actual={after or '-'}")
             engine.start_app(package)
-            mSleep(2.0)
-            after = _engine_current_package(engine)
+            retry_deadline = _time.time() + 4.0
+            while _time.time() < retry_deadline:
+                mSleep(0.45)
+                after = _engine_current_package(engine)
+                pkg_ok = _pkg_matches(package, after)
+                screen_ok = _screen_suggests_test_app(
+                    engine, package=package, app_name=app_name
+                )
+                if pkg_ok or screen_ok:
+                    break
 
-        ok = _pkg_matches(package, after)
-        msg = f"已拉起前台 {package}" if ok else f"拉起失败：当前前台 {after or '未知'}，请检查包名 {package}"
-        SLog.i(TAG, f"Launch result ok={ok} after={after or '-'}")
-        return {"ok": ok, "msg": msg, "package": package, "foreground_before": before, "foreground_after": after}
+        drift = bool(after and not _pkg_matches(package, after))
+        if drift:
+            try:
+                from server.services.regression_run_context import record_foreground_drift
+
+                record_foreground_drift(
+                    expected_package=package,
+                    actual_package=after,
+                    phase="launch",
+                    note="应用拉起过渡期",
+                )
+            except Exception:
+                pass
+
+        if pkg_ok:
+            msg = f"已拉起前台 {package}"
+        elif screen_ok:
+            msg = (
+                f"已发起拉起 {package}；包名暂报为 {after or '未知'}，"
+                f"界面已出现目标应用内容（可能处于启动/授权过渡期）"
+            )
+        else:
+            msg = (
+                f"已发起拉起 {package}；当前前台 {after or '未知'}，"
+                f"可能仍处于应用切换中，后续步骤将继续执行"
+            )
+
+        SLog.i(
+            TAG,
+            f"Launch result pkg_ok={pkg_ok} screen_ok={screen_ok} after={after or '-'}",
+        )
+        return {
+            "ok": True,
+            "msg": msg,
+            "package": package,
+            "foreground_before": before,
+            "foreground_after": after,
+            "foreground_confirmed": pkg_ok,
+            "foreground_uncertain": not pkg_ok,
+            "screen_suggests_app": screen_ok,
+            "drift": drift,
+        }
     except Exception as e:
         SLog.w(TAG, f"ensure foreground failed: {e}")
-        return {"ok": False, "msg": str(e)}
+        return {"ok": False, "msg": str(e), "hard_fail": True}
 
 
 def build_plan_log(command: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:

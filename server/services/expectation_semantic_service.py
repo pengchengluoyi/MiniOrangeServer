@@ -260,7 +260,19 @@ def _parse_expectation_claims_rules(expected_text: str) -> List[Dict[str, Any]]:
                 for p in parts
             ]
 
-    shielded, protected = _protect_quoted_segments(exp)
+    cross_app_shields = (
+        "切换到微信app, 并打开登录页面",
+        "切换到微信app，并打开登录页面",
+    )
+    shielded = exp
+    protected: Dict[str, str] = {}
+    for phrase in cross_app_shields:
+        if phrase in shielded:
+            key = f"__XAPP_{len(protected)}__"
+            protected[key] = phrase
+            shielded = shielded.replace(phrase, key)
+    shielded, quoted_protected = _protect_quoted_segments(shielded)
+    protected.update(quoted_protected)
     delims = r"[；;、]"
     if (os.environ.get("EXPECTATION_SPLIT_COMMA") or "").strip().lower() in (
         "1",
@@ -466,6 +478,105 @@ def _llm_judge_page_expectation(
         }
     except Exception as e:
         SLog.w(TAG, f"LLM judge failed: {e}")
+        return None
+
+
+_FOREIGN_APP_SWITCH_RE = re.compile(
+    r"(?:切换到|切换至?|切到|打开|跳转至?)\s*(.+?)(?:app|应用)?(?:\s*[,，].*)?$",
+    re.I,
+)
+
+
+def evaluate_foreign_app_expectation(
+    expected: str,
+    foreground_package: str,
+    *,
+    test_package: str = "",
+    platform: str = "android",
+) -> Optional[Dict[str, Any]]:
+    """
+    跨 App 预期：仅依据前台包名判定（不用 OCR）。
+    例：「切换到微信app, 并打开登录页面」→ 期望前台为 com.tencent.mm
+    """
+    exp = (expected or "").strip()
+    pkg = (foreground_package or "").strip()
+    if not exp:
+        return None
+
+    target_text = ""
+    m = re.search(r"切换到\s*(.+?)(?:app|应用)", exp, re.I)
+    if m:
+        target_text = m.group(1).strip()
+    if not target_text:
+        m2 = re.search(r"打开\s*(.+?)(?:app|应用)?(?:\s*[,，]|$)", exp, re.I)
+        if m2:
+            target_text = m2.group(1).strip()
+    if not target_text:
+        m3 = _FOREIGN_APP_SWITCH_RE.match(exp)
+        if m3:
+            target_text = re.sub(r"(app|应用)$", "", m3.group(1).strip(), flags=re.I).strip()
+
+    if not target_text:
+        return None
+
+    try:
+        from server.services.locate.app_packages import (
+            package_for_app_key,
+            resolve_known_app_by_alias,
+            resolve_known_app_by_package,
+        )
+
+        known = resolve_known_app_by_alias(target_text)
+        if not known:
+            return None
+        expected_pkg = package_for_app_key(known.key, platform=platform)
+        if not expected_pkg:
+            return None
+
+        if pkg and known.matches_package(pkg):
+            return {
+                "ok": True,
+                "reason": f"前台应用为 {known.name}（{pkg}）",
+                "method": "foreground_package",
+                "expected_package": expected_pkg,
+                "foreground_package": pkg,
+            }
+
+        if test_package and pkg == test_package:
+            actual_name = known.name
+            other = resolve_known_app_by_package(pkg)
+            if other:
+                actual_name = other.name
+            return {
+                "ok": False,
+                "reason": (
+                    f"前台仍为被测应用 {actual_name}（{pkg}），"
+                    f"未完成切换到 {known.name}（{expected_pkg}）"
+                ),
+                "method": "foreground_package",
+                "expected_package": expected_pkg,
+                "foreground_package": pkg,
+            }
+
+        if pkg:
+            other = resolve_known_app_by_package(pkg)
+            cur = other.name if other else pkg
+            return {
+                "ok": False,
+                "reason": f"前台为 {cur}（{pkg}），期望 {known.name}（{expected_pkg}）",
+                "method": "foreground_package",
+                "expected_package": expected_pkg,
+                "foreground_package": pkg,
+            }
+        return {
+            "ok": False,
+            "reason": f"无法读取前台包名，期望 {known.name}（{expected_pkg}）",
+            "method": "foreground_package",
+            "expected_package": expected_pkg,
+            "foreground_package": "",
+        }
+    except Exception as e:
+        SLog.w(TAG, f"foreign app expectation failed: {e}")
         return None
 
 

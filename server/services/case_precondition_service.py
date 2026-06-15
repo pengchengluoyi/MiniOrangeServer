@@ -198,7 +198,43 @@ def _screen_blob(engine) -> str:
         return ""
 
 
-def _check_logged_in(engine, *, expect_logged_in: bool) -> Tuple[bool, str]:
+def _main_tab_bar_logged_in(blob: str) -> bool:
+    tabs = ("首页", "造物秀", "消息", "我的")
+    hits = sum(1 for t in tabs if t in (blob or ""))
+    return hits >= 3
+
+
+def _has_persisted_login_session(engine, package: str) -> Tuple[bool, str]:
+    """通过应用本地存储启发式判断是否存在登录会话（不读取敏感内容）。"""
+    pkg = (package or "").strip()
+    if not pkg:
+        return False, ""
+    for sub, min_files, keywords in (
+        ("shared_prefs", 2, ("user", "login", "session", "token", "account", "auth")),
+        ("databases", 1, ("user", "account", "session", "login", "token")),
+    ):
+        out = (engine.shell(f"ls /data/data/{pkg}/{sub} 2>/dev/null") or "").strip()
+        if not out or "Permission denied" in out or "No such file" in out:
+            continue
+        files = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("total")]
+        if len(files) < min_files:
+            continue
+        joined = " ".join(files).lower()
+        if sub == "shared_prefs" and len(files) >= 2:
+            if any(k in joined for k in keywords):
+                return True, f"检测到登录相关本地配置（{len(files)} 个 shared_prefs）"
+            return True, f"检测到应用本地数据（{len(files)} 个 shared_prefs），视为可能有登录会话"
+        if any(k in joined for k in keywords):
+            return True, "检测到用户/会话类本地数据库，视为已登录"
+    return False, ""
+
+
+def _check_logged_in(
+    engine,
+    *,
+    expect_logged_in: bool,
+    package: str = "",
+) -> Tuple[bool, str]:
     from server.services.page_navigation_service import _screen_is_login_home
     from server.services.page_context_service import _identify_page_by_screen_keywords
 
@@ -206,18 +242,28 @@ def _check_logged_in(engine, *, expect_logged_in: bool) -> Tuple[bool, str]:
     on_login = _screen_is_login_home(blob)
     page = _identify_page_by_screen_keywords(blob) or {}
     label = (page.get("label") or "").strip()
+    tab_logged_in = _main_tab_bar_logged_in(blob)
 
     if expect_logged_in:
+        session_ok, session_msg = _has_persisted_login_session(engine, package)
+        if session_ok:
+            return True, session_msg
+        if tab_logged_in:
+            return True, "底栏主导航齐全（首页/造物秀/消息/我的），视为已登录"
+        if label in ("首页", "消息", "我的", "造物秀"):
+            return True, f"当前在「{label}」，视为已登录"
+        if on_login and tab_logged_in:
+            return True, "主界面底栏已出现（登录流程中意外完成登录，未走退出）"
         if on_login:
             return False, "当前仍在登录页，未满足「已登录」前置"
-        if label in ("首页", "消息", "我的"):
-            return True, f"当前在「{label}」，视为已登录"
         if label and "登录" not in label:
             return True, f"当前在「{label}」，未识别为登录页"
         return False, "无法确认已登录状态（仍可能处于登录流程）"
 
     if on_login or label == "登录注册页":
         return True, "当前在登录页，满足「未登录」前置"
+    if tab_logged_in or (package and _has_persisted_login_session(engine, package)[0]):
+        return False, "当前似已登录（底栏或本地会话存在），不满足「未登录」前置"
     return False, f"当前在「{label or '未知页'}」，不满足「未登录」前置"
 
 
@@ -254,9 +300,9 @@ def _run_one(
         elif kind == "check_android_device":
             ok, msg = _check_platform("android", platform)
         elif kind == "check_logged_in":
-            ok, msg = _check_logged_in(engine, expect_logged_in=True)
+            ok, msg = _check_logged_in(engine, expect_logged_in=True, package=package)
         elif kind == "check_not_logged_in":
-            ok, msg = _check_logged_in(engine, expect_logged_in=False)
+            ok, msg = _check_logged_in(engine, expect_logged_in=False, package=package)
         else:
             ok, msg = True, f"暂未自动化: {line}（已跳过，请人工确认环境）"
             entry["skipped"] = True

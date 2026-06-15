@@ -291,6 +291,8 @@ def profile_key_for_login_step(label: str) -> Optional[str]:
         return "phone_login"
     if re.search(r"绑定手机|换绑手机|更换手机", raw):
         return "bind_phone"
+    if re.search(r"(账号|帐号|密码|手机号|验证码|邮箱).*输入框", raw):
+        return "password_login"
     if re.search(r"手机号注册|新用户注册|注册账号|注册页", raw) and not re.search(
         r"登录注册", raw
     ):

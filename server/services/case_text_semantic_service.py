@@ -42,6 +42,10 @@ _PRECONDITION_KINDS = frozenset(
 
 _NUMBERED_PATTERN = re.compile(r"(?:^|\n)\s*(\d+)[.、．)\）]\s*")
 _STEP_VERB_RE = re.compile(r"点击|打开|关闭|滑|等待|返回|启动|输入|勾选|选择", re.I)
+_CONDITIONAL_STEP_RE = re.compile(
+    r"^(?:如果|若|当).+|(?:可跳过|跳过此步骤|此步骤可跳过)",
+    re.I,
+)
 
 _FIELD_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 _FIELD_CACHE_MAX = 256
@@ -302,9 +306,21 @@ def parse_precondition_lines(text: str, *, use_llm: bool = True) -> List[str]:
     return [r["text"] for r in parse_precondition_items(text, use_llm=use_llm)]
 
 
+def is_conditional_step_line(line: str) -> bool:
+    """描述性/条件步骤（无明确 UI 动作），仅做预期校验。"""
+    text = _strip_number_prefix(line)
+    if not text:
+        return False
+    if _STEP_VERB_RE.search(text):
+        return False
+    return bool(_CONDITIONAL_STEP_RE.search(text))
+
+
 def _normalize_step_command_rules(line: str) -> str:
     line = _strip_number_prefix(line)
     if not line:
+        return ""
+    if is_conditional_step_line(line):
         return ""
     if re.search(r"同意并继续", line):
         if not _STEP_VERB_RE.search(line):
