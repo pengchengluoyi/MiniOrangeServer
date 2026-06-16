@@ -139,7 +139,7 @@ def _ocr_shot_cache_key(shot_or_path) -> str:
     if shot_or_path is None:
         return ""
     try:
-        from server.services.screen_frame_service import screen_frame_watermark
+        from server.services.shared.screenshot.screen_frame_service import screen_frame_watermark
 
         wm = screen_frame_watermark()
         if wm >= 0:

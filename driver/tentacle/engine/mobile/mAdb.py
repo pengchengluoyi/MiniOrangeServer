@@ -569,7 +569,7 @@ class MAdbEngine(MobileEngine):
 
     def _audit_gesture_begin(self, kind: str, summary: str, **extra) -> Optional[Dict]:
         try:
-            from server.services.regression_run_context import record_gesture
+            from server.services.shared.run_context.regression_run_context import record_gesture
 
             return record_gesture(
                 kind,
@@ -588,7 +588,7 @@ class MAdbEngine(MobileEngine):
         if not entry:
             return
         try:
-            from server.services.regression_run_context import finish_gesture
+            from server.services.shared.run_context.regression_run_context import finish_gesture
 
             finish_gesture(entry, ok=ok, msg=msg)
         except Exception:

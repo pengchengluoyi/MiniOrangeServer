@@ -313,7 +313,7 @@ def _run_mobile_input(
         return {"ok": False, "msg": "输入内容为空", "method": "input"}
     gesture = None
     try:
-        from server.services.regression_run_context import finish_gesture, record_gesture
+        from server.services.shared.run_context.regression_run_context import finish_gesture, record_gesture
 
         summary = f"输入{field_hint or '文本'} {value}"
         gesture = record_gesture(
@@ -1804,7 +1804,7 @@ def _record_plan_attempt_miss(
 ) -> None:
     """记录一次业务 Plan 点击未命中，供回放按序对齐截图与时间戳。"""
     try:
-        from server.services.regression_run_context import capture_trace_frame, stamp_run_timing
+        from server.services.shared.run_context.regression_run_context import capture_trace_frame, stamp_run_timing
 
         attempt_out: Dict[str, Any] = {
             "index": step_index,
@@ -2953,7 +2953,7 @@ def _plan_message_local(
 
     skip_page_hint = False
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         skip_page_hint = bool(get_ctx() and get_ctx().get("run_id"))
     except Exception:
@@ -2963,7 +2963,7 @@ def _plan_message_local(
         try:
             import builtins
             from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-            from server.services.page_context_service import (
+            from server.services.shared.page_context.page_context_service import (
                 format_page_hint,
                 get_engine_screen_snapshot,
                 identify_for_app,
@@ -3098,7 +3098,7 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
             "x": x,
             "y": y,
             "label": label,
-            "coords_explicit": bool(step.get("coords_explicit") or (x and y) or require_visual_coordinates),
+            "coords_explicit": bool(step.get("coords_explicit") or (x > 0 and y > 0)),
             "ai_coordinate_only": bool(require_visual_coordinates),
             "bbox": bbox,
             "confidence": step.get("confidence"),
@@ -3117,9 +3117,12 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
         out = {
             "kind": "input",
             "text": value,
-            "field_hint": field_hint,
             "summary": summary if summary != "input" else f"输入{field_hint or '文本'} {value}",
         }
+        # AI 坐标模式直接点坐标再输入，不需要本地 field_hint 找输入框；
+        # field_hint 只在 Local 模式作为本地定位线索保留。
+        if not require_visual_coordinates:
+            out["field_hint"] = field_hint
         if x and y:
             out.update(
                 {
@@ -3247,7 +3250,7 @@ def _build_ai_screen_context(sn: Optional[str], platform: str) -> Dict[str, Any]
         from PIL import Image
 
         from server.core.database import APP_DATA_DIR
-        from server.services.regression_capture import capture_device_screenshot
+        from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
         static_path = capture_device_screenshot(
             str(sn),
@@ -4207,7 +4210,7 @@ def _attach_step_page_context(
     if out.get("kind") not in ("click", "open_app", "close_app", "swipe"):
         return
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         if get_ctx() and get_ctx().get("run_id"):
             return
@@ -4217,7 +4220,7 @@ def _attach_step_page_context(
         import builtins
         from script.sleep import mSleep
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-        from server.services.page_context_service import (
+        from server.services.shared.page_context.page_context_service import (
             get_engine_screen_snapshot,
             identify_for_app,
         )
@@ -4228,7 +4231,7 @@ def _attach_step_page_context(
         builtins.TARGET_DEVICE_SN = str(sn)
         engine, (w, h) = bootstrap_mobile_engine(str(sn), platform)
         blob = get_engine_screen_snapshot(engine).get("blob") or ""
-        from server.services.page_context_service import enrich_page_context_screenshot
+        from server.services.shared.page_context.page_context_service import enrich_page_context_screenshot
 
         pc = identify_for_app(
             str(app_id), engine, frame_count=1, screen_text=blob
@@ -4295,10 +4298,10 @@ def execute_steps(
             pass
 
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         if run_id and sn and not get_ctx():
-            from server.services.regression_run_context import begin_run
+            from server.services.shared.run_context.regression_run_context import begin_run
 
             begin_run(
                 run_id=str(run_id),
@@ -4346,7 +4349,7 @@ def execute_steps(
 
         if capture_screenshots and sn and run_id and kind in ("open_app", "close_app", "back", "system_key"):
             try:
-                from server.services.regression_capture import capture_device_screenshot
+                from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
                 out["screenshot_before"] = capture_device_screenshot(
                     sn,
@@ -4414,7 +4417,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.regression_run_context import mark_step
+                from server.services.shared.run_context.regression_run_context import mark_step
 
                 guard_round_i = 0
                 max_guard_rounds = 3
@@ -4530,7 +4533,7 @@ def execute_steps(
                                             ),
                                         }
                                         try:
-                                            from server.services.regression_run_context import (
+                                            from server.services.shared.run_context.regression_run_context import (
                                                 stamp_run_timing,
                                             )
 
@@ -4590,7 +4593,7 @@ def execute_steps(
                             out["phase"] = "plan_attempt"
                             out["click_attempt"] = click_attempt
                             try:
-                                from server.services.regression_run_context import (
+                                from server.services.shared.run_context.regression_run_context import (
                                     capture_trace_frame,
                                 )
 
@@ -4673,7 +4676,7 @@ def execute_steps(
                                 "locate_debug": last_action.get("locate_debug"),
                             }
                             try:
-                                from server.services.regression_run_context import stamp_run_timing
+                                from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
                                 stamp_run_timing(fail_out)
                             except Exception:
@@ -4702,7 +4705,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.regression_run_context import mark_step
+                from server.services.shared.run_context.regression_run_context import mark_step
 
                 mark_step()
                 if step.get("ai_coordinate_only"):
@@ -4723,7 +4726,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.regression_run_context import mark_step
+                from server.services.shared.run_context.regression_run_context import mark_step
 
                 mark_step()
                 SLog.i(
@@ -4756,7 +4759,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.regression_run_context import mark_step
+                from server.services.shared.run_context.regression_run_context import mark_step
 
                 mark_step()
                 r = _run_mobile_back(
@@ -4770,7 +4773,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.regression_run_context import mark_step
+                from server.services.shared.run_context.regression_run_context import mark_step
 
                 mark_step()
                 out.update(_run_mobile_key(sn, step.get("key") or "", platform=platform))
@@ -4824,14 +4827,14 @@ def execute_steps(
         out["started_at"] = datetime.fromtimestamp(t0).isoformat(timespec="milliseconds")
 
         try:
-            from server.services.regression_run_context import stamp_run_timing
+            from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
             stamp_run_timing(out)
         except Exception:
             pass
 
         try:
-            from server.services.regression_run_context import take_gestures_since_watermark
+            from server.services.shared.run_context.regression_run_context import take_gestures_since_watermark
 
             step_gestures = take_gestures_since_watermark()
             returned_gestures = out.get("gestures") or []
@@ -4853,7 +4856,7 @@ def execute_steps(
 
         if not out.get("screenshot_after") and capture_screenshots and sn and run_id:
             try:
-                from server.services.regression_capture import capture_device_screenshot
+                from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
                 fallback_settle = 350 if step.get("consent_dismiss") else 450
                 out["screenshot_after"] = capture_device_screenshot(
@@ -4877,7 +4880,7 @@ def execute_steps(
 
         if learn_app_id and kind == "click" and out.get("ok"):
             try:
-                from server.services import icon_target_service as its
+                from server.services.shared import icon_target_service as its
 
                 learned = its.auto_learn_from_click(learn_app_id, out)
                 if learned:
@@ -4899,7 +4902,7 @@ def execute_steps(
 
     if guard_planned_all:
         try:
-            from server.services.regression_run_context import get_ctx
+            from server.services.shared.run_context.regression_run_context import get_ctx
 
             ctx = get_ctx()
             if ctx is not None:

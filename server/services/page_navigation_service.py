@@ -9,7 +9,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from script.log import SLog
-from server.services.page_context_service import (
+from server.services.shared.page_context.page_context_service import (
     extract_page_tokens,
     expected_matches_page,
     find_graph_node_by_label,
@@ -106,7 +106,7 @@ def _clip_tap_label(
 ) -> Dict[str, Any]:
     """PageNavigation 统一点击：CLIP-first（走 copilot _resolve_click_target）。"""
     from server.services.copilot_service import _resolve_click_target
-    from server.services.regression_run_context import finish_gesture, record_gesture
+    from server.services.shared.run_context.regression_run_context import finish_gesture, record_gesture
 
     pos, method, detail, rect = _resolve_click_target(
         engine,
@@ -191,7 +191,7 @@ def _clip_tap_label(
 def _collect_ocr_text_only(engine, *, force: bool = False) -> str:
     """仅截图 OCR（可见内容），回归批次内复用屏快照。"""
     try:
-        from server.services.page_context_service import collect_ocr_text
+        from server.services.shared.page_context.page_context_service import collect_ocr_text
 
         return collect_ocr_text(engine, force=force)
     except Exception as e:
@@ -319,8 +319,8 @@ def get_blocking_screen_state(engine, *, force: bool = False) -> Dict[str, Any]:
     同一手势水位内缓存，与 get_engine_screen_snapshot 共用一次 OCR。
     """
     try:
-        from server.services.page_context_service import get_engine_screen_snapshot
-        from server.services.screen_frame_service import screen_frame_watermark
+        from server.services.shared.page_context.page_context_service import get_engine_screen_snapshot
+        from server.services.shared.screenshot.screen_frame_service import screen_frame_watermark
 
         wm = screen_frame_watermark()
         if not force and engine is not None:
@@ -748,7 +748,7 @@ _LOGIN_SURFACE_MARKERS = (
 def _collect_ocr_layout(engine, *, force: bool = False) -> Tuple[List[Dict[str, Any]], int, int]:
     """复用屏快照 OCR 条目（带框），避免重复截图 analyze。"""
     try:
-        from server.services.page_context_service import get_engine_screen_snapshot
+        from server.services.shared.page_context.page_context_service import get_engine_screen_snapshot
 
         snap = get_engine_screen_snapshot(engine, force=force)
         return (
@@ -1176,7 +1176,7 @@ def _try_u2_click_consent_agree(
     screen_h: int,
 ) -> Tuple[bool, str, int, int, Optional[Dict[str, Any]]]:
     """直接点 u2 节点「同意」，并写入 gesture 审计。"""
-    from server.services.regression_run_context import finish_gesture, record_gesture
+    from server.services.shared.run_context.regression_run_context import finish_gesture, record_gesture
 
     if not hasattr(engine, "_ensure_u2"):
         return False, "u2_unavailable", 0, 0, None
@@ -1638,7 +1638,7 @@ def _tap_system_permission_allow(
     label: str,
     method: str,
 ) -> Dict[str, Any]:
-    from server.services.regression_run_context import finish_gesture, record_gesture
+    from server.services.shared.run_context.regression_run_context import finish_gesture, record_gesture
 
     from script.sleep import mSleep
 
@@ -2089,7 +2089,7 @@ def tap_consent_agree_on_engine(
     ) -> bool:
         nonlocal cx, cy, method, clicked
         cx, cy, method = tap
-        from server.services.regression_run_context import finish_gesture, record_gesture
+        from server.services.shared.run_context.regression_run_context import finish_gesture, record_gesture
 
         gesture = record_gesture(
             "click",
@@ -2550,7 +2550,7 @@ def _should_attempt_page_recovery(
         return False
     if _action_already_reached_target(expected, step_results or [], screen_text):
         return False
-    from server.services.page_context_service import expected_matches_page
+    from server.services.shared.page_context.page_context_service import expected_matches_page
     from server.services.page_navigation_service import _screen_is_overlay
 
     if _screen_is_overlay(screen_text):
@@ -2588,7 +2588,7 @@ def dismiss_startup_overlays(
         return None
     import builtins
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-    from server.services.page_context_service import (
+    from server.services.shared.page_context.page_context_service import (
         _collect_full_screen_text,
         identify_page_for_trace,
     )
@@ -2818,7 +2818,7 @@ def ensure_page_ready_before_action(
         return None
     import builtins
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-    from server.services.page_context_service import (
+    from server.services.shared.page_context.page_context_service import (
         _collect_full_screen_text,
         identify_page_for_trace,
     )
@@ -2830,7 +2830,7 @@ def ensure_page_ready_before_action(
 
     in_regression = False
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         gctx = get_ctx()
         in_regression = bool(gctx and gctx.get("run_id"))
@@ -2854,7 +2854,7 @@ def ensure_page_ready_before_action(
     if not steps:
         page_before: Dict[str, Any]
         if in_regression:
-            from server.services.page_context_service import _identify_page_by_screen_keywords
+            from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
 
             page_before = _identify_page_by_screen_keywords(screen_text) or {
                 "matched": False,
@@ -2884,7 +2884,7 @@ def ensure_page_ready_before_action(
 
     # 回归执行：阻塞弹窗由 Plan 内 Overlay Guard 逐步处置，不在此预执行固定点击序列
     if in_regression:
-        from server.services.page_context_service import _identify_page_by_screen_keywords
+        from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
 
         page_before = _identify_page_by_screen_keywords(screen_text) or {
             "matched": False,
@@ -2973,7 +2973,7 @@ def try_dismiss_blocking_overlay(
         return None
     import builtins
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-    from server.services.page_context_service import (
+    from server.services.shared.page_context.page_context_service import (
         _collect_full_screen_text,
         identify_page_for_trace,
     )
@@ -3121,7 +3121,7 @@ def try_recover_and_reverify(
 
     import builtins
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-    from server.services.page_context_service import _collect_screen_text_from_engine
+    from server.services.shared.page_context.page_context_service import _collect_screen_text_from_engine
 
     builtins.TARGET_DEVICE_SN = sn
     engine, _ = bootstrap_mobile_engine(sn, platform)

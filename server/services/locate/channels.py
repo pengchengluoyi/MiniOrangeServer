@@ -271,7 +271,7 @@ def collect_text_channels(
 
     ocr_pool: List[Any] = []
     try:
-        from server.services.page_context_service import get_cached_ocr_items
+        from server.services.shared.page_context.page_context_service import get_cached_ocr_items
 
         ocr_items = get_cached_ocr_items(engine)
         if ocr_items:
@@ -285,7 +285,7 @@ def collect_text_channels(
 
     if not ocr_pool:
         try:
-            from server.services.screen_frame_service import get_screen_frame
+            from server.services.shared.screenshot.screen_frame_service import get_screen_frame
 
             frame = get_screen_frame(engine)
             shot = frame.get("shot") if frame else None
@@ -327,7 +327,7 @@ def collect_icon_row_channel(
         if not candidates or not clip_enabled():
             return out
 
-        from server.services.screen_frame_service import get_frame_bgr
+        from server.services.shared.screenshot.screen_frame_service import get_frame_bgr
 
         frame = get_frame_bgr(engine)
         if frame is None:

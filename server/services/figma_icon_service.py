@@ -480,7 +480,7 @@ def seed_login_icons_from_figma(
     坐标按 figma_norm 存相对比例，并写入参考分辨率像素值。
     """
     from server.models.app_icon_target import AppIconTarget
-    from server.services.icon_target_service import upsert_icon_target
+    from server.services.shared.icon_target_service import upsert_icon_target
 
     cfg = aas.get_automation_config(app)
     figma_cfg = cfg.get("figma") or {}

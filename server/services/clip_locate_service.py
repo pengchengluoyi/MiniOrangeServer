@@ -788,7 +788,7 @@ def try_clip_locate(
     if not label and not query:
         return None, "none", "", None
     try:
-        from server.services.screen_frame_service import get_screen_frame
+        from server.services.shared.screenshot.screen_frame_service import get_screen_frame
 
         frame = get_screen_frame(engine)
         if frame.get("screen_not_ready"):

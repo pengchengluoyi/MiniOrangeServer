@@ -57,7 +57,7 @@ def ensure_default_login_icon_templates(db, app_id: str, app=None) -> Dict[str, 
     Figma 导入仅在「设计稿同步 / 应用逻辑学习 / 手动从 Figma 导入」时触发。
     """
     from server.models.app_icon_target import AppIconTarget
-    from server.services.icon_target_service import upsert_icon_target
+    from server.services.shared.icon_target_service import upsert_icon_target
 
     created = 0
     skipped = 0
@@ -159,7 +159,7 @@ def build_login_icon_clarification(
     screenshot = ""
     if run_id:
         try:
-            from server.services.regression_capture import capture_device_screenshot
+            from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
             screenshot = (
                 capture_device_screenshot(
@@ -209,7 +209,7 @@ def apply_clarification_answer(
     应用用户确认：更新图标库坐标 + 写入应用知识库。
     answer: { option_id?, x?, y?, w?, h?, note? }
     """
-    from server.services.icon_target_service import upsert_icon_target
+    from server.services.shared.icon_target_service import upsert_icon_target
 
     intent = clarification.get("intent") or ""
     tpl = template_for_intent(intent) or {}

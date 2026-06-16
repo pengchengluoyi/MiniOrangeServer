@@ -215,7 +215,7 @@ def enrich_page_context_screenshot(
     if out.get("screenshot") or not sn:
         return out
     try:
-        from server.services.regression_capture import capture_device_screenshot
+        from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
         url = capture_device_screenshot(
             sn, platform, run_id=run_id or "", tag=tag
@@ -383,21 +383,21 @@ def identify_for_app(
 
 
 def _screen_cache_watermark() -> int:
-    from server.services.screen_frame_service import screen_frame_watermark
+    from server.services.shared.screenshot.screen_frame_service import screen_frame_watermark
 
     return screen_frame_watermark()
 
 
 def invalidate_engine_screen_cache(engine=None) -> None:
     """手势或强制刷新后清除统一屏帧缓存。"""
-    from server.services.screen_frame_service import invalidate_screen_frame
+    from server.services.shared.screenshot.screen_frame_service import invalidate_screen_frame
 
     invalidate_screen_frame(engine)
 
 
 def get_engine_screen_snapshot(engine, *, force: bool = False) -> Dict[str, Any]:
     """兼容别名 → screen_frame_service.get_screen_frame。"""
-    from server.services.screen_frame_service import get_screen_frame
+    from server.services.shared.screenshot.screen_frame_service import get_screen_frame
 
     return get_screen_frame(engine, force=force)
 

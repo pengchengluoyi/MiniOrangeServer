@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 from server.core.database import APP_DATA_DIR, get_db
 from server.models.project import App
 from server.services import app_automation_service as aas
-from server.services import icon_target_service as its
+from server.services.shared import icon_target_service as its
 from server.services.project_env import ENV_PROFILE_KEYS
 from server.services.crawl_persistence import save_screenshot_file
 from server.services import figma_service as fs

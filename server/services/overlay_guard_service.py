@@ -355,9 +355,9 @@ def run_one_guard_round(
 ) -> Dict[str, Any]:
     """单次守卫：识别当前阻塞屏 → 处置一次 → Assert。由调用方在仍阻塞时再次调用。"""
     from script.sleep import mSleep
-    from server.services.regression_run_context import capture_trace_frame
+    from server.services.shared.run_context.regression_run_context import capture_trace_frame
 
-    from server.services.regression_run_context import run_elapsed_ms
+    from server.services.shared.run_context.regression_run_context import run_elapsed_ms
 
     detect = detect or detect_blocking_overlay(engine)
     if not detect or not detect.get("blocked"):
@@ -691,7 +691,7 @@ def guard_round_to_step_results(
     round_i: int,
 ) -> List[Dict[str, Any]]:
     """将单次 run_one_guard_round 结果转为 execute 行（仅处置 Tap）。"""
-    from server.services.regression_run_context import apply_run_timing
+    from server.services.shared.run_context.regression_run_context import apply_run_timing
 
     if not one.get("attempted"):
         return []

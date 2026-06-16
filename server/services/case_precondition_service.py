@@ -190,7 +190,7 @@ def _check_platform(expected: str, actual: str) -> Tuple[bool, str]:
 
 def _screen_blob(engine) -> str:
     try:
-        from server.services.page_context_service import _collect_full_screen_text
+        from server.services.shared.page_context.page_context_service import _collect_full_screen_text
 
         return _collect_full_screen_text(engine) or ""
     except Exception as e:
@@ -236,7 +236,7 @@ def _check_logged_in(
     package: str = "",
 ) -> Tuple[bool, str]:
     from server.services.page_navigation_service import _screen_is_login_home
-    from server.services.page_context_service import _identify_page_by_screen_keywords
+    from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
 
     blob = _screen_blob(engine)
     on_login = _screen_is_login_home(blob)
@@ -269,7 +269,7 @@ def _check_logged_in(
 
 def _stamp_precondition_item(entry: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        from server.services.regression_run_context import stamp_run_timing
+        from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
         return stamp_run_timing(entry)
     except Exception:

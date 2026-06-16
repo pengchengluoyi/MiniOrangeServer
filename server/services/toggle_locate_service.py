@@ -413,7 +413,7 @@ def _try_clip_on_toggles(
         svc = get_clip_service()
         if not svc.available():
             return None
-        from server.services.screen_frame_service import get_frame_bgr
+        from server.services.shared.screenshot.screen_frame_service import get_frame_bgr
 
         frame = get_frame_bgr(engine)
         if frame is None:

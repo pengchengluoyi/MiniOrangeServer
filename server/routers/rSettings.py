@@ -343,10 +343,3 @@ def get_skills_catalog():
     from server.services.skills_registry import list_skills_catalog
 
     return {"code": 200, "data": list_skills_catalog()}
-
-
-@router.get("/skills/tools/anthropic")
-def get_anthropic_tool_use_catalog():
-    from server.services.skills_registry import list_anthropic_tool_use_catalog
-
-    return {"code": 200, "data": list_anthropic_tool_use_catalog()}

@@ -131,7 +131,7 @@ def _cache_engine(mobile_sn: str, platform: str, engine: object, size: Tuple[int
         "mobile_sn": mobile_sn,
     }
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx is not None:
@@ -144,7 +144,7 @@ def _cache_engine(mobile_sn: str, platform: str, engine: object, size: Tuple[int
 
 def _try_reuse_engine(mobile_sn: str, platform: str) -> Optional[Tuple[object, Tuple[int, int]]]:
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx and ctx.get("engine_sn") == mobile_sn and ctx.get("engine"):
@@ -176,7 +176,7 @@ def clear_engine_cache(node_sn: str = "", platform: str = "android") -> None:
         entry = _ENGINE_CACHE.pop(key, None)
         if entry and entry.get("engine") is not None:
             try:
-                from server.services.page_context_service import invalidate_engine_screen_cache
+                from server.services.shared.page_context.page_context_service import invalidate_engine_screen_cache
 
                 invalidate_engine_screen_cache(entry["engine"])
             except Exception:
@@ -186,14 +186,14 @@ def clear_engine_cache(node_sn: str = "", platform: str = "android") -> None:
             eng = entry.get("engine")
             if eng is not None:
                 try:
-                    from server.services.page_context_service import invalidate_engine_screen_cache
+                    from server.services.shared.page_context.page_context_service import invalidate_engine_screen_cache
 
                     invalidate_engine_screen_cache(eng)
                 except Exception:
                     pass
         _ENGINE_CACHE.clear()
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx is not None:

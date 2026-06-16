@@ -79,7 +79,7 @@ def resolve_locate_target(
     # 预建屏快照，后续 profile / 文本通道 / 阻塞检测共用同一次 OCR
     if not screen_text:
         try:
-            from server.services.screen_frame_service import get_screen_frame
+            from server.services.shared.screenshot.screen_frame_service import get_screen_frame
 
             get_screen_frame(engine)
         except Exception:

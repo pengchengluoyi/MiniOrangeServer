@@ -304,7 +304,7 @@ def guard_test_app_foreground(
     try:
         import builtins
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-        from server.services.regression_run_context import (
+        from server.services.shared.run_context.regression_run_context import (
             close_foreground_drift_segment,
             record_foreground_drift,
         )
@@ -373,7 +373,7 @@ def _screen_suggests_test_app(
         blob = ""
     if not blob:
         try:
-            from server.services.page_context_service import _collect_full_screen_text
+            from server.services.shared.page_context.page_context_service import _collect_full_screen_text
 
             blob = _collect_full_screen_text(engine) or ""
         except Exception:
@@ -473,7 +473,7 @@ def ensure_app_foreground(
         drift = bool(after and not _pkg_matches(package, after))
         if drift:
             try:
-                from server.services.regression_run_context import record_foreground_drift
+                from server.services.shared.run_context.regression_run_context import record_foreground_drift
 
                 record_foreground_drift(
                     expected_package=package,
@@ -787,7 +787,7 @@ def _plan_flat_item(plan_index: int, run_elapsed_ms: int) -> Dict[str, Any]:
     item: Dict[str, Any] = {"type": "plan", "plan_index": plan_index}
     if run_elapsed_ms >= 0:
         try:
-            from server.services.regression_run_context import format_run_elapsed
+            from server.services.shared.run_context.regression_run_context import format_run_elapsed
 
             item["run_elapsed"] = format_run_elapsed(run_elapsed_ms)
             item["run_elapsed_ms"] = run_elapsed_ms
@@ -1022,7 +1022,7 @@ def build_execute_log(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             label = (r.get("target_label") or r.get("summary") or "").strip()
             method = r.get("method") or ""
             try:
-                from server.services.icon_target_service import should_auto_learn_icon
+                from server.services.shared.icon_target_service import should_auto_learn_icon
 
                 if should_auto_learn_icon(
                     method=method,

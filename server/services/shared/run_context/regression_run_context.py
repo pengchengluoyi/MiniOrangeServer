@@ -244,7 +244,7 @@ def _capture(
     if not ctx or not ctx.get("capture"):
         return ""
     try:
-        from server.services.regression_capture import capture_device_screenshot
+        from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
         wait_ms = settle_ms or (_default_settle_ms(entry) if entry else 0)
         phase = ((entry or {}).get("phase") or "").lower()
@@ -280,7 +280,7 @@ def invalidate_screen_cache() -> None:
         ctx.pop("screen_ocr", None)
         ctx.pop("screen_wm", None)
     try:
-        from server.services.screen_frame_service import invalidate_screen_frame
+        from server.services.shared.screenshot.screen_frame_service import invalidate_screen_frame
 
         invalidate_screen_frame()
     except Exception:

@@ -263,7 +263,7 @@ def _append_foreground_trace(
     platform: str,
 ) -> None:
     """拉起被测应用写入时间轴（填补前置条件与业务步骤之间的空档）。"""
-    from server.services.regression_run_context import stamp_run_timing
+    from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
     launch_ok = bool(fg.get("ok")) and not fg.get("hard_fail")
     row = stamp_run_timing(
@@ -329,7 +329,7 @@ def _append_device_prep_trace(
     if not sn:
         return
     try:
-        from server.services.regression_run_context import (
+        from server.services.shared.run_context.regression_run_context import (
             is_device_prep_done,
             mark_device_prep_done,
         )
@@ -356,13 +356,13 @@ def _append_device_prep_trace(
         import builtins
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
 
-        from server.services.regression_run_context import stamp_run_timing
+        from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
         locked_before, blank_before = _probe_screen_before_prep(sn, platform)
         shot_lock = ""
         if run_id and locked_before:
             try:
-                from server.services.regression_capture import capture_adb_raw_screenshot
+                from server.services.shared.screenshot.regression_capture import capture_adb_raw_screenshot
 
                 shot_lock = capture_adb_raw_screenshot(
                     sn,
@@ -399,7 +399,7 @@ def _append_device_prep_trace(
         shot_unlocked = ""
         if run_id:
             try:
-                from server.services.regression_capture import capture_engine_screenshot
+                from server.services.shared.screenshot.regression_capture import capture_engine_screenshot
 
                 shot_unlocked = capture_engine_screenshot(
                     engine,
@@ -500,7 +500,7 @@ def _append_device_prep_trace(
             }
         )
         try:
-            from server.services.regression_run_context import mark_device_prep_done
+            from server.services.shared.run_context.regression_run_context import mark_device_prep_done
 
             mark_device_prep_done()
         except Exception:
@@ -529,7 +529,7 @@ def _append_precondition_trace(
     raw = (case.get("precondition") or "").strip()
     if not raw and not before_items and not after_items:
         return
-    from server.services.regression_run_context import stamp_run_timing
+    from server.services.shared.run_context.regression_run_context import stamp_run_timing
 
     entries = []
     for i in before_items + after_items:
@@ -606,7 +606,7 @@ def _load_icon_targets(db: Optional[Session], app_id: str) -> List[Dict[str, Any
     if db is None:
         return []
     try:
-        from server.services.icon_target_service import list_for_copilot
+        from server.services.shared.icon_target_service import list_for_copilot
 
         return list_for_copilot(db, app_id)
     except Exception:
@@ -661,7 +661,7 @@ def _run_command_block(
         stop_on_failure=True,
     )
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
         from server.services.overlay_guard_service import merge_guard_plan_log
 
         gctx = get_ctx()
@@ -729,7 +729,7 @@ def _collect_screen_text(
     engine, screen_w: int, screen_h: int, *, force: bool = False
 ) -> str:
     try:
-        from server.services.page_context_service import _collect_full_screen_text
+        from server.services.shared.page_context.page_context_service import _collect_full_screen_text
 
         return _collect_full_screen_text(engine, force=force)
     except Exception as e:
@@ -810,7 +810,7 @@ def _check_expected(
     blob = screen_text or ""
 
     try:
-        from server.services.page_context_service import enrich_check_with_page
+        from server.services.shared.page_context.page_context_service import enrich_check_with_page
     except Exception:
         enrich_check_with_page = None
 
@@ -907,7 +907,7 @@ def _verify_case(
         _prepare_screen_for_verify(engine, w, h, sn=sn, platform=platform)
         screen_text = _collect_screen_text(engine, w, h)
         if app_id:
-            from server.services.page_context_service import identify_for_app
+            from server.services.shared.page_context.page_context_service import identify_for_app
 
             page_context = identify_for_app(
                 app_id, engine, frame_count=1, screen_text=screen_text
@@ -964,7 +964,7 @@ def _capture_step_screenshot(
     if not run_id:
         return ""
     try:
-        from server.services.regression_capture import capture_device_screenshot
+        from server.services.shared.screenshot.regression_capture import capture_device_screenshot
 
         return capture_device_screenshot(sn, platform, run_id=run_id, tag=tag) or ""
     except Exception:
@@ -994,7 +994,7 @@ def _analyze_expected_plans(
     ]
 
     try:
-        from server.services.regression_run_context import is_regression_run
+        from server.services.shared.run_context.regression_run_context import is_regression_run
 
         if is_regression_run():
             return {
@@ -1027,7 +1027,7 @@ def _enrich_page_context_meta(
         from server.core.database import SessionLocal
         from server.models.project import App
         from server.services.figma_logic_service import load_figma_logic_for_app
-        from server.services.page_context_service import load_app_graph_by_app_id
+        from server.services.shared.page_context.page_context_service import load_app_graph_by_app_id
         from server.services.page_navigation_service import resolve_target_page_from_expected
 
         session = SessionLocal()
@@ -1089,7 +1089,7 @@ def _verify_step_expected(
     device_lost = False
     fast_verify = False
     try:
-        from server.services.regression_run_context import is_regression_run
+        from server.services.shared.run_context.regression_run_context import is_regression_run
 
         fast_verify = bool(run_id) or is_regression_run()
     except Exception:
@@ -1141,7 +1141,7 @@ def _verify_step_expected(
             if not app_id:
                 break
             if fast_verify:
-                from server.services.page_context_service import identify_for_app
+                from server.services.shared.page_context.page_context_service import identify_for_app
 
                 page_context = identify_for_app(
                     app_id,
@@ -1150,7 +1150,7 @@ def _verify_step_expected(
                     screen_text=screen_text,
                 )
             else:
-                from server.services.page_context_service import identify_page_for_trace
+                from server.services.shared.page_context.page_context_service import identify_page_for_trace
 
                 page_context = identify_page_for_trace(
                     app_id,
@@ -1915,7 +1915,7 @@ def run_cases(
 
     run_id = uuid.uuid4().hex[:12]
     try:
-        from server.services.regression_run_context import begin_run
+        from server.services.shared.run_context.regression_run_context import begin_run
 
         begin_run(
             run_id=run_id,
@@ -2061,7 +2061,7 @@ def _background_run_worker(
     db = SessionLocal()
     run_doc = _RUNS.get(run_id)
     try:
-        from server.services.regression_run_context import begin_run, get_ctx
+        from server.services.shared.run_context.regression_run_context import begin_run, get_ctx
 
         if not get_ctx():
             begin_run(
@@ -2107,7 +2107,7 @@ def _background_run_worker(
 
 def _finalize_run_doc(run_doc: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
     try:
-        from server.services.regression_run_context import end_run, take_foreground_drift_summary
+        from server.services.shared.run_context.regression_run_context import end_run, take_foreground_drift_summary
 
         run_doc["gesture_log"] = end_run()
         run_doc["foreground_drift"] = take_foreground_drift_summary()
@@ -2115,7 +2115,7 @@ def _finalize_run_doc(run_doc: Dict[str, Any], db: Optional[Session] = None) -> 
         run_doc["gesture_log"] = []
         run_doc["foreground_drift"] = {}
     try:
-        from server.services.regression_run_report import build_run_report
+        from server.services.shared.run_context.regression_run_report import build_run_report
 
         run_doc["report"] = build_run_report(run_doc)
     except Exception:
@@ -2175,7 +2175,7 @@ def _execute_cases_batch(
         case = normalize_feishu_case(raw_case)
         case_started = _time.time()
         try:
-            from server.services.regression_run_context import begin_case
+            from server.services.shared.run_context.regression_run_context import begin_case
 
             begin_case()
         except Exception:

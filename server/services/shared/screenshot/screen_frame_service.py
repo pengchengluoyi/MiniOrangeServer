@@ -18,7 +18,7 @@ _SNAP_ATTR = "_mo_screen_snap"
 
 def screen_frame_watermark() -> int:
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx is not None:
@@ -53,7 +53,7 @@ def invalidate_screen_frame(engine=None) -> None:
 
 
 def _shot_to_bgr(shot) -> Optional[Any]:
-    from server.services.page_context_service import _shot_to_bgr as _bgr
+    from server.services.shared.page_context.page_context_service import _shot_to_bgr as _bgr
 
     return _bgr(shot)
 
@@ -158,7 +158,7 @@ def get_screen_frame(engine, *, force: bool = False) -> Dict[str, Any]:
         setattr(engine, _FRAME_ATTR, frame)
         setattr(engine, _SNAP_ATTR, frame)
     try:
-        from server.services.regression_run_context import get_ctx
+        from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx is not None:
