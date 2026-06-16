@@ -2703,7 +2703,7 @@ def _plan_segment(
         }
 
     try:
-        from server.services.copilot_semantic import semantic_split_segment
+        from server.services.local.plan.copilot_semantic import semantic_split_segment
 
         expanded = semantic_split_segment(segment, sn=sn, context=context)
         if expanded is not None:
@@ -3419,7 +3419,7 @@ def _append_openai_image(messages: List[Dict[str, Any]], screen: Dict[str, Any])
 
 
 def _ai_plan_request_timeout(channel: str) -> int:
-    from server.services.ai_plan_prompt import _ai_plan_request_timeout as timeout_for_channel
+    from server.services.ai.plan.prompt import _ai_plan_request_timeout as timeout_for_channel
 
     return timeout_for_channel(channel)
 
@@ -3433,7 +3433,7 @@ def _call_openai_compatible_plan(
     context: Dict[str, Any],
     screen: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    from server.services.ai_plan_prompt import build_ai_plan_messages
+    from server.services.ai.plan.prompt import build_ai_plan_messages
 
     base = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
@@ -3478,7 +3478,7 @@ def _call_anthropic_compatible_plan(
     context: Dict[str, Any],
     screen: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    from server.services.ai_plan_prompt import build_ai_plan_messages
+    from server.services.ai.plan.prompt import build_ai_plan_messages
 
     base = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
@@ -3607,7 +3607,7 @@ def _call_gemini_plan(
     context: Dict[str, Any],
     screen: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    from server.services.ai_plan_prompt import build_ai_plan_messages
+    from server.services.ai.plan.prompt import build_ai_plan_messages
 
     base = str(provider.get("base_url") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
@@ -3684,7 +3684,7 @@ def verify_expectation_with_ai(
 ) -> Optional[Dict[str, Any]]:
     """Use configured LLM + screenshot to verify a case expectation."""
     from server.services import system_settings_service as ss
-    from server.services.ai_plan_prompt import build_ai_assert_messages
+    from server.services.ai.plan.prompt import build_ai_assert_messages
 
     exp = re.sub(r"^\d+[.、．)\）]\s*", "", (expected_text or "").strip())
     if not exp or not sn:

@@ -859,7 +859,7 @@ def _sort_flat_items_chronologically(
 
 def _split_expected_fragments(expected_text: str) -> List[str]:
     try:
-        from server.services.expectation_semantic_service import parse_expectation_texts
+        from server.services.shared.semantic.expectation_semantic_service import parse_expectation_texts
 
         texts = parse_expectation_texts(expected_text)
         if texts:
@@ -883,7 +883,7 @@ def build_expected_plan_tree(
     fragments = _split_expected_fragments(expected_text)
     claim_kinds: Dict[str, str] = {}
     try:
-        from server.services.expectation_semantic_service import parse_expectation_claims
+        from server.services.shared.semantic.expectation_semantic_service import parse_expectation_claims
 
         for row in parse_expectation_claims(expected_text):
             claim_kinds[row["text"]] = row.get("kind") or "generic"

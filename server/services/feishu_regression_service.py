@@ -163,7 +163,7 @@ def list_cases_for_app(app, *, refresh: bool = False) -> Dict[str, Any]:
 
 def _normalize_step_line(line: str) -> str:
     try:
-        from server.services.case_text_semantic_service import (
+        from server.services.shared.semantic.case_text_semantic_service import (
             is_conditional_step_line,
             normalize_step_command,
         )
@@ -784,7 +784,7 @@ def _navigation_expectation_conflict(exp: str, screen_text: str) -> Optional[str
 
     if "首页" in exp and "首页" not in blob:
         try:
-            from server.services.expectation_semantic_service import normalize_page_intent
+            from server.services.shared.semantic.expectation_semantic_service import normalize_page_intent
 
             if normalize_page_intent(exp) == "首页":
                 return None
@@ -833,7 +833,7 @@ def _check_expected(
         else:
             page_verdict = None
             try:
-                from server.services.expectation_semantic_service import (
+                from server.services.shared.semantic.expectation_semantic_service import (
                     evaluate_dynamic_expectation,
                     evaluate_foreign_app_expectation,
                 )
@@ -1078,7 +1078,7 @@ def _verify_step_expected(
         }
 
     try:
-        from server.services.expectation_semantic_service import parse_expectation_texts
+        from server.services.shared.semantic.expectation_semantic_service import parse_expectation_texts
 
         claim_texts = parse_expectation_texts(exp)
     except Exception:

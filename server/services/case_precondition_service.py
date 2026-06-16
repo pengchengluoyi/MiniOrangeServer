@@ -27,7 +27,7 @@ WECHAT_PKG = _wechat_pkg()
 
 def split_precondition_lines(text: str) -> List[str]:
     try:
-        from server.services.case_text_semantic_service import parse_precondition_lines
+        from server.services.shared.semantic.case_text_semantic_service import parse_precondition_lines
 
         lines = parse_precondition_lines(text)
         if lines:
@@ -324,7 +324,7 @@ def precondition_cleared_app_cache(items: List[Dict[str, Any]]) -> bool:
 
 def has_precondition_phase(precondition_raw: str, phase: str) -> bool:
     try:
-        from server.services.case_text_semantic_service import parse_precondition_items
+        from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
 
         for item in parse_precondition_items(precondition_raw):
             if item.get("phase") == phase:
@@ -353,7 +353,7 @@ def run_preconditions(
     """
     tasks: List[Tuple[str, str]] = []
     try:
-        from server.services.case_text_semantic_service import parse_precondition_items
+        from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
 
         for item in parse_precondition_items(precondition_raw):
             if item.get("phase") != phase:

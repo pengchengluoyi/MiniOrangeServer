@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from script.log import SLog
 
-from server.services.expectation_semantic_service import (
+from server.services.shared.semantic.expectation_semantic_service import (
     _llm_chat_json,
     _llm_configured,
     parse_expectation_claims,

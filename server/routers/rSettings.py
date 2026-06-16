@@ -322,7 +322,7 @@ def save_ai_usage(body: AIUsageSaveBody):
 
 @router.get("/ai/plan-prompt")
 def get_ai_plan_prompt():
-    from server.services.ai_plan_prompt import (
+    from server.services.ai.plan.prompt import (
         AI_CASE_PLAN_SYSTEM_PROMPT,
         AI_PLAN_SYSTEM_PROMPT,
         AI_PLAN_USER_PROMPT_TEMPLATE,

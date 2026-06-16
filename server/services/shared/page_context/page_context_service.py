@@ -554,7 +554,7 @@ def verify_page_node(engine, node_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def extract_page_tokens(expected: str) -> List[str]:
     """从预期文案提取目标页面关键词。"""
-    from server.services.expectation_semantic_service import normalize_page_intent
+    from server.services.shared.semantic.expectation_semantic_service import normalize_page_intent
 
     exp = (expected or "").strip()
     if not exp:
@@ -595,7 +595,7 @@ def expected_matches_page(expected: str, page_ctx: Dict[str, Any]) -> Optional[b
     用页面识别结果校验导航类预期。
     返回 True/False 表示可判定；None 表示图谱无法判定，应回退文案匹配。
     """
-    from server.services.expectation_semantic_service import pages_semantically_match
+    from server.services.shared.semantic.expectation_semantic_service import pages_semantically_match
 
     if not page_ctx.get("matched"):
         return None
@@ -664,7 +664,7 @@ def enrich_check_with_page(
     if not steps_ok:
         return None
     try:
-        from server.services.expectation_semantic_service import _is_home_intent, normalize_page_intent
+        from server.services.shared.semantic.expectation_semantic_service import _is_home_intent, normalize_page_intent
 
         exp_norm = normalize_page_intent(expected)
         if _is_home_intent(exp_norm, expected):
@@ -707,7 +707,7 @@ def enrich_check_with_page(
         }
     if verdict is False:
         try:
-            from server.services.expectation_semantic_service import judge_navigation_expectation
+            from server.services.shared.semantic.expectation_semantic_service import judge_navigation_expectation
 
             semantic = judge_navigation_expectation(
                 expected,

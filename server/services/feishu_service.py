@@ -324,7 +324,7 @@ def _parse_numbered_items(text: str, field: str = "") -> List[Dict[str, Any]]:
     """
     if field in ("step", "expected"):
         try:
-            from server.services.case_text_semantic_service import (
+            from server.services.shared.semantic.case_text_semantic_service import (
                 FIELD_EXPECTED,
                 FIELD_STEP,
                 parse_numbered_field,
@@ -335,7 +335,7 @@ def _parse_numbered_items(text: str, field: str = "") -> List[Dict[str, Any]]:
         except Exception as e:
             SLog.w(TAG, f"semantic numbered parse failed, fallback rules: {e}")
     try:
-        from server.services.case_text_semantic_service import parse_numbered_items_rules
+        from server.services.shared.semantic.case_text_semantic_service import parse_numbered_items_rules
 
         return parse_numbered_items_rules(text)
     except Exception:
