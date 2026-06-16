@@ -2551,7 +2551,7 @@ def _should_attempt_page_recovery(
     if _action_already_reached_target(expected, step_results or [], screen_text):
         return False
     from server.services.shared.page_context.page_context_service import expected_matches_page
-    from server.services.page_navigation_service import _screen_is_overlay
+    from server.services.local.navigation.page_navigation_service import _screen_is_overlay
 
     if _screen_is_overlay(screen_text):
         return True

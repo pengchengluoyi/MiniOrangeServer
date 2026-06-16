@@ -24,7 +24,7 @@ def _locate_arbitrator_enabled() -> bool:
 
 def _screen_text_snippet(engine, limit: int = 400) -> str:
     try:
-        from server.services.page_navigation_service import _collect_ocr_text_only
+        from server.services.local.navigation.page_navigation_service import _collect_ocr_text_only
 
         return (_collect_ocr_text_only(engine) or "")[:limit]
     except Exception:
@@ -102,7 +102,7 @@ def resolve_locate_target(
             get_page_profile,
             profile_key_for_login_step,
         )
-        from server.services.page_navigation_service import (
+        from server.services.local.navigation.page_navigation_service import (
             _screen_is_system_permission_dialog,
             is_blocking_consent_screen,
         )

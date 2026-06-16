@@ -610,7 +610,7 @@ def business_step_results_ok(results: List[Dict[str, Any]]) -> bool:
     if not results:
         return True
     try:
-        from server.services.overlay_guard_service import is_guard_plan_index
+        from server.services.local.overlay.overlay_guard_service import is_guard_plan_index
     except Exception:
         def is_guard_plan_index(pi: int) -> bool:
             return int(pi) >= 1000
@@ -801,7 +801,7 @@ def _build_flat_items_by_execution_order(
 ) -> List[Dict[str, Any]]:
     """按 run_elapsed_ms 跨 Plan 交错：业务 Plan → 点击 → 守卫 Plan → Tap → 重试业务 Plan。"""
     try:
-        from server.services.overlay_guard_service import is_guard_plan_index
+        from server.services.local.overlay.overlay_guard_service import is_guard_plan_index
     except Exception:
         def is_guard_plan_index(pi: int) -> bool:
             return int(pi) >= 1000

@@ -283,7 +283,7 @@ def identify_for_app(
             blob = _collect_full_screen_text(engine)
 
         try:
-            from server.services.page_navigation_service import (
+            from server.services.local.navigation.page_navigation_service import (
                 _screen_is_system_permission_dialog,
             )
 
@@ -429,7 +429,7 @@ def _identify_page_by_screen_keywords(screen_text: str) -> Optional[Dict[str, An
         return None
 
     try:
-        from server.services.page_navigation_service import (
+        from server.services.local.navigation.page_navigation_service import (
             _screen_is_consent_dialog,
             _screen_is_login_home,
             _screen_is_login_surface,

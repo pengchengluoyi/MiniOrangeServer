@@ -21,7 +21,7 @@ from server.services.case_precondition_service import (
     precondition_cleared_app_cache,
     run_preconditions,
 )
-from server.services.page_navigation_service import (
+from server.services.local.navigation.page_navigation_service import (
     _should_attempt_page_recovery,
     ensure_page_ready_before_action,
     try_dismiss_blocking_overlay,
@@ -662,7 +662,7 @@ def _run_command_block(
     )
     try:
         from server.services.shared.run_context.regression_run_context import get_ctx
-        from server.services.overlay_guard_service import merge_guard_plan_log
+        from server.services.local.overlay.overlay_guard_service import merge_guard_plan_log
 
         gctx = get_ctx()
         guard_planned = (gctx or {}).get("guard_planned_steps") or []
@@ -747,7 +747,7 @@ def _prepare_screen_for_verify(
 ) -> List[Dict[str, Any]]:
     """校验前运行阻塞弹窗守卫，避免挡住页面识别。"""
     from script.sleep import mSleep
-    from server.services.overlay_guard_service import run_overlay_guard_until_clear
+    from server.services.local.overlay.overlay_guard_service import run_overlay_guard_until_clear
 
     gestures: List[Dict[str, Any]] = []
     try:
@@ -1028,7 +1028,7 @@ def _enrich_page_context_meta(
         from server.models.project import App
         from server.services.figma_logic_service import load_figma_logic_for_app
         from server.services.shared.page_context.page_context_service import load_app_graph_by_app_id
-        from server.services.page_navigation_service import resolve_target_page_from_expected
+        from server.services.local.navigation.page_navigation_service import resolve_target_page_from_expected
 
         session = SessionLocal()
         try:
@@ -1119,7 +1119,7 @@ def _verify_step_expected(
 
         if fast_verify:
             try:
-                from server.services.overlay_guard_service import is_screen_blocked
+                from server.services.local.overlay.overlay_guard_service import is_screen_blocked
 
                 if is_screen_blocked(engine):
                     _prepare_screen_for_verify(engine, w, h, sn=sn, platform=platform)

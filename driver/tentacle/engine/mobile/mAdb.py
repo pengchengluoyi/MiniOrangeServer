@@ -880,7 +880,7 @@ class MAdbEngine(MobileEngine):
             return False
         if any(k in label for k in ("同意", "同意并继续")):
             try:
-                from server.services.page_navigation_service import (
+                from server.services.local.navigation.page_navigation_service import (
                     _pick_u2_consent_agree_candidate,
                 )
 

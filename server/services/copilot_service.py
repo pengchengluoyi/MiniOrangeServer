@@ -1571,11 +1571,11 @@ def _resolve_click_target(
 
     if label:
         try:
-            from server.services.overlay_guard_service import is_screen_blocked
-            from server.services.page_navigation_service import is_overlay_dismiss_target_label
+            from server.services.local.overlay.overlay_guard_service import is_screen_blocked
+            from server.services.local.navigation.page_navigation_service import is_overlay_dismiss_target_label
 
             if is_screen_blocked(engine) and not is_overlay_dismiss_target_label(label):
-                from server.services.overlay_guard_service import (
+                from server.services.local.overlay.overlay_guard_service import (
                     blocked_overlay_message,
                     detect_blocking_overlay,
                 )
@@ -1600,7 +1600,7 @@ def _resolve_click_target(
         intent = _classify_login_method_intent(label)
         if intent == "one_click":
             try:
-                from server.services.page_navigation_service import (
+                from server.services.local.navigation.page_navigation_service import (
                     _collect_ocr_text_only,
                     _screen_is_login_home,
                     _screen_is_login_surface,
@@ -1872,7 +1872,7 @@ def _run_mobile_click(
         consent_label = _is_consent_action_label(label)
         if consent_label and "同意并继续" not in (label or ""):
             try:
-                from server.services.page_navigation_service import (
+                from server.services.local.navigation.page_navigation_service import (
                     _overlay_dismiss_target_cleared,
                 )
 
@@ -1970,7 +1970,7 @@ def _run_mobile_click(
         )
         if pos is None and login_related and not skip_overlay_clear:
             try:
-                from server.services.page_navigation_service import dismiss_blocking_on_engine
+                from server.services.local.navigation.page_navigation_service import dismiss_blocking_on_engine
 
                 SLog.i(TAG, f"login click retry after wake/overlay clear label={label!r}")
                 if hasattr(engine, "ensure_screen_ready"):
@@ -2094,7 +2094,7 @@ def _run_mobile_click(
                 try:
                     from script.sleep import mSleep
 
-                    from server.services.page_navigation_service import _login_checkbox_checked
+                    from server.services.local.navigation.page_navigation_service import _login_checkbox_checked
 
                     mSleep(0.35)
                     toggle_ok = _login_checkbox_checked(engine)
@@ -3900,7 +3900,7 @@ def _prepare_case_screen_for_ai_plan(
     if icon_targets is not None and not isinstance(icon_targets, list):
         icon_targets = None
     try:
-        from server.services.overlay_guard_service import run_overlay_guard_on_device
+        from server.services.local.overlay.overlay_guard_service import run_overlay_guard_on_device
 
         guard = run_overlay_guard_on_device(
             str(sn),
@@ -4456,16 +4456,16 @@ def execute_steps(
                         try:
                             import builtins
                             from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-                            from server.services.overlay_guard_service import (
+                            from server.services.local.overlay.overlay_guard_service import (
                                 apply_reactive_guard_round,
                                 is_screen_blocked,
                             )
-                            from server.services.page_navigation_service import (
+                            from server.services.local.navigation.page_navigation_service import (
                                 is_overlay_dismiss_target_label,
                             )
 
                             step_label = str(step.get("label") or "")
-                            from server.services.page_navigation_service import (
+                            from server.services.local.navigation.page_navigation_service import (
                                 is_planned_overlay_step_label,
                             )
 
@@ -4581,7 +4581,7 @@ def execute_steps(
                     try:
                         import builtins
                         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
-                        from server.services.overlay_guard_service import (
+                        from server.services.local.overlay.overlay_guard_service import (
                             apply_reactive_guard_round,
                             is_screen_blocked,
                         )
@@ -4610,7 +4610,7 @@ def execute_steps(
 
                         step_label = str(step.get("label") or "")
                         try:
-                            from server.services.page_navigation_service import (
+                            from server.services.local.navigation.page_navigation_service import (
                                 is_planned_overlay_step_label,
                             )
 
@@ -4782,7 +4782,7 @@ def execute_steps(
             if not sn:
                 out["msg"] = "未选择设备"
             else:
-                from server.services.page_navigation_service import (
+                from server.services.local.navigation.page_navigation_service import (
                     ensure_system_permissions_cleared,
                 )
 

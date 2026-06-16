@@ -49,7 +49,7 @@ def is_guard_plan_index(plan_index: int) -> bool:
 
 def detect_blocking_overlay(engine) -> Optional[Dict[str, Any]]:
     """检测当前屏幕是否被阻塞弹窗占用。无阻塞返回 None。"""
-    from server.services.page_navigation_service import (
+    from server.services.local.navigation.page_navigation_service import (
         _engine_screen_size,
         _hierarchy_has_app_consent_modal,
         _screen_is_overlay,
@@ -152,7 +152,7 @@ def blocked_overlay_message(engine) -> str:
 
 def assert_overlay_cleared(engine, overlay_type: str) -> Dict[str, Any]:
     """断言指定类型弹窗已消除（允许出现下一层阻塞弹窗）。"""
-    from server.services.page_navigation_service import classify_blocking_screen
+    from server.services.local.navigation.page_navigation_service import classify_blocking_screen
 
     after = detect_blocking_overlay(engine)
     cleared = after is None or after.get("type") != overlay_type
@@ -243,7 +243,7 @@ def _execute_guard_action(
         }
 
     if otype in ("consent", "login_confirm"):
-        from server.services.page_navigation_service import tap_consent_agree_on_engine
+        from server.services.local.navigation.page_navigation_service import tap_consent_agree_on_engine
 
         agree_label = "同意并继续" if otype == "login_confirm" else "同意"
         hit = tap_consent_agree_on_engine(
@@ -275,7 +275,7 @@ def _execute_guard_action(
         }
 
     if otype == "system_permission":
-        from server.services.page_navigation_service import (
+        from server.services.local.navigation.page_navigation_service import (
             _hierarchy_has_app_consent_modal,
             tap_consent_agree_on_engine,
             tap_system_permission_on_engine,
@@ -606,7 +606,7 @@ def apply_reactive_guard_round(
         }
 
     try:
-        from server.services.page_navigation_service import is_planned_overlay_step_label
+        from server.services.local.navigation.page_navigation_service import is_planned_overlay_step_label
 
         if is_planned_overlay_step_label(step_summary):
             return {

@@ -268,7 +268,7 @@ def _find_anchor_bounds(
         needles.append(anchor[: max(4, len(anchor) // 2)])
 
     try:
-        from server.services.page_navigation_service import _ocr_find_text_bounds
+        from server.services.local.navigation.page_navigation_service import _ocr_find_text_bounds
 
         bounds = _ocr_find_text_bounds(engine, *needles)
         if bounds:

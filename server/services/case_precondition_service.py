@@ -235,7 +235,7 @@ def _check_logged_in(
     expect_logged_in: bool,
     package: str = "",
 ) -> Tuple[bool, str]:
-    from server.services.page_navigation_service import _screen_is_login_home
+    from server.services.local.navigation.page_navigation_service import _screen_is_login_home
     from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
 
     blob = _screen_blob(engine)
