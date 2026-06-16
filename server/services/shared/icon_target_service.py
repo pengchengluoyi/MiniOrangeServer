@@ -154,7 +154,7 @@ def _maybe_attach_clip_embedding(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not image_url:
         return payload
     try:
-        from server.services.clip_locate_service import compute_icon_embedding
+        from server.services.local.locate.clip_locate_service import compute_icon_embedding
         from server.core.vision.clip_service import get_clip_service
 
         emb = compute_icon_embedding(

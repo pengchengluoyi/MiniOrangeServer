@@ -406,7 +406,7 @@ def _try_clip_on_toggles(
         return None
     try:
         from server.core.vision.clip_service import clip_enabled, get_clip_service
-        from server.services.clip_locate_service import _score_patch_candidates
+        from server.services.local.locate.clip_locate_service import _score_patch_candidates
 
         if not clip_enabled():
             return None
@@ -470,7 +470,7 @@ def _clip_agreement_checkbox_pos(
 ) -> Optional[Tuple[int, int, str]]:
     """登录页底栏协议勾选框：CLIP 视觉定位（弃用 OCR 左侧偏移）。"""
     try:
-        from server.services.clip_locate_service import try_clip_locate
+        from server.services.local.locate.clip_locate_service import try_clip_locate
 
         query = "empty round checkbox"
         aliases = [

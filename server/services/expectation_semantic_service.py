@@ -520,7 +520,7 @@ def evaluate_foreign_app_expectation(
         return None
 
     try:
-        from server.services.locate.app_packages import (
+        from server.services.local.locate.app_packages import (
             package_for_app_key,
             resolve_known_app_by_alias,
             resolve_known_app_by_package,

@@ -12,7 +12,7 @@ TAG = "CasePrecondition"
 
 def _wechat_pkg() -> str:
     try:
-        from server.services.locate.app_packages import package_for_app_key
+        from server.services.local.locate.app_packages import package_for_app_key
 
         pkg = package_for_app_key("wechat")
         if pkg:

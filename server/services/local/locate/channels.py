@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from script.log import SLog
 
-from server.services.locate.icon_row import detect_icon_rows, flatten_icon_row_candidates
-from server.services.locate.page_profiles import PageProfile
-from server.services.locate.spatial import SpatialConstraint, point_in_zones
+from server.services.local.locate.icon_row import detect_icon_rows, flatten_icon_row_candidates
+from server.services.local.locate.page_profiles import PageProfile
+from server.services.local.locate.spatial import SpatialConstraint, point_in_zones
 
 TAG = "LocateChannels"
 
@@ -54,7 +54,7 @@ def collect_clip_channel(
 ) -> List[LocateCandidate]:
     out: List[LocateCandidate] = []
     try:
-        from server.services.clip_locate_service import try_clip_locate
+        from server.services.local.locate.clip_locate_service import try_clip_locate
 
         pos, method, detail, rect = try_clip_locate(
             engine,
@@ -163,7 +163,7 @@ def collect_gallery_channel(
 ) -> List[LocateCandidate]:
     out: List[LocateCandidate] = []
     try:
-        from server.services.clip_locate_service import try_clip_locate
+        from server.services.local.locate.clip_locate_service import try_clip_locate
 
         hit = try_clip_locate(
             engine,
@@ -317,7 +317,7 @@ def collect_icon_row_channel(
     try:
         from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
         from server.core.vision.clip_service import clip_enabled, get_clip_service
-        from server.services.clip_locate_service import _score_patch_candidates
+        from server.services.local.locate.clip_locate_service import _score_patch_candidates
 
         clickables = list(
             discover_clickables_from_hierarchy(engine, screen_w, screen_h, max_items=96)
@@ -374,7 +374,7 @@ def collect_checkable_channel(
         return out
     try:
         from server.services.copilot_service import _make_target_rect
-        from server.services.toggle_locate_service import (
+        from server.services.local.locate.toggle_locate_service import (
             _find_toggle_anchor_bounds,
             _spatial_pick_toggle,
             _toggle_search_anchors,

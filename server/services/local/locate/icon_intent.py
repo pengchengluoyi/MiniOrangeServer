@@ -60,7 +60,7 @@ def is_icon_target_label(label: str) -> bool:
     if is_bottom_tab_icon_label(raw):
         return True
     try:
-        from server.services.locate.clip_query_plan import lookup_clip_query_plan
+        from server.services.local.locate.clip_query_plan import lookup_clip_query_plan
 
         plan = lookup_clip_query_plan(raw)
         if plan and plan.icon_row:

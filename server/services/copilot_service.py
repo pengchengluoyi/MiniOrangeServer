@@ -579,7 +579,7 @@ def _label_variants(label: str) -> List[str]:
         _add("本机号码一键登录")
         _add("本机号码")
     try:
-        from server.services.locate.icon_intent import icon_name_aliases_from_label
+        from server.services.local.locate.icon_intent import icon_name_aliases_from_label
 
         for alias in icon_name_aliases_from_label(raw):
             _add(alias)
@@ -1041,7 +1041,7 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         return "", [], None
 
     try:
-        from server.services.locate.clip_query_plan import clip_params_from_plan, lookup_clip_query_plan
+        from server.services.local.locate.clip_query_plan import clip_params_from_plan, lookup_clip_query_plan
 
         plan = lookup_clip_query_plan(raw)
         if plan:
@@ -1060,7 +1060,7 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
                 return name, [raw], None
 
     if re.search(r"勾选|勾上|checkbox|单选|radio|复选", raw, re.I):
-        from server.services.toggle_locate_service import parse_toggle_intent, toggle_clip_queries
+        from server.services.local.locate.toggle_locate_service import parse_toggle_intent, toggle_clip_queries
 
         intent = parse_toggle_intent(raw)
         if intent:
@@ -1077,7 +1077,7 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         )
 
     try:
-        from server.services.locate.icon_intent import (
+        from server.services.local.locate.icon_intent import (
             icon_visual_query_from_label,
             is_icon_target_label,
         )
@@ -1089,7 +1089,7 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         pass
 
     try:
-        from server.services.locate.clip_query_plan import is_form_input_label
+        from server.services.local.locate.clip_query_plan import is_form_input_label
 
         if is_form_input_label(raw):
             q, _ = _extract_ui_text_core(raw)
@@ -1180,7 +1180,7 @@ def _should_try_text_locate_first(label: str) -> bool:
     if not label:
         return False
     try:
-        from server.services.locate.icon_intent import is_icon_target_label
+        from server.services.local.locate.icon_intent import is_icon_target_label
 
         if is_icon_target_label(label):
             return False
@@ -1200,7 +1200,7 @@ def _resolve_text_click_target(
     label: str,
 ) -> Tuple[Optional[Tuple[int, int]], str, str, Optional[Dict[str, Any]]]:
     """短中文文案优先 hierarchy/OCR（CLIP 不适合纯文字链接）。"""
-    from server.services.locate.spatial import parse_spatial_constraint, point_in_zones
+    from server.services.local.locate.spatial import parse_spatial_constraint, point_in_zones
 
     spatial = parse_spatial_constraint(label)
     query = spatial.core_text or label
@@ -1394,7 +1394,7 @@ def _icon_names_match_label(label: str, names: List[str]) -> bool:
         if name and _match_target_label(label, name):
             return True
     try:
-        from server.services.locate.icon_intent import icon_name_aliases_from_label
+        from server.services.local.locate.icon_intent import icon_name_aliases_from_label
 
         aliases = icon_name_aliases_from_label(label)
         for name in names:
@@ -1472,7 +1472,7 @@ def _is_consent_action_label(label: str) -> bool:
 
 
 def _is_toggle_intent(label: str) -> bool:
-    from server.services.toggle_locate_service import is_toggle_intent
+    from server.services.local.locate.toggle_locate_service import is_toggle_intent
 
     return is_toggle_intent(label)
 
@@ -1516,7 +1516,7 @@ def _try_clip_resolve(
         return None
     try:
         from server.core.vision.clip_service import clip_enabled
-        from server.services.clip_locate_service import try_clip_locate
+        from server.services.local.locate.clip_locate_service import try_clip_locate
 
         if not clip_enabled():
             SLog.i(TAG, f"CLIP skip label={label!r} (CLIP_ENABLED=0)")
@@ -1623,7 +1623,7 @@ def _resolve_click_target(
         return (x, y), "coordinate", f"坐标({x},{y})", rect
 
     try:
-        from server.services.locate.resolver import _locate_arbitrator_enabled, resolve_locate_target
+        from server.services.local.locate.resolver import _locate_arbitrator_enabled, resolve_locate_target
 
         if label and _locate_arbitrator_enabled():
             lr = resolve_locate_target(
@@ -1691,7 +1691,7 @@ def _resolve_click_target(
             try:
                 from server.core.vision.clip_service import clip_enabled
 
-                from server.services.locate.icon_intent import is_icon_target_label
+                from server.services.local.locate.icon_intent import is_icon_target_label
 
                 icon_visual = is_icon_target_label(label)
                 if clip_attempted and clip_enabled() and icon_visual:
@@ -1750,7 +1750,7 @@ def _resolve_click_target(
         SLog.w(TAG, f"resolve click target failed: {e}")
 
     try:
-        from server.services.locate.resolver import _locate_arbitrator_enabled
+        from server.services.local.locate.resolver import _locate_arbitrator_enabled
 
         arbitrator_on = _locate_arbitrator_enabled()
     except Exception:
@@ -2285,7 +2285,7 @@ def _resolve_app_from_db(name: str, *, app_id: Optional[str] = None) -> Optional
     except Exception as e:
         SLog.w(TAG, f"resolve app from db failed: {e}")
     try:
-        from server.services.locate.app_packages import resolve_known_app_by_alias
+        from server.services.local.locate.app_packages import resolve_known_app_by_alias
 
         known = resolve_known_app_by_alias(name)
         if known and known.android_packages:
@@ -3169,7 +3169,7 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
         ).strip()
         if package:
             try:
-                from server.services.locate.app_packages import (
+                from server.services.local.locate.app_packages import (
                     resolve_known_app_by_alias,
                     resolve_known_app_by_package,
                 )
@@ -3387,7 +3387,7 @@ def _screen_context_public(screen: Dict[str, Any]) -> Dict[str, Any]:
 def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, str]]:
     """Compact app catalog for LLM planning (name → package)."""
     try:
-        from server.services.locate.app_packages import list_known_apps, package_for_app_key
+        from server.services.local.locate.app_packages import list_known_apps, package_for_app_key
 
         rows: List[Dict[str, str]] = []
         for app in list_known_apps()[:limit]:

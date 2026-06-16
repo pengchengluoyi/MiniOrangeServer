@@ -241,7 +241,7 @@ def resolve_page_profile(
 
     if fg_pkg:
         try:
-            from server.services.locate.app_packages import (
+            from server.services.local.locate.app_packages import (
                 resolve_known_app_by_package,
                 resolve_profile_from_app_supplements,
             )

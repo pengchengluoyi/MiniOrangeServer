@@ -14,7 +14,7 @@ if ROOT not in sys.path:
 import cv2
 
 from server.core.vision.clip_service import build_mixed_text_prompts, get_clip_service
-from server.services.clip_locate_service import locate_on_screenshot
+from server.services.local.locate.clip_locate_service import locate_on_screenshot
 
 
 def main():

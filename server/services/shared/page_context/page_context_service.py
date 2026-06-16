@@ -248,7 +248,7 @@ def identify_page_for_trace(
         screen_text=screen_text,
     )
     try:
-        from server.services.locate.app_packages import attach_foreground_app_to_context
+        from server.services.local.locate.app_packages import attach_foreground_app_to_context
 
         pc = attach_foreground_app_to_context(pc, engine)
     except Exception:

@@ -1759,7 +1759,7 @@ def tap_system_permission_on_engine(
 
     for perm_label in ("仅在使用中允许", "始终允许", "允许"):
         try:
-            from server.services.locate.resolver import resolve_locate_target
+            from server.services.local.locate.resolver import resolve_locate_target
 
             loc = resolve_locate_target(
                 engine,
@@ -1952,7 +1952,7 @@ def resolve_login_checkbox_tap(
     screen_h: int,
 ) -> Optional[Tuple[int, int, str]]:
     """登录页协议勾选（委托通用 toggle 定位）。"""
-    from server.services.toggle_locate_service import resolve_toggle_tap
+    from server.services.local.locate.toggle_locate_service import resolve_toggle_tap
 
     for label in (
         "用户协议勾选框",
@@ -2145,7 +2145,7 @@ def tap_consent_agree_on_engine(
         labels_to_try.append("同意")
 
     try:
-        from server.services.locate.resolver import resolve_locate_target
+        from server.services.local.locate.resolver import resolve_locate_target
 
         for try_label in labels_to_try:
             loc = resolve_locate_target(

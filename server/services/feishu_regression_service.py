@@ -1164,7 +1164,7 @@ def _verify_step_expected(
                 )
             page_context = _enrich_page_context_meta(page_context, exp, app_id)
             try:
-                from server.services.locate.app_packages import attach_foreground_app_to_context
+                from server.services.local.locate.app_packages import attach_foreground_app_to_context
 
                 page_context = attach_foreground_app_to_context(page_context, engine)
             except Exception:

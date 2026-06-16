@@ -324,7 +324,7 @@ def guard_test_app_foreground(
             }
 
         try:
-            from server.services.locate.app_packages import resolve_known_app_by_package
+            from server.services.local.locate.app_packages import resolve_known_app_by_package
 
             known = resolve_known_app_by_package(before)
             actual_name = known.name if known else (before or "未知")

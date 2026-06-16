@@ -9,11 +9,11 @@ from typing import Any, Dict, List, Optional
 
 from script.log import SLog
 
-from server.services.locate.arbitrator import arbitrate, classify_target_kind, debug_payload
-from server.services.locate.channels import gather_all_candidates
-from server.services.locate.page_profiles import resolve_page_profile
-from server.services.locate.spatial import parse_spatial_constraint
-from server.services.locate.types import LocateResult
+from server.services.local.locate.arbitrator import arbitrate, classify_target_kind, debug_payload
+from server.services.local.locate.channels import gather_all_candidates
+from server.services.local.locate.page_profiles import resolve_page_profile
+from server.services.local.locate.spatial import parse_spatial_constraint
+from server.services.local.locate.types import LocateResult
 
 TAG = "LocateResolver"
 
@@ -55,7 +55,7 @@ def resolve_locate_target(
     region_hint: Optional[str] = None
     plan = None
     try:
-        from server.services.locate.clip_query_plan import (
+        from server.services.local.locate.clip_query_plan import (
             clip_params_from_plan,
             lookup_clip_query_plan,
             ocr_query_from_plan,
@@ -86,7 +86,7 @@ def resolve_locate_target(
             pass
     blob = screen_text or _screen_text_snippet(engine)
     try:
-        from server.services.locate.app_packages import get_foreground_package
+        from server.services.local.locate.app_packages import get_foreground_package
 
         fg_pkg = get_foreground_package(engine)
     except Exception:
@@ -98,7 +98,7 @@ def resolve_locate_target(
     )
     try:
         from server.services.copilot_service import _is_consent_action_label
-        from server.services.locate.page_profiles import (
+        from server.services.local.locate.page_profiles import (
             get_page_profile,
             profile_key_for_login_step,
         )
@@ -152,7 +152,7 @@ def resolve_locate_target(
     )
 
     try:
-        from server.services.locate.clip_query_plan import (
+        from server.services.local.locate.clip_query_plan import (
             form_input_keyboard_max_cy,
             is_form_input_label,
         )
@@ -173,7 +173,7 @@ def resolve_locate_target(
         target_kind=target_kind,
     )
     try:
-        from server.services.locate.app_packages import enrich_locate_debug_app
+        from server.services.local.locate.app_packages import enrich_locate_debug_app
 
         debug = enrich_locate_debug_app(debug, engine=engine, foreground_package=fg_pkg)
     except Exception:

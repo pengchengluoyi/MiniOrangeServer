@@ -10,8 +10,8 @@ from typing import List, Optional, Tuple
 
 from script.log import SLog
 
-from server.services.locate.channels import LocateCandidate
-from server.services.locate.page_profiles import PageProfile
+from server.services.local.locate.channels import LocateCandidate
+from server.services.local.locate.page_profiles import PageProfile
 
 TAG = "LocateArbitrator"
 

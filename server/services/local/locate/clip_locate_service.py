@@ -573,7 +573,7 @@ def _clip_hit_matches_query(query: str, hit: Dict[str, Any], *, region: str, scr
         if _match_target_label(query, label):
             return True
         try:
-            from server.services.toggle_locate_service import parse_toggle_intent
+            from server.services.local.locate.toggle_locate_service import parse_toggle_intent
 
             if parse_toggle_intent(query) and method in (
                 "clip_toggle",
