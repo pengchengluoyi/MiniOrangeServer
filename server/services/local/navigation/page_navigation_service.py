@@ -169,7 +169,7 @@ def _clip_tap_label(
         settle_ms=settle,
     )
     try:
-        from server.services.copilot_service import pop_locate_debug
+        from server.services.executor.locate_debug import pop_locate_debug
 
         dbg = pop_locate_debug()
         if dbg:
@@ -2385,9 +2385,9 @@ def _execute_recovery_steps(
     run_id: str = "",
     target_package: str = "",
 ) -> List[Dict[str, Any]]:
-    from server.services import copilot_service as cs
+    from server.services.executor.execute_steps import execute_steps
 
-    return cs.execute_steps(
+    return execute_steps(
         steps,
         sn=sn,
         platform=platform,

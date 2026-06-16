@@ -6,6 +6,7 @@ from __future__ import annotations
 import uuid
 
 from server.services import copilot_service as cs
+from server.services.executor.execute_steps import execute_steps
 
 
 async def handle_copilot_chat(websocket, data: dict):
@@ -28,7 +29,7 @@ async def handle_copilot_execute(websocket, data: dict):
     platform = (data.get("platform") or "android").lower()
     if not steps:
         return {"code": 400, "msg": "steps 为空"}
-    results = cs.execute_steps(
+    results = execute_steps(
         steps,
         sn=sn,
         platform=platform,

@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 from script.log import SLog
 from server.services import copilot_service as cs
 from server.services import app_automation_service as aas
+from server.services.executor.execute_steps import execute_steps
 from server.services.feishu_service import load_cases_from_config, normalize_feishu_case
+from server.services.shared.execution_profile import ExecutionProfile, resolve_execution_profile
 from server.services.case_precondition_service import (
     has_precondition_phase,
     precondition_cleared_app_cache,
@@ -23,28 +25,11 @@ from server.services.case_precondition_service import (
 )
 from server.services.local.navigation.page_navigation_service import (
     _should_attempt_page_recovery,
-    ensure_page_ready_before_action,
     try_dismiss_blocking_overlay,
     try_recover_and_reverify,
 )
 
 TAG = "FeishuRegression"
-
-
-def _ai_execution_enabled() -> bool:
-    """用例执行是否走大模型模式。
-
-    AI 模式下，弹窗/页面就绪应由 AI 看截图自主规划（返回点同意/返回等 step），
-    因此执行器不再调用本地写死的前置逻辑（ensure_page_ready_before_action、
-    本地 overlay_guard 清弹窗、本地恢复步骤）。仅大模型未启用时才走本地前置。
-    """
-    try:
-        from server.services import system_settings_service as ss
-
-        return bool(ss.should_use_ai_planning("case_execution").get("enabled"))
-    except Exception as e:
-        SLog.w(TAG, f"ai execution gate check failed, fallback to local: {e}")
-        return False
 
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
@@ -639,6 +624,7 @@ def _run_command_block(
     icon_targets: List[Dict[str, Any]],
     phase: str,
     run_id: str = "",
+    profile: Optional[ExecutionProfile] = None,
 ) -> Dict[str, Any]:
     if not command:
         return {
@@ -664,7 +650,7 @@ def _run_command_block(
             "ok": False,
             "msg": plan.get("reply") or plan.get("error") or "规划失败",
         }
-    results = cs.execute_steps(
+    results = execute_steps(
         plan.get("steps") or [],
         sn=sn,
         platform=platform,
@@ -761,30 +747,17 @@ def _prepare_screen_for_verify(
     *,
     sn: str = "",
     platform: str = "android",
+    profile: Optional[ExecutionProfile] = None,
 ) -> List[Dict[str, Any]]:
-    """校验前运行阻塞弹窗守卫，避免挡住页面识别。
-
-    AI 执行模式下不跑本地弹窗守卫——AI 断言器会基于截图自行理解当前页（含弹窗），
-    页面就绪也由 AI plan 自主处理，本地多通道清弹窗不再介入。
-    """
-    if _ai_execution_enabled():
-        return []
-    from script.sleep import mSleep
-    from server.services.local.overlay.overlay_guard_service import run_overlay_guard_until_clear
-
-    gestures: List[Dict[str, Any]] = []
-    try:
-        guard_out = run_overlay_guard_until_clear(
-            engine, screen_w, screen_h, max_rounds=5
-        )
-        for it in guard_out.get("iterations") or []:
-            g = (it.get("action") or {}).get("gesture")
-            if g and g not in gestures:
-                gestures.append(g)
-        mSleep(0.4)
-    except Exception as e:
-        SLog.w(TAG, f"prepare screen for verify failed: {e}")
-    return gestures
+    """校验前运行阻塞弹窗守卫，避免挡住页面识别。"""
+    profile = profile or resolve_execution_profile("case_execution")
+    return profile.before_verify(
+        engine,
+        screen_w,
+        screen_h,
+        sn=sn,
+        platform=platform,
+    )
 
 
 def _navigation_expectation_conflict(exp: str, screen_text: str) -> Optional[str]:
@@ -1086,6 +1059,7 @@ def _verify_step_expected(
     step_index: int = 0,
     case_id: str = "",
     icon_targets: Optional[List[Dict[str, Any]]] = None,
+    profile: Optional[ExecutionProfile] = None,
 ) -> Dict[str, Any]:
     """单条预期校验（对应用例表「步骤 N」→「预期 N」）。"""
     exp = re.sub(r"^\d+[.、．)\）]\s*", "", (expected_text or "").strip())
@@ -1106,6 +1080,8 @@ def _verify_step_expected(
         claim_texts = parse_expectation_texts(exp)
     except Exception:
         claim_texts = [exp]
+
+    profile = profile or resolve_execution_profile("case_execution")
 
     screen_text = ""
     page_context: Dict[str, Any] = {}
@@ -1145,11 +1121,15 @@ def _verify_step_expected(
                 from server.services.local.overlay.overlay_guard_service import is_screen_blocked
 
                 if is_screen_blocked(engine):
-                    _prepare_screen_for_verify(engine, w, h, sn=sn, platform=platform)
+                    _prepare_screen_for_verify(
+                        engine, w, h, sn=sn, platform=platform, profile=profile
+                    )
             except Exception as e:
                 SLog.w(TAG, f"fast verify overlay check failed: {e}")
         else:
-            _prepare_screen_for_verify(engine, w, h, sn=sn, platform=platform)
+            _prepare_screen_for_verify(
+                engine, w, h, sn=sn, platform=platform, profile=profile
+            )
 
         max_rounds = 1 if fast_verify else 2
         for attempt in range(max_rounds):
@@ -1260,7 +1240,7 @@ def _verify_step_expected(
         screen_text=screen_text,
         app_id=app_id,
         step_results=step_results,
-    ) and not fast_verify and not _ai_execution_enabled():
+    ) and not fast_verify and profile.should_attempt_page_recovery():
         try:
             from server.core.database import SessionLocal
 
@@ -1467,8 +1447,14 @@ def _run_case_steps_sequential(
     initial_trace: Optional[List[Dict[str, Any]]] = None,
     initial_all_results: Optional[List[Dict[str, Any]]] = None,
     pause_on_clarification: bool = True,
+    profile: Optional[ExecutionProfile] = None,
 ) -> Dict[str, Any]:
     """按飞书用例编号逐步执行：每步操作 → 对应预期校验。"""
+    profile = (
+        profile
+        or context.get("execution_profile")
+        or resolve_execution_profile("case_execution")
+    )
     step_lines = list(case.get("steps") or [])
     expected_lines = list(case.get("expected") or [])
     step_nums = list(case.get("step_nums") or [])
@@ -1530,17 +1516,13 @@ def _run_case_steps_sequential(
             delegated_guard = False
             pre_rec = None
         else:
-            if (
-                app_id_str
-                and not context.get("skip_pre_action_recovery")
-                and not _ai_execution_enabled()
-            ):
+            if app_id_str and not context.get("skip_pre_action_recovery"):
                 try:
                     from server.core.database import SessionLocal
 
                     db = SessionLocal()
                     try:
-                        pre_action_recovery = ensure_page_ready_before_action(
+                        pre_action_recovery = profile.before_action(
                             sn=sn,
                             platform=platform,
                             app_id=app_id_str,
@@ -1568,6 +1550,7 @@ def _run_case_steps_sequential(
                 icon_targets=icon_targets,
                 phase="action",
                 run_id=run_id,
+                profile=profile,
             )
             action_block = first_block
             exec_log = list(action_block.get("execute_log") or [])
@@ -1581,13 +1564,8 @@ def _run_case_steps_sequential(
             not action_ok
             and app_id_str
             and not run_id
-            and not _ai_execution_enabled()
-            and not (
-                pre_action_recovery
-                and (
-                    pre_action_recovery.get("attempted")
-                    or pre_action_recovery.get("overlay_guard_delegated")
-                )
+            and profile.should_attempt_post_action_recovery(
+                pre_action_recovery=pre_action_recovery
             )
         ):
             fail_msg_text = action_block.get("msg") or ""
@@ -1625,6 +1603,7 @@ def _run_case_steps_sequential(
                         icon_targets=icon_targets,
                         phase="action_retry",
                         run_id=run_id,
+                        profile=profile,
                     )
                     for r in retry_block.get("step_results") or []:
                         step_results_merged.append({**r, "attempt": 2})
@@ -1746,6 +1725,7 @@ def _run_case_steps_sequential(
                 step_index=i,
                 case_id=str(case.get("case_id") or i),
                 icon_targets=icon_targets,
+                profile=profile,
             )
             expected_part = {
                 "text": expected_text,
@@ -1939,6 +1919,7 @@ def run_cases(
         "env_profile": env_profile,
         "package": package,
         "platform": platform,
+        "execution_profile": resolve_execution_profile("case_execution"),
     }
 
     run_id = uuid.uuid4().hex[:12]
@@ -2246,6 +2227,7 @@ def _execute_cases_batch(
                 icon_targets=icon_targets,
                 phase="skill_pre",
                 run_id=run_id,
+                profile=context.get("execution_profile"),
             )
             trace.append(
                 {
@@ -2500,7 +2482,7 @@ def _execute_cases_batch(
             shot_before = _capture_step_screenshot(
                 sn, platform, run_id=run_id, tag=f"case_{case.get('case_id')}_before"
             )
-            results = cs.execute_steps(
+            results = execute_steps(
                 plan.get("steps") or [],
                 sn=sn,
                 platform=platform,
@@ -2550,6 +2532,7 @@ def _execute_cases_batch(
                 icon_targets=icon_targets,
                 phase="skill_post",
                 run_id=run_id,
+                profile=context.get("execution_profile"),
             )
             trace.append(
                 {

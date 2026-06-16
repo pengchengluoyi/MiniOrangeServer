@@ -74,7 +74,7 @@ _LOADED_FROM: str = ""
 
 
 def default_app_packages_resource_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "resources" / "locate" / "app_packages.yaml"
+    return Path(__file__).resolve().parents[3] / "resources" / "locate" / "app_packages.yaml"
 
 
 def _supplement_from_row(row: Dict[str, Any]) -> AppPageSupplement:

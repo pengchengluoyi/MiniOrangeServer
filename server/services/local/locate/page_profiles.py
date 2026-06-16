@@ -79,7 +79,7 @@ class BootstrapRule:
 
 
 def default_profiles_resource_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "resources" / "locate" / "page_profiles.yaml"
+    return Path(__file__).resolve().parents[3] / "resources" / "locate" / "page_profiles.yaml"
 
 
 def _weights_from_mapping(raw: Optional[Dict[str, Any]]) -> ChannelWeights:

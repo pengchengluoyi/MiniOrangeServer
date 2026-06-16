@@ -264,20 +264,45 @@ AI 模式目标协议：
 | 4 | `_normalize_ai_step` 缺坐标拒绝 | `copilot_service.py:3048,4004` | ✅ 已完成 |
 | 5 | `_run_mobile_click` 坐标专用分支 | `copilot_service.py:1899` | ✅ 已完成 |
 | 6 | `execute_steps` 按 `ai_coordinate_only` 分流 | `copilot_service.py:4427,4708,4734` | ✅ 已完成 |
-| 7 | Tool Catalog 拆 local/ai | `skills_registry.py` | ❌ 未做，方向已过时（见残留项 1） |
+| 7 | Tool Catalog 拆 local/ai | `skills_registry.py` | ✅ 已删除（整条死链路已移除） |
 
-### 残留项 / 建议改动点（仅记录，未改代码）
+### 残留项 / 建议改动点
 
-1. **Tool Catalog `local_tools`/`ai_tools` 拆分已不适用**。原计划让 AI provider 只看到 `ai_tools`，但当前 AI 规划是**纯 prompt 驱动**（模型直接吐 JSON），`list_anthropic_tool_use_catalog`（`skills_registry.py:621`）根本不在 AI plan 链路中被调用。建议：要么废弃该提案，要么在未来真正改为 tool-use 模式时再单独立项。
+1. ~~**Tool Catalog `local_tools`/`ai_tools` 拆分已不适用**~~ — ✅ 已删除 `list_anthropic_tool_use_catalog`、后端 `/settings/skills/tools/anthropic` 端点、前端 `getAnthropicToolUseCatalog`。
 
-2. **AI 模式 `input` 仍透传 `field_hint`**（`copilot_service.py:3120`），而 `_run_mobile_input_coords` 不使用它。建议 `require_visual_coordinates=True` 时不再带 `field_hint`，减少误导与日志噪音。
+2. ~~**AI 模式 `input` 仍透传 `field_hint`**~~ — ✅ 已改：`require_visual_coordinates=True` 时不再带 `field_hint`。
 
-3. **`coords_explicit` 推断偏宽松**（`3101`：`... or require_visual_coordinates`），AI 模式无条件视为显式坐标。虽有 `x<=0/y<=0` 兜底拦截，但语义失真，建议直接用 `(x>0 and y>0)`。
+3. ~~**`coords_explicit` 推断偏宽松**~~ — ✅ 已改：改为 `(x > 0 and y > 0)`。
 
 4. **日志样例需对齐真实格式**。引擎实际打印（`mAdb.py:1112`）：
    `Gesture audit tap ({x},{y}) label={label!r} skip_label=True consent=... serial=...`，比原验收样例多 `label/consent/serial` 字段。
 
 5. **AI 观察截图未进执行卡片**。`_build_ai_screen_context` 的截图目前只进 `ai_debug`（规划阶段），执行 before/after 卡片走的是 `capture_device_screenshot`/gesture audit（`4351` 等）。若要满足「observe 截图入卡片/报告」，需另接。
+
+## AI 用例执行的 local 前置边界（架构重构后）
+
+用例执行选 AI（`should_use_ai_planning("case_execution")`）时，`AiExecutionProfile` 会跳过以下本地写死逻辑：
+
+- `ensure_page_ready_before_action`（操作前页面恢复 / OCR 识别 / 本地恢复步骤）
+- `_prepare_screen_for_verify` → `run_overlay_guard_until_clear`（校验前本地清弹窗）
+- `try_recover_and_reverify`（校验失败后的本地页面恢复）
+- 操作失败后的 `try_dismiss_blocking_overlay`（本地 post-recovery）
+
+**仍保留的 shared 底座**（非本地业务判断）：`ensure_adb_device_online`、`ensure_screen_ready`（亮屏解锁）、`guard_test_app_foreground`（前台观察）。
+
+**目录分层**（`refactor/services-ai-local-shared` 分支）：
+
+- `server/services/ai/` — 大模型 prompt / 规划 / `AiExecutionProfile`
+- `server/services/local/` — 定位、导航、弹窗守卫、本地规则 / `LocalExecutionProfile`
+- `server/services/shared/` — 截图、页面识别、设备、语义工具 / `execution_profile` 协议
+- `server/services/executor/` — 执行层（`mobile_actions`、`execute_steps`、`locate_debug`）
+- 顶层 `copilot_service.py` — 规划 + 本地定位解析；`feishu_regression_service.py` — 用例编排
+
+**ExecutionProfile**（`shared/execution_profile.py`）：
+
+- `resolve_execution_profile(channel)` 按 `should_use_ai_planning` 返回 `AiExecutionProfile` 或 `LocalExecutionProfile`
+- `AiExecutionProfile`：`before_action` / `before_verify` / 本地 recovery 均为 no-op
+- `LocalExecutionProfile`：委托 `ensure_page_ready_before_action`、`run_overlay_guard_until_clear` 等本地逻辑
 
 ## 验收标准
 
