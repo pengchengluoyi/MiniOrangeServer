@@ -46,36 +46,73 @@ def _mask_secret(secret: str) -> str:
     return secret[:4] + "****" + secret[-4:]
 
 
-AI_PROVIDER_PRESETS: List[Dict[str, str]] = [
+AI_PROVIDER_PRESETS: List[Dict[str, Any]] = [
     {
         "id": "openai",
         "name": "OpenAI",
+        "api_type": "openai",
         "base_url": "https://api.openai.com/v1",
         "default_model": "gpt-4o",
+        "model_options": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o4-mini"],
     },
     {
         "id": "anthropic",
         "name": "Anthropic",
+        "api_type": "anthropic",
         "base_url": "https://api.anthropic.com",
         "default_model": "claude-3-5-sonnet-latest",
+        "model_options": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-sonnet-4-20250514"],
+    },
+    {
+        "id": "umodelverse",
+        "name": "UModelverse",
+        "api_type": "anthropic",
+        "base_url": "https://api.modelverse.cn",
+        "default_model": "claude-sonnet-4-5-20250929",
+        "model_options": [
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-1-20250805",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-sonnet-20241022",
+        ],
     },
     {
         "id": "google",
         "name": "Google Gemini",
+        "api_type": "gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "default_model": "gemini-1.5-pro",
+        "default_model": "gemini-2.5-flash",
+        "model_options": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"],
     },
     {
         "id": "deepseek",
         "name": "DeepSeek",
+        "api_type": "openai",
         "base_url": "https://api.deepseek.com/v1",
         "default_model": "deepseek-chat",
+        "model_options": ["deepseek-chat", "deepseek-reasoner"],
     },
     {
         "id": "qwen",
         "name": "通义千问",
+        "api_type": "openai",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "default_model": "qwen-plus",
+        "model_options": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
+    },
+    {
+        "id": "volcengine",
+        "name": "火山引擎",
+        "api_type": "openai",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "default_model": "doubao-seed-1-6-250615",
+        "model_options": [
+            "doubao-seed-1-6-250615",
+            "doubao-seed-1-6-thinking-250615",
+            "doubao-1-5-pro-32k-250115",
+            "deepseek-v3-250324",
+            "deepseek-r1-250120",
+        ],
     },
 ]
 
@@ -93,11 +130,19 @@ def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> 
     preset = next((p for p in AI_PROVIDER_PRESETS if p["id"] == provider_id), None)
     raw = raw if isinstance(raw, dict) else {}
     api_key = (raw.get("api_key") or "").strip()
+    model_options = list((preset or {}).get("model_options") or [])
+    raw_model = (raw.get("model") or "").strip()
+    default_model = ((preset or {}).get("default_model") or "").strip()
+    model = raw_model if (not model_options or raw_model in model_options) else default_model
+    if not model:
+        model = default_model
     return {
         "id": provider_id,
         "name": raw.get("name") or (preset or {}).get("name") or provider_id,
+        "api_type": (raw.get("api_type") or (preset or {}).get("api_type") or "openai").strip(),
         "base_url": (raw.get("base_url") or (preset or {}).get("base_url") or "").strip(),
-        "model": (raw.get("model") or (preset or {}).get("default_model") or "").strip(),
+        "model": model,
+        "model_options": model_options,
         "api_key_masked": _mask_secret(api_key),
         "configured": bool(api_key),
         "enabled": raw.get("enabled", True) is not False,
@@ -128,6 +173,7 @@ def get_ai_usage_settings() -> Dict[str, Any]:
     return {
         "copilot_enabled": bool(usage.get("copilot_enabled", False)),
         "case_execution_enabled": bool(usage.get("case_execution_enabled", False)),
+        "case_execution_provider_id": (usage.get("case_execution_provider_id") or "").strip().lower(),
         "mode": usage.get("mode") or "local_first",
     }
 
@@ -136,6 +182,7 @@ def save_ai_usage_settings(
     *,
     copilot_enabled: bool = False,
     case_execution_enabled: bool = False,
+    case_execution_provider_id: str = "",
     mode: str = "local_first",
 ) -> Dict[str, Any]:
     ai = _ai_root()
@@ -143,6 +190,7 @@ def save_ai_usage_settings(
     ai["_usage"] = {
         "copilot_enabled": bool(copilot_enabled),
         "case_execution_enabled": bool(case_execution_enabled),
+        "case_execution_provider_id": (case_execution_provider_id or "").strip().lower(),
         "mode": mode,
     }
     SecurityManager.save()
@@ -161,6 +209,7 @@ def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, 
     return {
         "id": target_id,
         "name": raw.get("name") or (preset or {}).get("name") or target_id,
+        "api_type": (raw.get("api_type") or (preset or {}).get("api_type") or "openai").strip(),
         "api_key": api_key,
         "base_url": (raw.get("base_url") or (preset or {}).get("base_url") or "").strip(),
         "model": (raw.get("model") or (preset or {}).get("default_model") or "").strip(),
@@ -173,12 +222,17 @@ def should_use_ai_planning(channel: str, provider_id: Optional[str] = None) -> D
     """Return whether a planning channel may call the configured LLM."""
     usage = get_ai_usage_settings()
     normalized = (channel or "copilot").strip().lower()
-    scope_enabled = (
-        usage["case_execution_enabled"]
-        if normalized in {"case", "case_execution", "regression", "feishu"}
-        else usage["copilot_enabled"]
-    )
-    provider = get_ai_provider_credentials(provider_id)
+    explicit_provider = bool((provider_id or "").strip())
+    if normalized in {"case", "case_execution", "regression", "feishu"}:
+        scope_enabled = usage["case_execution_enabled"]
+    elif normalized == "copilot" and explicit_provider:
+        scope_enabled = True
+    else:
+        scope_enabled = usage["copilot_enabled"]
+    selected_provider_id = provider_id
+    if normalized in {"case", "case_execution", "regression", "feishu"} and not selected_provider_id:
+        selected_provider_id = usage.get("case_execution_provider_id") or None
+    provider = get_ai_provider_credentials(selected_provider_id)
     ok = bool(scope_enabled and provider.get("enabled") and provider.get("configured"))
     reason = ""
     if not scope_enabled:
@@ -200,6 +254,7 @@ def save_ai_provider_settings(
     provider_id: str,
     *,
     name: str = "",
+    api_type: str = "",
     api_key: str = "",
     base_url: str = "",
     model: str = "",
@@ -214,6 +269,7 @@ def save_ai_provider_settings(
     current = ai.setdefault(provider_id, {})
     preset = next((p for p in AI_PROVIDER_PRESETS if p["id"] == provider_id), None)
     current["name"] = (name or current.get("name") or (preset or {}).get("name") or provider_id).strip()
+    current["api_type"] = (api_type or current.get("api_type") or (preset or {}).get("api_type") or "openai").strip()
     current["base_url"] = (base_url or current.get("base_url") or (preset or {}).get("base_url") or "").strip()
     current["model"] = (model or current.get("model") or (preset or {}).get("default_model") or "").strip()
     current["enabled"] = enabled is not False

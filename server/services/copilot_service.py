@@ -5,6 +5,11 @@
 """
 from __future__ import annotations
 
+import ast
+import base64
+import io
+import json
+import os
 import re
 import time
 import uuid
@@ -12,6 +17,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from script.log import SLog
+
+import requests
 
 TAG = "CopilotService"
 
@@ -175,6 +182,13 @@ def _execute_ability(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_mobile_back(sn: str, platform: str = "android", *, immediate: bool = True) -> Dict[str, Any]:
+    return _run_mobile_key(sn, "back", platform=platform)
+
+
+def _run_mobile_key(sn: str, key: str, platform: str = "android") -> Dict[str, Any]:
+    key_name = (key or "").strip().lower()
+    if key_name not in {"back", "home", "menu", "power"}:
+        return {"ok": False, "msg": f"不支持的系统按键：{key}", "method": "press_key"}
     try:
         import builtins
         from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
@@ -182,15 +196,15 @@ def _run_mobile_back(sn: str, platform: str = "android", *, immediate: bool = Tr
 
         builtins.TARGET_DEVICE_SN = sn
         engine, _ = bootstrap_mobile_engine(sn, platform)
-        if immediate and hasattr(engine, "press_key"):
-            engine.press_key("back")
+        if hasattr(engine, "press_key"):
+            engine.press_key(key_name)
             mSleep(0.6)
-            SLog.i(TAG, f"Back audit immediate sn={sn}")
-            return {"ok": True, "msg": "已执行返回", "method": "back_immediate"}
-        _schedule_back()
-        return {"ok": True, "msg": "已登记返回（满 50 次手势后执行一次）", "method": "back_deferred"}
+            SLog.i(TAG, f"Key audit key={key_name} sn={sn}")
+            label = {"back": "返回", "home": "Home", "menu": "菜单", "power": "电源"}.get(key_name, key_name)
+            return {"ok": True, "msg": f"已执行{label}键", "method": "press_key", "key": key_name}
+        return {"ok": False, "msg": "引擎不支持系统按键", "method": "press_key"}
     except Exception as e:
-        return {"ok": False, "msg": str(e), "method": "back"}
+        return {"ok": False, "msg": str(e), "method": "press_key"}
 
 
 def _run_mobile_stop_app(sn: str, package: str, platform: str = "android") -> Dict[str, Any]:
@@ -234,6 +248,55 @@ def _run_mobile_swipe(
         return {"ok": True, "msg": f"滑动 {direction}"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+def _run_mobile_swipe_coords(
+    sn: str,
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    *,
+    duration_ms: int = 350,
+    platform: str = "android",
+) -> Dict[str, Any]:
+    try:
+        import builtins
+        from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+
+        builtins.TARGET_DEVICE_SN = sn
+        engine, (w, h) = bootstrap_mobile_engine(sn, platform)
+        if min(start_x, start_y, end_x, end_y) <= 0:
+            return {"ok": False, "msg": "AI 滑动缺少有效起止坐标", "method": "ai_coordinate"}
+        if start_x > w or end_x > w or start_y > h or end_y > h:
+            return {
+                "ok": False,
+                "msg": f"AI 滑动坐标超出屏幕范围：({start_x},{start_y})->({end_x},{end_y}) screen={w}x{h}",
+                "method": "ai_coordinate",
+                "screen_size": {"w": w, "h": h},
+            }
+        if not hasattr(engine, "swipe_norm"):
+            return {"ok": False, "msg": "设备引擎不支持滑动", "method": "ai_coordinate"}
+        engine.swipe_norm(
+            start_x / float(w),
+            start_y / float(h),
+            end_x / float(w),
+            end_y / float(h),
+            max(0.1, duration_ms / 1000.0),
+        )
+        _gesture_tick()
+        return {
+            "ok": True,
+            "msg": f"AI 坐标滑动 ({start_x},{start_y})->({end_x},{end_y})",
+            "method": "ai_coordinate",
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+            "screen_size": {"w": w, "h": h},
+        }
+    except Exception as e:
+        return {"ok": False, "msg": str(e), "method": "ai_coordinate"}
 
 
 def _run_mobile_input(
@@ -415,6 +478,72 @@ def _run_mobile_input(
             except Exception:
                 pass
         return {"ok": False, "msg": str(e), "method": "input"}
+
+
+def _run_mobile_input_coords(
+    sn: str,
+    x: int,
+    y: int,
+    text: str,
+    *,
+    label: str = "",
+    platform: str = "android",
+) -> Dict[str, Any]:
+    value = (text or "").strip()
+    if not value:
+        return {"ok": False, "msg": "输入内容为空", "method": "ai_coordinate_input"}
+    try:
+        import builtins
+        from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+        from script.sleep import mSleep
+
+        builtins.TARGET_DEVICE_SN = sn
+        engine, (screen_w, screen_h) = bootstrap_mobile_engine(sn, platform)
+        if x <= 0 or y <= 0:
+            return {"ok": False, "msg": "AI 输入缺少有效 x/y 坐标", "method": "ai_coordinate_input"}
+        if x > screen_w or y > screen_h:
+            return {
+                "ok": False,
+                "msg": f"AI 输入坐标超出屏幕范围：({x},{y}) screen={screen_w}x{screen_h}",
+                "method": "ai_coordinate_input",
+                "screen_size": {"w": screen_w, "h": screen_h},
+            }
+        if hasattr(engine, "ensure_screen_ready"):
+            try:
+                engine.ensure_screen_ready(node_sn=sn)
+            except Exception:
+                pass
+        if hasattr(engine, "click"):
+            try:
+                clicked = engine.click(
+                    None,
+                    position=(x, y),
+                    label=label or "AI input target",
+                    skip_label_lookup=True,
+                    locate_method="ai_coordinate_input",
+                )
+            except TypeError:
+                clicked = engine.click(None, position=(x, y), label=label or "AI input target")
+            if clicked is False:
+                return {"ok": False, "msg": "AI 输入坐标点击失败", "method": "ai_coordinate_input"}
+        mSleep(0.25)
+        if hasattr(engine, "send_keys"):
+            engine.send_keys(None, value)
+            _gesture_tick()
+            return {
+                "ok": True,
+                "msg": f"AI 坐标输入「{value}」",
+                "method": "ai_coordinate_input",
+                "kind": "input",
+                "x": x,
+                "y": y,
+                "text": value,
+                "screen_size": {"w": screen_w, "h": screen_h},
+                "target_label": label,
+            }
+        return {"ok": False, "msg": "设备引擎不支持文本输入", "method": "ai_coordinate_input"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e), "method": "ai_coordinate_input"}
 
 
 def _label_variants(label: str) -> List[str]:
@@ -959,9 +1088,15 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
     except Exception:
         pass
 
-    if is_form_input_label(raw):
-        q, _ = _extract_ui_text_core(raw)
-        return q or raw, list(dict.fromkeys([raw, q] if q else [raw])), None
+    try:
+        from server.services.locate.clip_query_plan import is_form_input_label
+
+        if is_form_input_label(raw):
+            q, _ = _extract_ui_text_core(raw)
+            return q or raw, list(dict.fromkeys([raw, q] if q else [raw])), None
+    except Exception:
+        # Form-input heuristics are optional. A missing or failing helper must not break normal click text.
+        pass
 
     intent = _classify_login_method_intent(raw)
     if intent == "one_click":
@@ -1709,6 +1844,7 @@ def _run_mobile_click(
     icon_targets: Optional[List[Dict[str, Any]]] = None,
     exact_label: bool = False,
     skip_label_lookup: bool = False,
+    ai_coordinate_only: bool = False,
     consent_dismiss: bool = False,
     login_icon_order: Optional[Dict[str, int]] = None,
     skip_overlay_clear: bool = False,
@@ -1759,6 +1895,58 @@ def _run_mobile_click(
                 SLog.w(TAG, f"consent dismissed check failed: {e}")
 
         clear_locate_debug()
+
+        if ai_coordinate_only:
+            if x <= 0 or y <= 0:
+                return {
+                    "ok": False,
+                    "msg": "AI 模式 click 必须返回有效 x/y 坐标，不能只返回 label。",
+                    "method": "ai_coordinate",
+                    "screen_size": {"w": screen_w, "h": screen_h},
+                    "target_label": label,
+                }
+            if x > screen_w or y > screen_h:
+                return {
+                    "ok": False,
+                    "msg": f"AI 坐标超出屏幕范围：({x},{y}) screen={screen_w}x{screen_h}",
+                    "method": "ai_coordinate",
+                    "screen_size": {"w": screen_w, "h": screen_h},
+                    "target_label": label,
+                }
+            if hasattr(engine, "click"):
+                try:
+                    clicked = engine.click(
+                        None,
+                        position=(x, y),
+                        label=label or f"AI({x},{y})",
+                        skip_label_lookup=True,
+                        locate_method="ai_coordinate",
+                    )
+                except TypeError:
+                    clicked = engine.click(None, position=(x, y), label=label or f"AI({x},{y})")
+                if clicked is False:
+                    return {
+                        "ok": False,
+                        "msg": "AI 坐标点击触控注入失败",
+                        "method": "ai_coordinate",
+                        "x": x,
+                        "y": y,
+                        "screen_size": {"w": screen_w, "h": screen_h},
+                        "target_label": label,
+                    }
+                _gesture_tick()
+                SLog.i(TAG, f"AI coordinate click x={x} y={y} label={label!r} skip local locate")
+                return {
+                    "ok": True,
+                    "msg": f"AI 坐标点击 ({x},{y})",
+                    "method": "ai_coordinate",
+                    "x": x,
+                    "y": y,
+                    "target_rect": _make_target_rect(x - 24, y - 24, 48, 48, label=label or f"({x},{y})"),
+                    "screen_size": {"w": screen_w, "h": screen_h},
+                    "target_label": label,
+                }
+            return {"ok": False, "msg": "引擎不支持点击", "method": "ai_coordinate"}
 
         pos, method, detail, target_rect = _resolve_click_target(
             engine,
@@ -2680,9 +2868,20 @@ def _plan_segment(
         })
         reply_parts.append(f"等待 {sec}s")
 
-    if re.search(r"返回|后退|back", segment, re.I) and not re.search(r"页面", segment):
-        steps.append({"kind": "back", "summary": "返回（累计手势后执行）"})
-        reply_parts.append("登记返回键")
+    if (
+        re.search(r"返回|后退|back", segment, re.I)
+        and not re.search(r"页面", segment)
+        and not re.search(r"点击|点一下|点按|tap|click", segment, re.I)
+    ):
+        steps.append({"kind": "back", "summary": "返回"})
+        reply_parts.append("返回")
+
+    if (
+        re.search(r"\bhome\b|home键|主页键|回到桌面|回到首页", segment, re.I)
+        and not re.search(r"点击|点一下|点按|tap|click", segment, re.I)
+    ):
+        steps.append({"kind": "system_key", "key": "home", "summary": "按 Home 键"})
+        reply_parts.append("按 Home 键")
 
     verify_text = re.sub(r"^验证预期[：:]\s*", "", segment).strip()
     if not steps and (
@@ -2705,7 +2904,7 @@ def _plan_segment(
     return {"steps": steps, "reply_parts": reply_parts, "errors": errors}
 
 
-def plan_message(
+def _plan_message_local(
     text: str,
     *,
     sn: Optional[str] = None,
@@ -2814,7 +3013,7 @@ def plan_message(
             "navigate": None,
         }
 
-    if not sn and any(s.get("kind") in ("click", "swipe", "open_app", "close_app", "ability") for s in steps):
+    if not sn and any(s.get("kind") in ("click", "swipe", "open_app", "close_app", "system_key", "ability") for s in steps):
         reply_parts.append("（未选设备：请先在顶部选择在线手机）")
 
     reply = " → ".join(reply_parts) if reply_parts else "好的"
@@ -2836,6 +3035,1160 @@ def plan_message(
         "page_hint": page_hint,
         "segment_errors": segment_errors,
         "plan_complete": len(segment_errors) == 0,
+    }
+
+
+def _num(value: Any, default: int = 0) -> int:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool = False) -> Optional[Dict[str, Any]]:
+    if not isinstance(step, dict):
+        return None
+    tool_payload: Dict[str, Any] = {}
+    kind = str(step.get("kind") or step.get("type") or "").strip().lower()
+    summary = str(step.get("summary") or step.get("reason") or kind or "step")
+    if step.get("tool_code"):
+        tool_payload = step
+    elif summary.strip().startswith("{") and "tool_code" in summary:
+        try:
+            parsed = ast.literal_eval(summary)
+            if isinstance(parsed, dict):
+                tool_payload = parsed
+                summary = str(parsed.get("step_text") or parsed.get("reason") or summary)
+        except Exception:
+            tool_payload = {}
+    if tool_payload and not kind:
+        tool_code = str(tool_payload.get("tool_code") or "")
+        if "click" in tool_code:
+            kind = "click"
+        elif "input" in tool_code or "type" in tool_code:
+            kind = "input"
+    if kind in {"tap", "click"}:
+        label = str(step.get("label") or step.get("target") or step.get("text") or "").strip()
+        params = tool_payload.get("parameters") if isinstance(tool_payload.get("parameters"), dict) else {}
+        if (not label or label in {"tool_code", "click_by_text", "x_mini_orange.click_by_text"}) and params:
+            label = str(params.get("text") or params.get("label") or params.get("target") or "").strip()
+        if not label or label in {"文本", "按钮", "目标", "tool_code"}:
+            match = re.search(r"[「『“\"']([^「」『』“”\"']{1,40})[」』”\"']", summary)
+            if match:
+                label = match.group(1).strip()
+        if not label or label in {"文本", "按钮", "目标"}:
+            match = re.search(r"(?:点击|点按|tap|click)(?:文本|按钮|目标)?\s*([\u4e00-\u9fffA-Za-z0-9_ -]{1,30})", summary, re.I)
+            if match:
+                label = match.group(1).strip(" ：:，,。.")
+        x = _num(step.get("x") or step.get("center_x") or step.get("cx"))
+        y = _num(step.get("y") or step.get("center_y") or step.get("cy"))
+        bbox = step.get("bbox") if isinstance(step.get("bbox"), dict) else {}
+        if (not x or not y) and bbox:
+            bx = _num(bbox.get("x") or bbox.get("left"))
+            by = _num(bbox.get("y") or bbox.get("top"))
+            bw = _num(bbox.get("w") or bbox.get("width"))
+            bh = _num(bbox.get("h") or bbox.get("height"))
+            if bx and by and bw and bh:
+                x = bx + bw // 2
+                y = by + bh // 2
+        if require_visual_coordinates and (x <= 0 or y <= 0):
+            return None
+        return {
+            "kind": "click",
+            "x": x,
+            "y": y,
+            "label": label,
+            "coords_explicit": bool(step.get("coords_explicit") or (x and y) or require_visual_coordinates),
+            "ai_coordinate_only": bool(require_visual_coordinates),
+            "bbox": bbox,
+            "confidence": step.get("confidence"),
+            "reason": step.get("reason") or "",
+            "summary": summary if summary != "click" else f"点击「{label or '目标'}」",
+        }
+    if kind in {"input", "type", "text"}:
+        value = str(step.get("text") or step.get("value") or "").strip()
+        if not value:
+            return None
+        field_hint = str(step.get("field_hint") or step.get("field") or "").strip()
+        x = _num(step.get("x") or step.get("center_x") or step.get("cx"))
+        y = _num(step.get("y") or step.get("center_y") or step.get("cy"))
+        if require_visual_coordinates and (x <= 0 or y <= 0):
+            return None
+        out = {
+            "kind": "input",
+            "text": value,
+            "field_hint": field_hint,
+            "summary": summary if summary != "input" else f"输入{field_hint or '文本'} {value}",
+        }
+        if x and y:
+            out.update(
+                {
+                    "x": x,
+                    "y": y,
+                    "label": str(step.get("label") or field_hint or "输入框"),
+                    "coords_explicit": True,
+                    "ai_coordinate_only": bool(require_visual_coordinates),
+                    "reason": step.get("reason") or "",
+                }
+            )
+        return out
+    if kind in {"swipe", "scroll"}:
+        sx = _num(step.get("start_x") or step.get("x1") or step.get("from_x"))
+        sy = _num(step.get("start_y") or step.get("y1") or step.get("from_y"))
+        ex = _num(step.get("end_x") or step.get("x2") or step.get("to_x"))
+        ey = _num(step.get("end_y") or step.get("y2") or step.get("to_y"))
+        if require_visual_coordinates:
+            if min(sx, sy, ex, ey) <= 0:
+                return None
+            return {
+                "kind": "swipe",
+                "start_x": sx,
+                "start_y": sy,
+                "end_x": ex,
+                "end_y": ey,
+                "duration_ms": _num(step.get("duration_ms") or step.get("duration") or 350, 350),
+                "ai_coordinate_only": True,
+                "summary": summary or "滑动",
+                "reason": step.get("reason") or "",
+            }
+        direction = str(step.get("direction") or "up").strip().lower()
+        if direction not in {"up", "down", "left", "right"}:
+            direction = "up"
+        return {"kind": "swipe", "direction": direction, "summary": summary or f"滑动 {direction}"}
+    if kind in {"open_app", "close_app"}:
+        package = str(
+            step.get("package")
+            or step.get("package_name")
+            or step.get("target_mobile")
+            or step.get("app_package")
+            or (step.get("data") or {}).get("target_mobile")
+            or ""
+        ).strip()
+        if package:
+            try:
+                from server.services.locate.app_packages import (
+                    resolve_known_app_by_alias,
+                    resolve_known_app_by_package,
+                )
+
+                if not resolve_known_app_by_package(package):
+                    for hint in (
+                        str(step.get("app_name") or ""),
+                        str(step.get("label") or ""),
+                        summary,
+                    ):
+                        known = resolve_known_app_by_alias(hint) if hint else None
+                        if known and known.android_packages:
+                            package = known.android_packages[0]
+                            break
+            except Exception:
+                pass
+        if not package:
+            return None
+        return {
+            "kind": kind,
+            "package": package,
+            "summary": summary or ("打开应用" if kind == "open_app" else "关闭应用"),
+        }
+    if kind == "back":
+        return {"kind": "back", "summary": summary or "返回"}
+    if kind in {"system_key", "keyevent", "press_key"}:
+        key = str(step.get("key") or step.get("event") or step.get("key_code") or "").strip().lower()
+        if key in {"home", "back", "menu", "power"}:
+            return {"kind": "system_key", "key": key, "summary": summary or f"按 {key} 键"}
+        return None
+    if kind == "ability":
+        node_code = str(step.get("nodeCode") or step.get("node_code") or "").strip()
+        if not node_code:
+            return None
+        return {
+            "kind": "ability",
+            "nodeCode": node_code,
+            "platform": step.get("platform") or "mobile",
+            "data": step.get("data") if isinstance(step.get("data"), dict) else {},
+            "summary": summary,
+        }
+    if kind == "verify":
+        return {
+            "kind": "verify",
+            "verify_text": str(step.get("verify_text") or step.get("text") or "").strip(),
+            "summary": summary,
+        }
+    return None
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(raw[start : end + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _build_ai_screen_context(sn: Optional[str], platform: str) -> Dict[str, Any]:
+    if not sn:
+        return {}
+    try:
+        from PIL import Image
+
+        from server.core.database import APP_DATA_DIR
+        from server.services.regression_capture import capture_device_screenshot
+
+        static_path = capture_device_screenshot(
+            str(sn),
+            platform,
+            run_id=f"ai-plan-{uuid.uuid4().hex[:8]}",
+            tag="observe",
+            settle_ms=120,
+            max_attempts=2,
+        )
+        if not static_path:
+            return {}
+        name = static_path.split("/static/")[-1] if "/static/" in static_path else os.path.basename(static_path)
+        local_path = os.path.join(APP_DATA_DIR, "uploads", name)
+        if not os.path.isfile(local_path):
+            return {"image_path": static_path}
+        with Image.open(local_path) as img:
+            img = img.convert("RGB")
+            original_w, original_h = img.size
+            max_side = 768
+            scale = min(1.0, max_side / float(max(original_w, original_h) or max_side))
+            if scale < 1:
+                img = img.resize((max(1, int(original_w * scale)), max(1, int(original_h * scale))))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=68, optimize=True)
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+            return {
+                "image_path": static_path,
+                "width": original_w,
+                "height": original_h,
+                "preview_width": img.size[0],
+                "preview_height": img.size[1],
+                "mime_type": "image/jpeg",
+                "base64": encoded,
+                "data_url": f"data:image/jpeg;base64,{encoded}",
+                "note": "坐标请基于 preview_width/preview_height（发给模型的截图像素尺寸）返回，Server 会自动映射到设备 width/height。",
+            }
+    except Exception as e:
+        SLog.w(TAG, f"build AI screen context failed: {e}")
+        return {}
+
+
+def _scale_ai_plan_coordinates(
+    raw_plan: Dict[str, Any],
+    screen: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Map model coordinates from preview image space to device screen space."""
+    plan = dict(raw_plan or {})
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not screen:
+        return plan, {"applied": False, "reason": "no_steps_or_screen"}
+
+    orig_w = int(screen.get("width") or 0)
+    orig_h = int(screen.get("height") or 0)
+    prev_w = int(screen.get("preview_width") or orig_w)
+    prev_h = int(screen.get("preview_height") or orig_h)
+    if orig_w <= 0 or orig_h <= 0 or prev_w <= 0 or prev_h <= 0:
+        return plan, {"applied": False, "reason": "invalid_dimensions"}
+    if prev_w == orig_w and prev_h == orig_h:
+        return plan, {
+            "applied": False,
+            "reason": "same_dimensions",
+            "device": {"width": orig_w, "height": orig_h},
+            "preview": {"width": prev_w, "height": prev_h},
+        }
+
+    sx = orig_w / float(prev_w)
+    sy = orig_h / float(prev_h)
+
+    def _scale_point(x_key: str, y_key: str, step: Dict[str, Any]) -> bool:
+        x = _num(step.get(x_key))
+        y = _num(step.get(y_key))
+        if x <= 0 or y <= 0:
+            return False
+        # 超出 preview 范围则视为已是设备坐标，避免二次放大。
+        if x > prev_w + 8 or y > prev_h + 8:
+            return False
+        step[x_key] = max(1, min(orig_w, int(round(x * sx))))
+        step[y_key] = max(1, min(orig_h, int(round(y * sy))))
+        return True
+
+    scaled_steps: List[Dict[str, Any]] = []
+    samples: List[Dict[str, Any]] = []
+    for item in steps:
+        if not isinstance(item, dict):
+            scaled_steps.append(item)
+            continue
+        step = dict(item)
+        kind = str(step.get("kind") or step.get("type") or "").strip().lower()
+        before = {}
+        scaled = False
+        if kind in {"click", "tap"}:
+            before = {"x": step.get("x"), "y": step.get("y")}
+            scaled = _scale_point("x", "y", step)
+        elif kind in {"input", "type", "text"}:
+            before = {"x": step.get("x"), "y": step.get("y")}
+            scaled = _scale_point("x", "y", step)
+        elif kind in {"swipe", "scroll"}:
+            before = {
+                "start_x": step.get("start_x"),
+                "start_y": step.get("start_y"),
+                "end_x": step.get("end_x"),
+                "end_y": step.get("end_y"),
+            }
+            scaled = (
+                _scale_point("start_x", "start_y", step)
+                or _scale_point("end_x", "end_y", step)
+            )
+        if before:
+            samples.append(
+                {
+                    "kind": kind,
+                    "scaled": scaled,
+                    "before": before,
+                    "after": {k: step.get(k) for k in before},
+                }
+            )
+        scaled_steps.append(step)
+
+    plan["steps"] = scaled_steps
+    return plan, {
+        "applied": True,
+        "device": {"width": orig_w, "height": orig_h},
+        "preview": {"width": prev_w, "height": prev_h},
+        "scale_x": round(sx, 6),
+        "scale_y": round(sy, 6),
+        "samples": samples[:5],
+    }
+
+
+def _screen_context_public(screen: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in (screen or {}).items() if k not in {"base64", "data_url"}}
+
+
+def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, str]]:
+    """Compact app catalog for LLM planning (name → package)."""
+    try:
+        from server.services.locate.app_packages import list_known_apps, package_for_app_key
+
+        rows: List[Dict[str, str]] = []
+        for app in list_known_apps()[:limit]:
+            pkg = package_for_app_key(app.key, platform=platform or "android")
+            if not pkg:
+                continue
+            rows.append({"name": app.name, "key": app.key, "package": pkg})
+        return rows
+    except Exception:
+        return []
+
+
+def _append_openai_image(messages: List[Dict[str, Any]], screen: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not screen.get("data_url"):
+        return messages
+    out = list(messages)
+    for idx in range(len(out) - 1, -1, -1):
+        if out[idx].get("role") == "user":
+            text = str(out[idx].get("content") or "")
+            out[idx] = {
+                **out[idx],
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "image_url", "image_url": {"url": screen["data_url"], "detail": "low"}},
+                ],
+            }
+            return out
+    return out
+
+
+def _ai_plan_request_timeout(channel: str) -> int:
+    from server.services.ai_plan_prompt import _ai_plan_request_timeout as timeout_for_channel
+
+    return timeout_for_channel(channel)
+
+
+def _call_openai_compatible_plan(
+    *,
+    provider: Dict[str, Any],
+    instruction: str,
+    channel: str,
+    platform: str,
+    context: Dict[str, Any],
+    screen: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    from server.services.ai_plan_prompt import build_ai_plan_messages
+
+    base = str(provider.get("base_url") or "").rstrip("/")
+    api_key = str(provider.get("api_key") or "").strip()
+    model = str(provider.get("model") or "").strip()
+    if not base or not api_key or not model:
+        return None
+    ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    messages = build_ai_plan_messages(
+        instruction=instruction,
+        platform=platform,
+        channel=channel,
+        context=ctx_text,
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
+                "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
+                "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+            ),
+        }
+    )
+    messages = _append_openai_image(messages, screen or {})
+    resp = requests.post(
+        f"{base}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"model": model, "messages": messages, "temperature": 0.1},
+        timeout=_ai_plan_request_timeout(channel),
+    )
+    resp.raise_for_status()
+    content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    return _extract_json_object(content)
+
+
+def _call_anthropic_compatible_plan(
+    *,
+    provider: Dict[str, Any],
+    instruction: str,
+    channel: str,
+    platform: str,
+    context: Dict[str, Any],
+    screen: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    from server.services.ai_plan_prompt import build_ai_plan_messages
+
+    base = str(provider.get("base_url") or "").rstrip("/")
+    api_key = str(provider.get("api_key") or "").strip()
+    model = str(provider.get("model") or "").strip()
+    if not base or not api_key or not model:
+        return None
+
+    ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    plan_messages = build_ai_plan_messages(
+        instruction=instruction,
+        platform=platform,
+        channel=channel,
+        context=ctx_text,
+    )
+    system_parts: List[str] = []
+    user_parts: List[str] = []
+    for item in plan_messages:
+        content = str(item.get("content") or "")
+        if not content:
+            continue
+        if item.get("role") == "system":
+            system_parts.append(content)
+        else:
+            user_parts.append(content)
+    user_parts.append(
+        "请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
+        "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
+        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+    )
+
+    content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": "\n\n".join(user_parts)}]
+    if (screen or {}).get("base64"):
+        content_blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": screen.get("mime_type") or "image/jpeg",
+                    "data": screen.get("base64"),
+                },
+            }
+        )
+
+    resp = requests.post(
+        f"{base}/v1/messages",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": 2048,
+            "temperature": 0.1,
+            "system": "\n\n".join(system_parts),
+            "messages": [{"role": "user", "content": content_blocks}],
+        },
+        timeout=_ai_plan_request_timeout(channel),
+    )
+    resp.raise_for_status()
+    blocks = resp.json().get("content") or []
+    content = "\n".join(str(block.get("text") or "") for block in blocks if isinstance(block, dict))
+    return _extract_json_object(content)
+
+
+def _sanitize_llm_error(err: Exception) -> str:
+    text = str(err)
+    text = re.sub(r"([?&]key=)[^&\s]+", r"\1***", text)
+    text = re.sub(r"(Bearer\s+)[A-Za-z0-9._\-]+", r"\1***", text)
+    return text
+
+
+def _llm_error_info(err: Exception, provider: Dict[str, Any]) -> Dict[str, str]:
+    status = getattr(getattr(err, "response", None), "status_code", None)
+    text = _sanitize_llm_error(err)
+    low = text.lower()
+    provider_name = str(provider.get("name") or provider.get("id") or "大模型服务")
+    if status == 429 or "too many requests" in low or "quota" in low or "rate limit" in low:
+        return {
+            "type": "quota_or_rate_limit",
+            "title": f"{provider_name} 额度或频率受限",
+            "message": "当前大模型请求过多、免费额度耗尽，或账号未开通足够的付费额度。",
+            "suggestion": "请到对应模型平台检查 API Key 的计费状态、余额/配额和速率限制；也可以稍后重试或切换其他已配置模型。",
+            "raw": text,
+        }
+    if status in {401, 403} or "permission" in low or "unauthorized" in low or "forbidden" in low:
+        return {
+            "type": "auth_or_permission",
+            "title": f"{provider_name} Key 无权限",
+            "message": "当前 API Key 无效、权限不足，或未开通该模型访问权限。",
+            "suggestion": "请检查 Key 是否正确、是否启用模型 API，以及当前账号是否有该模型访问权限。",
+            "raw": text,
+        }
+    if status == 404 or "not found" in low:
+        return {
+            "type": "model_not_found",
+            "title": f"{provider_name} 模型不可用",
+            "message": "当前选择的模型在该账号或区域不可用。",
+            "suggestion": "请在密钥配置中切换平台支持的模型，或确认该账号是否开通对应模型。",
+            "raw": text,
+        }
+    return {
+        "type": "unknown",
+        "title": f"{provider_name} 调用失败",
+        "message": "大模型服务返回异常，当前没有生成可执行计划。",
+        "suggestion": "请检查网络、Key、模型配置和服务商状态后重试。",
+        "raw": text,
+    }
+
+
+def _gemini_model_candidates(model: str) -> List[str]:
+    primary = (model or "gemini-2.5-flash").strip()
+    if primary.startswith("models/"):
+        primary = primary.split("/", 1)[1]
+    candidates = [primary, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    return list(dict.fromkeys([item for item in candidates if item]))
+
+
+def _call_gemini_plan(
+    *,
+    provider: Dict[str, Any],
+    instruction: str,
+    channel: str,
+    platform: str,
+    context: Dict[str, Any],
+    screen: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    from server.services.ai_plan_prompt import build_ai_plan_messages
+
+    base = str(provider.get("base_url") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    api_key = str(provider.get("api_key") or "").strip()
+    model = str(provider.get("model") or "gemini-2.5-flash").strip()
+    if not api_key or not model:
+        return None
+
+    ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    messages = build_ai_plan_messages(
+        instruction=instruction,
+        platform=platform,
+        channel=channel,
+        context=ctx_text,
+    )
+    prompt = "\n\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}"
+        for item in messages
+        if item.get("content")
+    )
+    prompt += (
+        "\n\n请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
+        "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
+        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+    )
+    parts: List[Dict[str, Any]] = [{"text": prompt}]
+    if (screen or {}).get("base64"):
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": screen.get("mime_type") or "image/jpeg",
+                    "data": screen.get("base64"),
+                }
+            }
+        )
+
+    last_err: Optional[Exception] = None
+    resp = None
+    for candidate in _gemini_model_candidates(model):
+        try:
+            resp = requests.post(
+                f"{base}/models/{candidate}:generateContent",
+                params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"role": "user", "parts": parts}],
+                    "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+                },
+                timeout=_ai_plan_request_timeout(channel),
+            )
+            resp.raise_for_status()
+            break
+        except requests.HTTPError as e:
+            last_err = e
+            status = getattr(e.response, "status_code", None)
+            if status != 404:
+                raise e
+            SLog.w(TAG, f"Gemini model not found, try fallback model={candidate}")
+    else:
+        raise RuntimeError(_sanitize_llm_error(last_err or RuntimeError("Gemini model not found")))
+
+    data = resp.json()
+    parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+    content = "\n".join(str(part.get("text") or "") for part in parts if part.get("text"))
+    return _extract_json_object(content)
+
+
+def verify_expectation_with_ai(
+    expected_text: str,
+    *,
+    sn: Optional[str],
+    platform: str = "android",
+    context: Optional[Dict[str, Any]] = None,
+    provider_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Use configured LLM + screenshot to verify a case expectation."""
+    from server.services import system_settings_service as ss
+    from server.services.ai_plan_prompt import build_ai_assert_messages
+
+    exp = re.sub(r"^\d+[.、．)\）]\s*", "", (expected_text or "").strip())
+    if not exp or not sn:
+        return None
+
+    gate = ss.should_use_ai_planning("case_execution", provider_id=provider_id)
+    if not gate.get("enabled"):
+        return None
+
+    selected_provider_id = provider_id or (gate.get("provider") or {}).get("id") or ""
+    provider = ss.get_ai_provider_credentials(selected_provider_id)
+    ctx = dict(context or {})
+    platform = str(ctx.get("platform") or platform or "android").lower()
+    llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
+    screen = _build_ai_screen_context(sn, platform)
+    if screen:
+        llm_ctx["screen"] = _screen_context_public(screen)
+
+    instruction = f"验证预期：{exp}"
+    ctx_text = json.dumps({**llm_ctx, "sn": sn}, ensure_ascii=False, default=str)[:4000]
+    plan_messages = build_ai_assert_messages(
+        expected_text=exp,
+        platform=platform,
+        channel="case_execution",
+        context=ctx_text,
+    )
+
+    raw: Optional[Dict[str, Any]] = None
+    err_info: Optional[Dict[str, Any]] = None
+    try:
+        api_type = str(provider.get("api_type") or "").strip().lower()
+        base_url = str(provider.get("base_url") or "")
+        if api_type == "gemini" or provider.get("id") == "google" or "generativelanguage.googleapis.com" in base_url:
+            messages = plan_messages
+            prompt = "\n\n".join(
+                f"{item.get('role', 'user')}: {item.get('content', '')}"
+                for item in messages
+                if item.get("content")
+            )
+            prompt += (
+                '\n\n请只返回 JSON：{"passed":true,"reply":"...","reason":"...","evidence":"..."}'
+            )
+            parts: List[Dict[str, Any]] = [{"text": prompt}]
+            if screen.get("base64"):
+                parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": screen.get("mime_type") or "image/jpeg",
+                            "data": screen.get("base64"),
+                        }
+                    }
+                )
+            base = str(provider.get("base_url") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+            api_key = str(provider.get("api_key") or "").strip()
+            model = str(provider.get("model") or "gemini-2.5-flash").strip()
+            resp = requests.post(
+                f"{base}/models/{model}:generateContent?key={api_key}",
+                json={
+                    "contents": [{"role": "user", "parts": parts}],
+                    "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+                },
+                timeout=_ai_plan_request_timeout("case_execution"),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content_parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+            content = "\n".join(str(part.get("text") or "") for part in content_parts if part.get("text"))
+            raw = _extract_json_object(content)
+        elif api_type == "anthropic" or provider.get("id") in {"anthropic", "umodelverse"}:
+            base = str(provider.get("base_url") or "").rstrip("/")
+            api_key = str(provider.get("api_key") or "").strip()
+            model = str(provider.get("model") or "").strip()
+            system_parts = [m["content"] for m in plan_messages if m.get("role") == "system"]
+            user_parts = [m["content"] for m in plan_messages if m.get("role") != "system"]
+            user_parts.append('请只返回 JSON：{"passed":true,"reply":"...","reason":"...","evidence":"..."}')
+            content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": "\n\n".join(user_parts)}]
+            if screen.get("base64"):
+                content_blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": screen.get("mime_type") or "image/jpeg",
+                            "data": screen.get("base64"),
+                        },
+                    }
+                )
+            resp = requests.post(
+                f"{base}/v1/messages",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 1024,
+                    "temperature": 0.1,
+                    "system": "\n\n".join(system_parts),
+                    "messages": [{"role": "user", "content": content_blocks}],
+                },
+                timeout=_ai_plan_request_timeout("case_execution"),
+            )
+            resp.raise_for_status()
+            blocks = resp.json().get("content") or []
+            content = "\n".join(str(block.get("text") or "") for block in blocks if isinstance(block, dict))
+            raw = _extract_json_object(content)
+        else:
+            messages = list(plan_messages)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": '请只返回 JSON：{"passed":true,"reply":"...","reason":"...","evidence":"..."}',
+                }
+            )
+            messages = _append_openai_image(messages, screen or {})
+            base = str(provider.get("base_url") or "").rstrip("/")
+            api_key = str(provider.get("api_key") or "").strip()
+            model = str(provider.get("model") or "").strip()
+            resp = requests.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "temperature": 0.1},
+                timeout=_ai_plan_request_timeout("case_execution"),
+            )
+            resp.raise_for_status()
+            content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            raw = _extract_json_object(content)
+    except Exception as e:
+        err_info = _llm_error_info(e, provider)
+        SLog.w(TAG, f"AI assert failed provider={provider.get('id')}: {_sanitize_llm_error(e)}")
+        return {
+            "ok": False,
+            "msg": err_info.get("message") or str(e),
+            "reply": err_info.get("title") or "大模型预期校验失败",
+            "checks": [{"text": exp, "ok": False, "reason": err_info.get("message") or "AI 校验失败"}],
+            "planner": {
+                "mode": "ai",
+                "provider_id": provider.get("id"),
+                "model": provider.get("model"),
+                "channel": "case_execution",
+                "task": "assert",
+            },
+            "ai_debug": {
+                "provider": provider.get("id"),
+                "model": provider.get("model"),
+                "screen": _screen_context_public(screen),
+                "error": _sanitize_llm_error(e),
+                "error_info": err_info,
+            },
+        }
+
+    if not raw:
+        return {
+            "ok": False,
+            "msg": "大模型未返回可解析的预期校验结果",
+            "reply": "大模型未返回预期校验结果",
+            "checks": [{"text": exp, "ok": False, "reason": "AI 返回空结果"}],
+            "planner": {
+                "mode": "ai",
+                "provider_id": provider.get("id"),
+                "model": provider.get("model"),
+                "channel": "case_execution",
+                "task": "assert",
+            },
+            "ai_debug": {
+                "provider": provider.get("id"),
+                "model": provider.get("model"),
+                "screen": _screen_context_public(screen),
+                "raw_response": None,
+            },
+        }
+
+    passed = raw.get("passed")
+    if passed is None:
+        passed = raw.get("ok")
+    ok = bool(passed)
+    reason = str(raw.get("reason") or raw.get("evidence") or raw.get("reply") or "").strip()
+    reply = str(raw.get("reply") or (f"预期{'达成' if ok else '未达成'}：{exp}")).strip()
+    ai_debug = {
+        "provider": provider.get("id"),
+        "model": provider.get("model"),
+        "screen": _screen_context_public(screen),
+        "raw_response": raw,
+        "task": "assert",
+    }
+    return {
+        "ok": ok,
+        "msg": reply if ok else (reason or reply or "预期未达成"),
+        "reply": reply,
+        "checks": [{"text": exp, "ok": ok, "reason": reason or reply, "method": "ai_assert"}],
+        "planner": {
+            "mode": "ai",
+            "provider_id": provider.get("id"),
+            "model": provider.get("model"),
+            "channel": "case_execution",
+            "task": "assert",
+        },
+        "ai_debug": ai_debug,
+    }
+
+
+def _prepare_case_screen_for_ai_plan(
+    sn: Optional[str],
+    platform: str,
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Clear blocking overlays before case AI screenshot."""
+    if not sn:
+        return {"attempted": False, "reason": "no_device"}
+    icon_targets = (context or {}).get("icon_targets")
+    if icon_targets is not None and not isinstance(icon_targets, list):
+        icon_targets = None
+    try:
+        from server.services.overlay_guard_service import run_overlay_guard_on_device
+
+        guard = run_overlay_guard_on_device(
+            str(sn),
+            platform,
+            icon_targets=icon_targets,
+            max_rounds=4,
+        )
+        return {
+            "attempted": bool(guard.get("attempted")),
+            "ok": bool(guard.get("ok")),
+            "msg": guard.get("msg") or "",
+            "rounds": guard.get("rounds") or 0,
+        }
+    except Exception as e:
+        SLog.w(TAG, f"overlay guard before case AI plan failed: {e}")
+        return {"attempted": False, "ok": False, "error": str(e)}
+
+
+def _plan_message_ai(
+    text: str,
+    *,
+    sn: Optional[str],
+    context: Optional[Dict],
+    channel: str,
+    provider_id: str,
+) -> Optional[Dict[str, Any]]:
+    from server.services import system_settings_service as ss
+
+    ctx = dict(context or {})
+    platform = str(ctx.get("platform") or "android").lower()
+    normalized_channel = (channel or "copilot").strip().lower()
+    case_channels = {"case", "case_execution", "regression", "feishu"}
+    if text and not ctx.get("case_step_text"):
+        ctx["case_step_text"] = text
+    known_apps = _ai_known_apps_context(platform)
+    if known_apps:
+        ctx["known_apps"] = known_apps
+    if sn and normalized_channel in case_channels:
+        guard_meta = _prepare_case_screen_for_ai_plan(sn, platform, ctx)
+        ctx["overlay_guard_before_plan"] = guard_meta
+        if guard_meta.get("attempted"):
+            SLog.i(
+                TAG,
+                f"case AI plan overlay guard ok={guard_meta.get('ok')} "
+                f"rounds={guard_meta.get('rounds')} msg={guard_meta.get('msg')!r}",
+            )
+    llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
+    screen = _build_ai_screen_context(sn, platform)
+    if screen:
+        llm_ctx["screen"] = _screen_context_public(screen)
+    provider = ss.get_ai_provider_credentials(provider_id)
+    try:
+        api_type = str(provider.get("api_type") or "").strip().lower()
+        base_url = str(provider.get("base_url") or "")
+        if api_type == "gemini" or provider.get("id") == "google" or "generativelanguage.googleapis.com" in base_url:
+            raw_plan = _call_gemini_plan(
+                provider=provider,
+                instruction=text,
+                channel=channel,
+                platform=platform,
+                context={**llm_ctx, "sn": sn},
+                screen=screen,
+            )
+        elif api_type == "anthropic" or provider.get("id") in {"anthropic", "umodelverse"}:
+            raw_plan = _call_anthropic_compatible_plan(
+                provider=provider,
+                instruction=text,
+                channel=channel,
+                platform=platform,
+                context={**llm_ctx, "sn": sn},
+                screen=screen,
+            )
+        else:
+            raw_plan = _call_openai_compatible_plan(
+                provider=provider,
+                instruction=text,
+                channel=channel,
+                platform=platform,
+                context={**llm_ctx, "sn": sn},
+                screen=screen,
+            )
+    except Exception as e:
+        source_err = e.__cause__ if isinstance(e, RuntimeError) and e.__cause__ else e
+        err_text = _sanitize_llm_error(source_err)
+        err_info = _llm_error_info(source_err, provider)
+        SLog.w(TAG, f"AI plan failed provider={provider.get('id')}: {err_text}")
+        return {
+            "reply": f"{err_info['title']}：{err_info['message']}\n建议：{err_info['suggestion']}",
+            "steps": [],
+            "navigate": None,
+            "auto_run": False,
+            "ai_error": err_text,
+            "ai_error_info": err_info,
+        }
+    if not raw_plan:
+        SLog.w(
+            TAG,
+            f"AI plan empty JSON provider={provider.get('id')} channel={channel} "
+            f"instruction={text[:120]!r}",
+        )
+        return None
+    raw_plan_before_scale = json.loads(json.dumps(raw_plan, ensure_ascii=False, default=str))
+    raw_plan, coordinate_scale = _scale_ai_plan_coordinates(raw_plan, screen)
+    raw_steps = raw_plan.get("steps") or []
+    normalized_steps = [
+        s
+        for s in (
+            _normalize_ai_step(item, require_visual_coordinates=True)
+            for item in raw_steps
+        )
+        if s
+    ]
+    visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
+    invalid_visual_steps = [
+        item
+        for item in raw_steps
+        if isinstance(item, dict)
+        and str(item.get("kind") or item.get("type") or "").strip().lower() in visual_kinds
+        and not _normalize_ai_step(item, require_visual_coordinates=True)
+    ]
+    if raw_steps and not normalized_steps:
+        SLog.w(
+            TAG,
+            f"AI plan normalize dropped all steps channel={channel} "
+            f"raw_count={len(raw_steps)} invalid={invalid_visual_steps[:2]}",
+        )
+    ai_debug = {
+        "provider": provider.get("id"),
+        "model": provider.get("model"),
+        "screen": _screen_context_public(screen),
+        "overlay_guard_before_plan": ctx.get("overlay_guard_before_plan"),
+        "raw_plan": raw_plan_before_scale,
+        "coordinate_scale": coordinate_scale,
+        "normalized_steps": normalized_steps,
+        "invalid_visual_steps": invalid_visual_steps,
+    }
+    if invalid_visual_steps:
+        return {
+            "reply": "大模型未返回可直接执行的坐标：视觉动作必须包含 x/y 或起止坐标，不能只返回 label/direction。",
+            "display_reply": "大模型未返回坐标",
+            "steps": [],
+            "navigate": None,
+            "sn": sn,
+            "auto_run": False,
+            "plan_complete": False,
+            "planner": {
+                "mode": "ai",
+                "provider_id": provider.get("id"),
+                "model": provider.get("model"),
+                "channel": channel,
+                "reason": "AI visual steps missing coordinates",
+            },
+            "ai_debug": ai_debug,
+            "ai_error_info": {
+                "type": "missing_coordinates",
+                "title": "大模型未返回坐标",
+                "message": "AI 模式下 click/input/swipe 必须返回坐标，label 只能用于审计展示。",
+                "suggestion": "请重试或换用支持视觉输入的模型；如果截图不清晰，可先等待页面稳定后再执行。",
+            },
+        }
+    blockers = raw_plan.get("blockers") or []
+    # Copilot 对话：步骤已被 Server 规范化（含包名纠错）后应自动执行；
+    # 模型因包名猜测不确定而设 auto_run=false 不应阻断执行。
+    auto_run = bool(normalized_steps) or raw_plan.get("auto_run", True)
+    if normalized_steps and raw_plan.get("auto_run") is False:
+        SLog.i(
+            TAG,
+            f"AI plan override auto_run=true steps={len(normalized_steps)} "
+            f"blockers={len(blockers)}",
+        )
+    return {
+        "reply": raw_plan.get("reply") or ("大模型已生成计划" if normalized_steps else "大模型未生成可执行步骤"),
+        "display_reply": raw_plan.get("reply") or "",
+        "steps": normalized_steps,
+        "navigate": raw_plan.get("navigate"),
+        "sn": sn,
+        "auto_run": auto_run,
+        "plan_complete": bool(normalized_steps),
+        "planner": {
+            "mode": "ai",
+            "provider_id": provider.get("id"),
+            "model": provider.get("model"),
+            "channel": channel,
+        },
+        "ai_debug": {**ai_debug, "blockers": blockers, "auto_run_raw": raw_plan.get("auto_run")},
+    }
+
+
+def plan_message(
+    text: str,
+    *,
+    sn: Optional[str] = None,
+    context: Optional[Dict] = None,
+    channel: str = "copilot",
+    provider_id: Optional[str] = None,
+    planning_mode: str = "local",
+) -> Dict[str, Any]:
+    """统一 Planner：Copilot 与用例执行共享；用例预期检查由调用方额外处理。"""
+    from server.services import system_settings_service as ss
+
+    mode = (planning_mode or "local").strip().lower()
+    normalized_channel = (channel or "copilot").strip().lower()
+    case_channels = {"case", "case_execution", "regression", "feishu"}
+    ai_gate: Optional[Dict[str, Any]] = None
+
+    # 用例/回归通道未显式指定 planning_mode=ai 时，读取密钥配置决定是否走大模型。
+    if mode == "local" and normalized_channel in case_channels:
+        ai_gate = ss.should_use_ai_planning(normalized_channel, provider_id=provider_id)
+        if ai_gate.get("enabled"):
+            mode = "ai"
+            if not provider_id:
+                provider_id = (ai_gate.get("provider") or {}).get("id") or None
+            SLog.i(
+                TAG,
+                f"case planning use AI channel={normalized_channel} provider={provider_id}",
+            )
+
+    if mode == "local":
+        local_plan = _plan_message_local(text, sn=sn, context=context)
+        local_plan["planner"] = {"mode": "local", "channel": channel}
+        return local_plan
+
+    ai_gate = ai_gate or ss.should_use_ai_planning(normalized_channel, provider_id=provider_id)
+    if ai_gate.get("enabled"):
+        selected_provider_id = provider_id or (ai_gate.get("provider") or {}).get("id") or ""
+        ai_plan = _plan_message_ai(
+            text,
+            sn=sn,
+            context=context,
+            channel=channel,
+            provider_id=selected_provider_id,
+        )
+        if ai_plan and ai_plan.get("steps"):
+            return ai_plan
+        usage = ss.get_ai_usage_settings()
+        allow_local_fallback = (
+            ai_gate.get("mode") == "local_first"
+            and normalized_channel in case_channels
+            and not usage.get("case_execution_enabled")
+        )
+        if allow_local_fallback:
+            SLog.i(
+                TAG,
+                f"case AI plan has no steps, fallback to local channel={normalized_channel}",
+            )
+            local_plan = _plan_message_local(text, sn=sn, context=context)
+            local_plan["planner"] = {
+                "mode": "local",
+                "channel": channel,
+                "ai_fallback": True,
+                "ai_reply": (ai_plan or {}).get("reply"),
+            }
+            if ai_plan and ai_plan.get("ai_debug"):
+                local_plan["ai_debug"] = ai_plan["ai_debug"]
+            return local_plan
+        if normalized_channel in case_channels and usage.get("case_execution_enabled"):
+            SLog.w(
+                TAG,
+                f"case AI plan failed, no local fallback (case_execution_enabled) "
+                f"reply={(ai_plan or {}).get('reply')!r}",
+            )
+        return ai_plan or {
+            "reply": "大模型未返回可执行步骤，请调整指令或切换 Local Plan。",
+            "display_reply": "大模型未返回可执行步骤",
+            "steps": [],
+            "navigate": None,
+            "sn": sn,
+            "auto_run": False,
+            "plan_complete": False,
+            "planner": {
+                "mode": "ai",
+                "channel": channel,
+                "reason": "AI did not return executable steps",
+                "requested_provider": selected_provider_id,
+            },
+        }
+
+    return {
+        "reply": f"当前选择的是大模型能力，但不可用：{ai_gate.get('reason') or 'provider unavailable'}",
+        "display_reply": "大模型能力不可用",
+        "steps": [],
+        "navigate": None,
+        "sn": sn,
+        "auto_run": False,
+        "plan_complete": False,
+        "planner": {
+            "mode": "ai",
+            "channel": channel,
+        "reason": ai_gate.get("reason") or "AI planning disabled",
+        "requested_provider": provider_id or (ai_gate.get("provider") or {}).get("id"),
+        },
     }
 
 
@@ -2991,11 +4344,38 @@ def execute_steps(
             "started_at": datetime.fromtimestamp(t0).isoformat(timespec="milliseconds"),
         }
 
+        if capture_screenshots and sn and run_id and kind in ("open_app", "close_app", "back", "system_key"):
+            try:
+                from server.services.regression_capture import capture_device_screenshot
+
+                out["screenshot_before"] = capture_device_screenshot(
+                    sn,
+                    platform,
+                    run_id=run_id,
+                    tag=f"s{i}_{kind or 'step'}_before",
+                    settle_ms=80,
+                )
+            except Exception:
+                out["screenshot_before"] = ""
+
         if sn:
             try:
                 from driver.agent.Crawl.device_bootstrap import ensure_adb_device_online
 
+                prep_t0 = time.time()
                 ensure_adb_device_online(str(sn), platform)
+                prep_ms = int((time.time() - prep_t0) * 1000)
+                if prep_ms >= 1200:
+                    out.setdefault("pre_events", []).append(
+                        {
+                            "type": "device_prepare",
+                            "label": "设备准备",
+                            "summary": "执行器在正式步骤前完成了设备唤醒/解锁/连接准备",
+                            "method": "ensure_device_online",
+                            "duration_ms": prep_ms,
+                            "visible": True,
+                        }
+                    )
             except Exception as e:
                 from driver.agent.Crawl.device_bootstrap import DeviceOfflineError
 
@@ -3012,6 +4392,7 @@ def execute_steps(
             else:
                 pkg = (
                     step.get("package")
+                    or step.get("package_name")
                     or (step.get("data") or {}).get("target_mobile")
                     or ""
                 ).strip()
@@ -3042,6 +4423,27 @@ def execute_steps(
 
                 while True:
                     mark_step()
+
+                    if step.get("ai_coordinate_only"):
+                        t_click = time.time()
+                        SLog.i(
+                            TAG,
+                            f"Step {i} AI coordinate click x={step.get('x')} y={step.get('y')} "
+                            f"label={step.get('label')!r}",
+                        )
+                        r = _run_mobile_click(
+                            sn,
+                            int(step.get("x", 0)),
+                            int(step.get("y", 0)),
+                            label=step.get("label", ""),
+                            platform=platform,
+                            coords_explicit=True,
+                            skip_label_lookup=True,
+                            ai_coordinate_only=True,
+                        )
+                        out.update(r)
+                        out["click_attempt"] = click_attempt
+                        break
 
                     if (
                         use_reactive_guard
@@ -3303,7 +4705,18 @@ def execute_steps(
                 from server.services.regression_run_context import mark_step
 
                 mark_step()
-                r = _run_mobile_swipe(sn, step.get("direction", "up"), platform)
+                if step.get("ai_coordinate_only"):
+                    r = _run_mobile_swipe_coords(
+                        sn,
+                        int(step.get("start_x") or 0),
+                        int(step.get("start_y") or 0),
+                        int(step.get("end_x") or 0),
+                        int(step.get("end_y") or 0),
+                        duration_ms=int(step.get("duration_ms") or 350),
+                        platform=platform,
+                    )
+                else:
+                    r = _run_mobile_swipe(sn, step.get("direction", "up"), platform)
                 out.update(r)
 
         elif kind == "input":
@@ -3318,15 +4731,25 @@ def execute_steps(
                     f"Step {i} input begin text={step.get('text')!r} "
                     f"field={step.get('field_hint')!r}",
                 )
-                r = _run_mobile_input(
-                    sn,
-                    step.get("text") or "",
-                    field_hint=step.get("field_hint") or "",
-                    platform=platform,
-                    focus_rect=last_click_target
-                    if step.get("bind_last_click")
-                    else None,
-                )
+                if step.get("ai_coordinate_only"):
+                    r = _run_mobile_input_coords(
+                        sn,
+                        int(step.get("x") or 0),
+                        int(step.get("y") or 0),
+                        step.get("text") or "",
+                        label=step.get("label") or step.get("field_hint") or "",
+                        platform=platform,
+                    )
+                else:
+                    r = _run_mobile_input(
+                        sn,
+                        step.get("text") or "",
+                        field_hint=step.get("field_hint") or "",
+                        platform=platform,
+                        focus_rect=last_click_target
+                        if step.get("bind_last_click")
+                        else None,
+                    )
                 out.update(r)
 
         elif kind == "back":
@@ -3339,9 +4762,18 @@ def execute_steps(
                 r = _run_mobile_back(
                     sn,
                     platform,
-                    immediate=bool(step.get("immediate", False)),
+                    immediate=True,
                 )
                 out.update(r)
+
+        elif kind == "system_key":
+            if not sn:
+                out["msg"] = "未选择设备"
+            else:
+                from server.services.regression_run_context import mark_step
+
+                mark_step()
+                out.update(_run_mobile_key(sn, step.get("key") or "", platform=platform))
 
         elif kind == "system_permission":
             if not sn:

@@ -556,7 +556,8 @@ class MAdbEngine(MobileEngine):
                 f"blank={blank} locked={locked}",
             )
             self._wake_display()
-            if locked or blank:
+            # 仅锁屏时解锁；blank 可能是键盘/转场瞬时黑帧，误触会反复输入锁屏密码
+            if locked:
                 self._unlock_keyguard(node_sn)
             time.sleep(0.35)
         ok = not self._is_keyguard_showing() and not self._is_mostly_black_image(

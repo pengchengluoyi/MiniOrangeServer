@@ -533,6 +533,13 @@ def build_plan_log(command: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
     if plan.get("reply"):
         entries.append({"type": "reply", "text": plan.get("reply")})
+    planner = plan.get("planner")
+    if isinstance(planner, dict) and planner:
+        entries.append({"type": "planner", "detail": planner})
+    if plan.get("ai_debug"):
+        entries.append({"type": "ai_debug", "detail": plan.get("ai_debug")})
+    if plan.get("ai_error_info"):
+        entries.append({"type": "ai_error", "detail": plan.get("ai_error_info")})
     for err in plan.get("segment_errors") or []:
         entries.append({"type": "plan_error", "text": err, "title": "未识别子指令"})
     return entries

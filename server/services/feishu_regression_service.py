@@ -632,7 +632,10 @@ def _run_command_block(
             "step_results": [],
             "ok": True,
         }
-    plan = cs.plan_message(command, sn=sn, context=context)
+    plan_ctx = {**context, "case_step_text": command}
+    if icon_targets:
+        plan_ctx["icon_targets"] = icon_targets
+    plan = cs.plan_message(command, sn=sn, context=plan_ctx, channel="case_execution")
     plan_log = aas.build_plan_log(command, plan)
     if plan.get("error") or not plan.get("steps"):
         return {
@@ -704,7 +707,11 @@ def _run_command_block(
             "page_hint": plan.get("page_hint") or "",
             "segment_errors": list(segment_errors),
             "plan_log": plan_log,
+            "planner": plan.get("planner") or {},
+            "ai_debug": plan.get("ai_debug"),
         },
+        "planner": plan.get("planner") or {},
+        "ai_debug": plan.get("ai_debug"),
     }
 
 
@@ -999,7 +1006,7 @@ def _analyze_expected_plans(
         pass
 
     plan_cmd = f"验证预期：{exp}"
-    plan = cs.plan_message(plan_cmd, sn=sn, context=context or {})
+    plan = cs.plan_message(plan_cmd, sn=sn, context=context or {}, channel="case_execution")
     plan_log = aas.build_plan_log(plan_cmd, plan)
 
     return {
@@ -1284,6 +1291,43 @@ def _verify_step_expected(
         sn=sn,
         context={"app_id": app_id or (case or {}).get("case_id"), "platform": platform},
     )
+    ai_assert_result: Optional[Dict[str, Any]] = None
+    try:
+        from server.services import system_settings_service as ss
+
+        if ss.should_use_ai_planning("case_execution").get("enabled") and sn and steps_ok:
+            ai_assert_result = cs.verify_expectation_with_ai(
+                exp,
+                sn=sn,
+                platform=platform,
+                context={
+                    "app_id": app_id,
+                    "platform": platform,
+                    "page_context": page_context,
+                },
+            )
+            if ai_assert_result:
+                checks = ai_assert_result.get("checks") or checks
+                checks_ok = bool(ai_assert_result.get("ok"))
+                assert_plan = {
+                    "reply": ai_assert_result.get("reply") or f"验证预期：{exp}",
+                    "steps": [],
+                    "planner": ai_assert_result.get("planner"),
+                    "ai_debug": ai_assert_result.get("ai_debug"),
+                }
+                expected_analysis = {
+                    "reply": assert_plan["reply"],
+                    "plan_log": aas.build_plan_log(f"验证预期：{exp}", assert_plan),
+                    "planned": expected_analysis.get("planned") or [],
+                }
+                SLog.i(
+                    TAG,
+                    f"AI assert exp={exp[:32]!r} ok={checks_ok} "
+                    f"provider={(ai_assert_result.get('planner') or {}).get('provider_id')}",
+                )
+    except Exception as e:
+        SLog.w(TAG, f"AI assert integration failed: {e}")
+
     plan_tree = aas.build_expected_plan_tree(
         expected_text,
         checks,
@@ -1330,6 +1374,8 @@ def _verify_step_expected(
             "screenshot": screenshot,
             "page_context": page_context,
             "page_recovery": recovery,
+            "planner": (ai_assert_result or {}).get("planner"),
+            "ai_debug": (ai_assert_result or {}).get("ai_debug"),
         }
     if checks_ok:
         return {
@@ -1342,6 +1388,8 @@ def _verify_step_expected(
             "screenshot": screenshot,
             "page_context": page_context,
             "page_recovery": recovery,
+            "planner": (ai_assert_result or {}).get("planner"),
+            "ai_debug": (ai_assert_result or {}).get("ai_debug"),
         }
     failed = [c["text"] for c in checks if not c.get("ok")]
     msg = f"预期未达成: {', '.join(failed[:2])}"
@@ -1358,6 +1406,8 @@ def _verify_step_expected(
         "screenshot": screenshot,
         "page_context": page_context,
         "page_recovery": recovery,
+        "planner": (ai_assert_result or {}).get("planner"),
+        "ai_debug": (ai_assert_result or {}).get("ai_debug"),
     }
 
 
@@ -1681,6 +1731,14 @@ def _run_case_steps_sequential(
                 "screenshot": verify_one.get("screenshot"),
                 "page_context": verify_one.get("page_context") or {},
                 "page_recovery": verify_one.get("page_recovery"),
+                "planner": verify_one.get("planner"),
+                "ai_debug": verify_one.get("ai_debug"),
+                "thought_meta": {
+                    "plan_log": verify_one.get("plan_log") or [],
+                    "planner": verify_one.get("planner") or {},
+                    "ai_debug": verify_one.get("ai_debug"),
+                    "plan_reply": verify_one.get("msg") or "",
+                },
             }
 
         step_block["expected_action"] = expected_part
@@ -2391,7 +2449,7 @@ def _execute_cases_batch(
                 continue
         else:
             command = item["command"]
-            plan = cs.plan_message(command, sn=sn, context=context)
+            plan = cs.plan_message(command, sn=sn, context=context, channel="case_execution")
             plan_log = aas.build_plan_log(command, plan)
             trace.append(
                 {

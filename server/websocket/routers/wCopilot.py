@@ -3,13 +3,22 @@
 """对话流 WebSocket：规划 + 执行。"""
 from __future__ import annotations
 
+import uuid
+
 from server.services import copilot_service as cs
 
 
 async def handle_copilot_chat(websocket, data: dict):
     text = (data.get("text") or data.get("message") or "").strip()
     sn = data.get("sn")
-    plan = cs.plan_message(text, sn=sn, context=data.get("context"))
+    plan = cs.plan_message(
+        text,
+        sn=sn,
+        context=data.get("context"),
+        channel="copilot",
+        provider_id=data.get("provider_id") or data.get("providerId"),
+        planning_mode=data.get("planning_mode") or data.get("planningMode") or "local",
+    )
     return {"code": 200, "data": plan}
 
 
@@ -23,6 +32,8 @@ async def handle_copilot_execute(websocket, data: dict):
         steps,
         sn=sn,
         platform=platform,
+        run_id=str(data.get("run_id") or data.get("runId") or f"copilot-{uuid.uuid4().hex[:10]}"),
+        capture_screenshots=bool(data.get("capture_screenshots", True)),
         app_id=str(data.get("app_id") or data.get("appId") or ""),
     )
     ok_all = all(r.get("ok") for r in results) if results else False

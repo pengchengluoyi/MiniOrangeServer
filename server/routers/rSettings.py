@@ -263,6 +263,7 @@ def test_figma_settings(body: FigmaTestBody):
 
 class AIProviderSaveBody(BaseModel):
     name: str = ""
+    api_type: str = ""
     api_key: str = ""
     base_url: str = ""
     model: str = ""
@@ -274,6 +275,7 @@ class AIProviderSaveBody(BaseModel):
 class AIUsageSaveBody(BaseModel):
     copilot_enabled: bool = False
     case_execution_enabled: bool = False
+    case_execution_provider_id: str = ""
     mode: str = "local_first"
 
 
@@ -288,6 +290,7 @@ def save_ai_provider(provider_id: str, body: AIProviderSaveBody):
         row = ss.save_ai_provider_settings(
             provider_id,
             name=body.name,
+            api_type=body.api_type,
             api_key=body.api_key,
             base_url=body.base_url,
             model=body.model,
@@ -311,6 +314,7 @@ def save_ai_usage(body: AIUsageSaveBody):
     data = ss.save_ai_usage_settings(
         copilot_enabled=body.copilot_enabled,
         case_execution_enabled=body.case_execution_enabled,
+        case_execution_provider_id=body.case_execution_provider_id,
         mode=body.mode,
     )
     return {"code": 200, "msg": "已保存", "data": data}
@@ -318,12 +322,17 @@ def save_ai_usage(body: AIUsageSaveBody):
 
 @router.get("/ai/plan-prompt")
 def get_ai_plan_prompt():
-    from server.services.ai_plan_prompt import AI_PLAN_SYSTEM_PROMPT, AI_PLAN_USER_PROMPT_TEMPLATE
+    from server.services.ai_plan_prompt import (
+        AI_CASE_PLAN_SYSTEM_PROMPT,
+        AI_PLAN_SYSTEM_PROMPT,
+        AI_PLAN_USER_PROMPT_TEMPLATE,
+    )
 
     return {
         "code": 200,
         "data": {
             "system": AI_PLAN_SYSTEM_PROMPT,
+            "case_system": AI_CASE_PLAN_SYSTEM_PROMPT,
             "user_template": AI_PLAN_USER_PROMPT_TEMPLATE,
         },
     }
