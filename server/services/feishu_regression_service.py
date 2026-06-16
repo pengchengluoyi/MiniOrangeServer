@@ -30,6 +30,23 @@ from server.services.local.navigation.page_navigation_service import (
 
 TAG = "FeishuRegression"
 
+
+def _ai_execution_enabled() -> bool:
+    """用例执行是否走大模型模式。
+
+    AI 模式下，弹窗/页面就绪应由 AI 看截图自主规划（返回点同意/返回等 step），
+    因此执行器不再调用本地写死的前置逻辑（ensure_page_ready_before_action、
+    本地 overlay_guard 清弹窗、本地恢复步骤）。仅大模型未启用时才走本地前置。
+    """
+    try:
+        from server.services import system_settings_service as ss
+
+        return bool(ss.should_use_ai_planning("case_execution").get("enabled"))
+    except Exception as e:
+        SLog.w(TAG, f"ai execution gate check failed, fallback to local: {e}")
+        return False
+
+
 _RUNS: Dict[str, Dict[str, Any]] = {}
 _RUNS_MAX_ENTRIES = 10
 _RUNS_TTL_SEC = 6 * 3600
@@ -745,7 +762,13 @@ def _prepare_screen_for_verify(
     sn: str = "",
     platform: str = "android",
 ) -> List[Dict[str, Any]]:
-    """校验前运行阻塞弹窗守卫，避免挡住页面识别。"""
+    """校验前运行阻塞弹窗守卫，避免挡住页面识别。
+
+    AI 执行模式下不跑本地弹窗守卫——AI 断言器会基于截图自行理解当前页（含弹窗），
+    页面就绪也由 AI plan 自主处理，本地多通道清弹窗不再介入。
+    """
+    if _ai_execution_enabled():
+        return []
     from script.sleep import mSleep
     from server.services.local.overlay.overlay_guard_service import run_overlay_guard_until_clear
 
@@ -1237,7 +1260,7 @@ def _verify_step_expected(
         screen_text=screen_text,
         app_id=app_id,
         step_results=step_results,
-    ) and not fast_verify:
+    ) and not fast_verify and not _ai_execution_enabled():
         try:
             from server.core.database import SessionLocal
 
@@ -1507,7 +1530,11 @@ def _run_case_steps_sequential(
             delegated_guard = False
             pre_rec = None
         else:
-            if app_id_str and not context.get("skip_pre_action_recovery"):
+            if (
+                app_id_str
+                and not context.get("skip_pre_action_recovery")
+                and not _ai_execution_enabled()
+            ):
                 try:
                     from server.core.database import SessionLocal
 
@@ -1554,6 +1581,7 @@ def _run_case_steps_sequential(
             not action_ok
             and app_id_str
             and not run_id
+            and not _ai_execution_enabled()
             and not (
                 pre_action_recovery
                 and (
