@@ -184,6 +184,8 @@ async def lifespan(app: FastAPI):
     aiozc, srv_info = await register_mdns(10104)
 
     from server.websocket.device_manager import DeviceManager
+    # [ClawNode] 捕获主 event loop，供 RemoteEngine 从 worker 线程提交 WS 发送
+    DeviceManager().loop = asyncio.get_running_loop()
     asyncio.create_task(DeviceManager().monitor_heartbeats())
 
     from server.core.scheduler import SchedulerService

@@ -13,6 +13,10 @@ from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_
     handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list, \
     handle_get_run_context
 from server.websocket.routers.wCopilot import handle_copilot_chat, handle_copilot_execute
+from server.websocket.routers.wClawNode import (
+    handle_clawnode_register,
+    handle_clawnode_result,
+)
 from server.websocket.routers.wAppGraph import (
     handle_app_graph_list,
     handle_app_graph_create,
@@ -97,4 +101,11 @@ HANDLERS = {
     "start_stream": device_manager.handle_start_stream,
     "stop_stream": device_manager.handle_stop_stream,
     "device/control": device_manager.handle_control,
+
+    # [ClawNode] 直连节点：注册 + 结果回传（截图/动作结果）
+    "register_clawnode": handle_clawnode_register,
+    "SCREENSHOT_RESULT": handle_clawnode_result,
+    "ACTION_RESULT": handle_clawnode_result,
+    "STREAM_STATUS": handle_clawnode_result,
+    "STREAM_FRAME": handle_clawnode_result,
 }

@@ -138,6 +138,14 @@ class Manager(metaclass=SingletonMeta):
 
                 test_subject = DeviceService.pick_sn(device_type=effective)
 
+            # [ClawNode] 类型守卫：claw- 设备需用 RemoteEngine，与 adb 引擎互斥。
+            # 从 adb 切到 claw-（或反向）时强制重建，避免用错引擎 init_driver。
+            want_remote = bool(test_subject) and str(test_subject).startswith("claw-")
+            if self.MobileEngine is not None:
+                is_remote = type(self.MobileEngine).__name__ == "RemoteEngine"
+                if want_remote != is_remote:
+                    self.MobileEngine = None
+
             if self.MobileEngine:
                 prev = getattr(self.MobileEngine, "_serial", None) or getattr(
                     self.MobileEngine, "_test_subject", None
@@ -149,7 +157,11 @@ class Manager(metaclass=SingletonMeta):
                     self.MobileEngine.init_driver(test_subject)
                 return True
 
-            if effective == platform_code.IOS:
+            if want_remote:
+                from driver.tentacle.engine.mobile.mRemote import RemoteEngine
+
+                engine = RemoteEngine()
+            elif effective == platform_code.IOS:
                 from driver.tentacle.engine.mobile.mIOS import IOSEngine
 
                 engine = IOSEngine()

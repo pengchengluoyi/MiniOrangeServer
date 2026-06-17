@@ -41,8 +41,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
 
     async def process_message(payload: dict):
         """独立处理每条消息的任务函数"""
-        action = payload.get("action")
-        req_id = payload.get("req_id")
+        # [ClawNode] 兼容：ClawNode 的结果帧用 type 字段（SCREENSHOT_RESULT 等），
+        # 而非 action。这里做非破坏性回退——已有消息均带 action，or 分支不触发。
+        action = payload.get("action") or payload.get("type")
+        req_id = payload.get("req_id") or payload.get("trace_id")
         if action != "heartbeat" and action != "upload":
             SLog.i(TAG, payload)
 
@@ -70,7 +72,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
             current_token = SecurityManager.get_token()
             
             if current_token is None:
-                allowed_actions = ["get_server_info", "join_cluster", "get_node_status", "register", "heartbeat"]
+                allowed_actions = ["get_server_info", "join_cluster", "get_node_status", "register", "heartbeat", "register_clawnode"]
                 if action not in allowed_actions:
                     response.update({"code": 403, "msg": "Server not initialized. Please scan QR code first."})
                     async with send_lock:
@@ -99,17 +101,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
             if action in HANDLERS:
                 handler = HANDLERS[action]
                 result = None
-                
+
+                # [ClawNode] 同步 handler（如 copilot/chat）可能内部同步阻塞等待
+                # RemoteEngine 经 WS 往返；必须 offload 到线程池，否则阻塞 event loop
+                # 导致收不到设备回传 → 死锁。用 asyncio.to_thread（带 copy_context，
+                # 传播 regression_run_ctx 等 ContextVar）。async handler 仍走 await。
+                is_async = asyncio.iscoroutinefunction(handler)
+
                 # 兼容性调用：尝试传入 websocket，如果失败则回退到仅传入 data
                 try:
-                    result = await handler(websocket, data)
+                    if is_async:
+                        result = await handler(websocket, data)
+                    else:
+                        result = await asyncio.to_thread(handler, websocket, data)
                 except TypeError as e:
                     # 捕获参数数量不匹配的错误 (例如 handle_get_file 只接受 data)
                     if "positional argument" in str(e):
-                        result = await handler(data)
+                        if is_async:
+                            result = await handler(data)
+                        else:
+                            result = await asyncio.to_thread(handler, data)
                     else:
                         raise e
-                
+
                 if result:
                     response.update(result)
             else:

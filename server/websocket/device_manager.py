@@ -51,6 +51,14 @@ class DeviceManager:
     stream_sessions: Dict[str, str] = {}
     _stop_command_sent: set = set()
 
+    # [ClawNode] 直连节点的 SN 集合。标记哪些设备是 ClawNode 直连（说 ClawNode 方言），
+    # 使 control/stream 指令走翻译分支而非 PC Node 分支。是“连接对象身份”的载体。
+    direct_nodes: set = set()
+
+    # [ClawNode] 主 event loop 引用，供 RemoteEngine 从 worker 线程 run_coroutine_threadsafe。
+    # 在 main.py lifespan 启动时赋值。
+    loop = None
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DeviceManager, cls).__new__(cls)
@@ -83,8 +91,39 @@ class DeviceManager:
         
         # 3. 记录日志
         self._save_log(sn, "receive", "register", json.dumps(data))
-        
+
         return {"code": 200, "msg": "Registered successfully"}
+
+    def register_clawnode(self, websocket: WebSocket, data: dict):
+        """
+        [ClawNode] 注册直连节点。
+
+        与 register 的区别：额外把 SN 记入 direct_nodes 集合，标记其为
+        ClawNode 直连身份。落库复用 _register_device（device_type 默认
+        android_direct），因此自动出现在 get_device_list 中。
+        """
+        sn = data.get("sn")
+        if not sn:
+            return
+        self.active_connections[sn] = websocket
+        self.direct_nodes.add(sn)
+        # 默认类型标记为 android_direct，便于前端/日志区分直连节点
+        if not data.get("type"):
+            data = {**data, "type": "android_direct"}
+        self._register_device(sn, data)
+        self._save_log(sn, "receive", "register_clawnode", json.dumps(data))
+
+    async def broadcast_to_observers(self, payload: dict, exclude: WebSocket = None):
+        """[ClawNode] 把消息广播给所有连接与观察者（截图/动作结果回传给前端）。"""
+        msg_str = json.dumps(payload)
+        targets = set(self.active_connections.values()) | self.observers
+        for ws in targets:
+            if ws is exclude:
+                continue
+            try:
+                await ws.send_text(msg_str)
+            except Exception:
+                pass
 
     async def heartbeat(self, websocket: WebSocket, data: dict):
         """处理心跳 (对应 wsMap 中的 heartbeat)"""
@@ -108,6 +147,7 @@ class DeviceManager:
             await self._cleanup_on_disconnect(sn)
             if sn in self._stop_command_sent:
                 self._stop_command_sent.remove(sn)  # 清理标记
+            self.direct_nodes.discard(sn)  # [ClawNode] 清理直连标记
             if sn in self.active_connections:
                 del self.active_connections[sn]
             self._update_device_status(sn, "offline")
@@ -333,6 +373,12 @@ class DeviceManager:
         if not target_ws:
             return {"code": 404, "msg": "Target device offline"}
 
+        # [ClawNode] 直连节点：直接让设备自身开启推流（无需 PC + scrcpy）
+        if device_sn in self.direct_nodes:
+            from server.websocket.routers.wClawNode import translate_stream_to_clawnode
+            await self._safe_send(target_ws, translate_stream_to_clawnode(True, data))
+            return {"code": 200, "msg": "Stream command sent (clawnode)", "req_id": req_id}
+
         # 发送指令给 PC Node，让它开始推流
         cmd = {
             "type": "command",
@@ -363,11 +409,16 @@ class DeviceManager:
 
         target_ws = self.active_connections.get(device_sn)
         if target_ws:
+            # [ClawNode] 直连节点：发 STOP_STREAM 方言
+            if device_sn in self.direct_nodes:
+                from server.websocket.routers.wClawNode import translate_stream_to_clawnode
+                await self._safe_send(target_ws, translate_stream_to_clawnode(False, data))
+                return {"code": 200, "msg": "Stop command sent (clawnode)", "req_id": req_id}
             cmd = {"type": "command", "command": "stop_stream", "params": {"viewer_sn": viewer_sn}}
             try:
                 await target_ws.send_text(json.dumps(cmd))
             except: pass
-        
+
         return {"code": 200, "msg": "Stop command sent", "req_id": req_id}
 
     async def handle_binary_stream(self, websocket: WebSocket, data: bytes):
@@ -449,6 +500,16 @@ class DeviceManager:
         if not target_ws:
             return {"code": 404, "msg": "Device offline"}
 
+        # [ClawNode] 直连节点：翻译成 ClawNode 方言后裸发，即发即回
+        if target_sn in self.direct_nodes:
+            from server.websocket.routers.wClawNode import translate_control_to_clawnode
+            translated = translate_control_to_clawnode(payload or {})
+            if translated is None:
+                return {"code": 400, "msg": "action not supported by clawnode"}
+            await self._safe_send(target_ws, translated)
+            return {"code": 200, "msg": "forwarded (clawnode)"}
+
+        # ↓↓↓ 原有 PC Node 逻辑，原封不动
         # 转发给设备 (iOS/Android)
         msg = {
             "type": "command",

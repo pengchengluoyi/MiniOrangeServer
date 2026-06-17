@@ -22,6 +22,11 @@ class DeviceOfflineError(RuntimeError):
     """ADB 设备不可见（断连、未授权等）。"""
 
 
+def _is_clawnode(sn: Optional[str]) -> bool:
+    """ClawNode 直连设备：SN 以 claw- 开头，不经 adb。"""
+    return bool(sn) and str(sn).startswith("claw-")
+
+
 def list_connected_adb_serials() -> list:
     """本机 adb devices 中 state=device 的序列号。"""
     try:
@@ -44,6 +49,9 @@ def resolve_mobile_serial(node_sn: str, platform: str = "android") -> str:
     - 优先 adb devices 里在线的真机；
     - PC 节点（Driver 客户端 SN）不能当作 adb -s 使用。
     """
+    # [ClawNode] 直连设备不走 adb，原样返回
+    if _is_clawnode(node_sn):
+        return str(node_sn)
     adb_serials = list_connected_adb_serials()
     if node_sn and node_sn in adb_serials:
         return str(node_sn)
@@ -90,6 +98,9 @@ def wait_for_adb_device(
     interval: float = 0.8,
 ) -> str:
     """等待 hub/adb 设备上线（WS 心跳先于 adb 出现时有用）。"""
+    # [ClawNode] 直连设备无需等待 adb
+    if _is_clawnode(node_sn):
+        return str(node_sn)
     deadline = time.time() + max(0.5, timeout)
     last_sn = ""
     while time.time() < deadline:
@@ -111,6 +122,9 @@ def ensure_adb_device_online(
     wait_timeout: float = 12.0,
 ) -> str:
     """设备离线时抛错；wait=True 时先短暂等待 adb 出现。"""
+    # [ClawNode] 直连设备始终视为在线（连接状态由 WS active_connections 维护）
+    if _is_clawnode(node_sn):
+        return str(node_sn)
     if wait:
         return wait_for_adb_device(node_sn, platform, timeout=wait_timeout)
     mobile_sn = resolve_mobile_serial(node_sn, platform)
@@ -236,7 +250,9 @@ def bootstrap_mobile_engine(
     })
 
     mgr = Manager()
-    if mgr.MobileEngine:
+    # [ClawNode] 直连设备跳过此处的就地复用，交由 manager.apply_engine 的类型守卫
+    # 统一处理（避免对 stale 的 MAdbEngine 误调 init_driver("claw-...")）。
+    if mgr.MobileEngine and not _is_clawnode(mobile_sn):
         prev = getattr(mgr.MobileEngine, "_serial", None) or getattr(
             mgr.MobileEngine, "_test_subject", None
         )
