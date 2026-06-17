@@ -2203,7 +2203,7 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
     if not isinstance(step, dict):
         return None
     tool_payload: Dict[str, Any] = {}
-    kind = str(step.get("kind") or step.get("type") or "").strip().lower()
+    kind = str(step.get("kind") or step.get("type") or step.get("action") or "").strip().lower()
     summary = str(step.get("summary") or step.get("reason") or kind or "step")
     if step.get("tool_code"):
         tool_payload = step
@@ -2221,6 +2221,11 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
             kind = "click"
         elif "input" in tool_code or "type" in tool_code:
             kind = "input"
+    if not kind and _num(step.get("x")) > 0 and _num(step.get("y")) > 0:
+        if str(step.get("text") or step.get("value") or "").strip():
+            kind = "input"
+        else:
+            kind = "click"
     if kind in {"tap", "click"}:
         label = str(step.get("label") or step.get("target") or step.get("text") or "").strip()
         params = tool_payload.get("parameters") if isinstance(tool_payload.get("parameters"), dict) else {}
@@ -2374,30 +2379,229 @@ def _normalize_ai_step(step: Dict[str, Any], *, require_visual_coordinates: bool
     return None
 
 
-def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+def _repair_ai_plan_json_text(text: str) -> str:
+    """Fix common Volcengine/Doubao JSON typos before parsing."""
     raw = (text or "").strip()
     if not raw:
+        return raw
+    # Doubao 偶发：{"steps":[...]},"auto_run":true} 多一个 }
+    raw = re.sub(
+        r'(\]\s*)\}\s*,(\s*"(?:auto_run|blockers|navigate)"\s*:)',
+        r'\1,\2',
+        raw,
+        count=1,
+    )
+    return raw
+
+
+def _extract_balanced_json_slice(raw: str, start: int) -> Optional[str]:
+    """从 start 处的 `{` 起截取括号平衡的 JSON 对象。"""
+    if start < 0 or start >= len(raw) or raw[start] != "{":
         return None
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        pass
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            obj = json.loads(raw[start : end + 1])
-            return obj if isinstance(obj, dict) else None
-        except Exception:
-            return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    return raw[start : idx + 1]
     return None
 
 
-def _build_ai_screen_context(sn: Optional[str], platform: str) -> Dict[str, Any]:
+def _score_ai_plan_dict(obj: Dict[str, Any]) -> int:
+    """优先选择含可执行 steps（尤其带坐标）的 Plan JSON。"""
+    if not isinstance(obj, dict):
+        return -1
+    score = 0
+    if obj.get("reply"):
+        score += 5
+    steps = obj.get("steps")
+    if isinstance(steps, list):
+        score += 10
+        if steps:
+            score += 25
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+            if kind in {"click", "tap", "input", "swipe", "scroll"}:
+                score += 8
+            if _num(item.get("x")) > 0 and _num(item.get("y")) > 0:
+                score += 40
+                break
+    return score
+
+
+def _iter_json_object_candidates(text: str):
+    """Yield JSON object substrings; Doubao thinking 模型常在推理中嵌入多段 JSON。"""
+    raw = (text or "").strip()
+    if not raw:
+        return
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    seen: set[str] = set()
+
+    def _emit(candidate: str):
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            return
+        seen.add(candidate)
+        yield candidate
+
+    yield from _emit(raw)
+    yield from _emit(_repair_ai_plan_json_text(raw))
+    # 截断 JSON 后的中文推理/解释（Doubao / Seed 2.0 常见）
+    for sep in (
+        "\n我现在",
+        "\n我需要",
+        "\n首先，",
+        "\n接下来，",
+        "\n所以：",
+        "\n用户现在",
+        "\n首先看",
+        "\n对，",
+        "。所以：",
+        "。所以:",
+    ):
+        head = raw.split(sep, 1)[0].strip()
+        if head and head != raw:
+            yield from _emit(head)
+            yield from _emit(_repair_ai_plan_json_text(head))
+    # 每个 {"reply" 锚点单独平衡截取（思考链里最终 Plan 常在后面）
+    for m in re.finditer(r'\{"reply"\s*:', raw):
+        sub = _extract_balanced_json_slice(raw, m.start())
+        if sub:
+            yield from _emit(sub)
+            yield from _emit(_repair_ai_plan_json_text(sub))
+    # 每个 `{` 起点尝试平衡截取
+    for start in range(len(raw)):
+        if raw[start] != "{":
+            continue
+        sub = _extract_balanced_json_slice(raw, start)
+        if sub and len(sub) > 12:
+            yield from _emit(sub)
+            yield from _emit(_repair_ai_plan_json_text(sub))
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for candidate in _iter_json_object_candidates(text):
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        score = _score_ai_plan_dict(obj)
+        if score > best_score:
+            best_score = score
+            best = obj
+    return best
+
+
+def _coerce_ai_plan_steps(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize plan shape: steps array, or promote a lone top-level visual step."""
+    plan = dict(raw_plan or {})
+    steps = plan.get("steps")
+    if isinstance(steps, dict):
+        plan["steps"] = [steps]
+        return plan
+    if isinstance(steps, list) and steps:
+        return plan
+    visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
+    kind = str(plan.get("kind") or plan.get("type") or plan.get("action") or "").strip().lower()
+    if kind in visual_kinds or _num(plan.get("x")) > 0 or _num(plan.get("y")) > 0:
+        step = {
+            k: v
+            for k, v in plan.items()
+            if k
+            not in {
+                "reply",
+                "display_reply",
+                "auto_run",
+                "blockers",
+                "navigate",
+                "steps",
+                "plan_complete",
+            }
+        }
+        if kind and not step.get("kind") and not step.get("type"):
+            step["kind"] = kind
+        plan["steps"] = [step]
+    return plan
+
+
+def _openai_message_text(message: Any) -> str:
+    """Normalize OpenAI-compatible assistant message text (string, parts, or reasoning)."""
+    if not isinstance(message, dict):
+        return ""
+    chunks: List[str] = []
+    content = message.get("content")
+    if isinstance(content, str):
+        if content.strip():
+            chunks.append(content.strip())
+    elif isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text")
+            if text is None and block.get("type") == "text":
+                text = block.get("content")
+            if text:
+                chunks.append(str(text).strip())
+    for key in ("reasoning_content", "reasoning"):
+        extra = message.get(key)
+        if isinstance(extra, str) and extra.strip():
+            chunks.append(extra.strip())
+    return "\n".join(chunks).strip()
+
+
+def _parse_openai_chat_completion(resp_json: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    choice = (resp_json.get("choices") or [{}])[0] if isinstance(resp_json, dict) else {}
+    if not isinstance(choice, dict):
+        choice = {}
+    message = choice.get("message") or {}
+    finish_reason = str(choice.get("finish_reason") or "")
+    text = _openai_message_text(message)
+    parsed = _extract_json_object(text)
+    if not parsed and isinstance(message, dict):
+        for key in ("reasoning_content", "reasoning"):
+            alt = message.get(key)
+            if isinstance(alt, str) and alt.strip():
+                parsed = _extract_json_object(alt)
+                if parsed:
+                    break
+    meta = {
+        "finish_reason": finish_reason,
+        "content_len": len(text),
+        "content_preview": text[:800] if text else "",
+    }
+    return parsed, meta
+
+
+def _build_ai_screen_context(
+    sn: Optional[str],
+    platform: str,
+    provider_id: Optional[str] = None,
+) -> Dict[str, Any]:
     if not sn:
         return {}
     try:
@@ -2405,6 +2609,7 @@ def _build_ai_screen_context(sn: Optional[str], platform: str) -> Dict[str, Any]
 
         from server.core.database import APP_DATA_DIR
         from server.services.shared.screenshot.regression_capture import capture_device_screenshot
+        from server.services.system_settings_service import get_ai_plan_compress_ratio
 
         static_path = capture_device_screenshot(
             str(sn),
@@ -2420,30 +2625,105 @@ def _build_ai_screen_context(sn: Optional[str], platform: str) -> Dict[str, Any]
         local_path = os.path.join(APP_DATA_DIR, "uploads", name)
         if not os.path.isfile(local_path):
             return {"image_path": static_path}
+        ratio = get_ai_plan_compress_ratio(provider_id)
+        compress = ratio > 1.0
         with Image.open(local_path) as img:
             img = img.convert("RGB")
             original_w, original_h = img.size
-            max_side = 768
-            scale = min(1.0, max_side / float(max(original_w, original_h) or max_side))
-            if scale < 1:
-                img = img.resize((max(1, int(original_w * scale)), max(1, int(original_h * scale))))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=68, optimize=True)
+            if compress:
+                preview_w = max(1, round(original_w / ratio))
+                preview_h = max(1, round(original_h / ratio))
+                img = img.resize((preview_w, preview_h))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=68, optimize=True)
+            else:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=92, optimize=True)
             encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+            preview_w, preview_h = img.size
             return {
                 "image_path": static_path,
                 "width": original_w,
                 "height": original_h,
-                "preview_width": img.size[0],
-                "preview_height": img.size[1],
+                "preview_width": preview_w,
+                "preview_height": preview_h,
+                "compress_image": compress,
+                "compress_ratio": ratio if compress else 1.0,
                 "mime_type": "image/jpeg",
                 "base64": encoded,
                 "data_url": f"data:image/jpeg;base64,{encoded}",
-                "note": "坐标请基于 preview_width/preview_height（发给模型的截图像素尺寸）返回，Server 会自动映射到设备 width/height。",
+                "note": (
+                    "坐标请基于 preview_width/preview_height（发给模型的截图像素尺寸）返回，"
+                    f"Server 会按 compress_ratio={ratio if compress else 1.0} 映射到设备 width/height。"
+                    "点击点应对准目标控件可点击区域中心，不要落在系统状态栏或屏幕外缘。"
+                ),
             }
     except Exception as e:
         SLog.w(TAG, f"build AI screen context failed: {e}")
         return {}
+
+
+def _collect_ai_preview_coord_violations(
+    steps: Any,
+    screen: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return model coords that fall outside preview_width × preview_height (pre-scale)."""
+    if not isinstance(steps, list) or not screen:
+        return []
+    prev_w = int(screen.get("preview_width") or 0)
+    prev_h = int(screen.get("preview_height") or 0)
+    orig_w = int(screen.get("width") or 0)
+    orig_h = int(screen.get("height") or 0)
+    if prev_w <= 0 or prev_h <= 0:
+        return []
+    if prev_w == orig_w and prev_h == orig_h:
+        return []
+
+    visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
+    violations: List[Dict[str, Any]] = []
+
+    def _check_point(
+        *,
+        step_index: int,
+        kind: str,
+        x_key: str,
+        y_key: str,
+        step: Dict[str, Any],
+    ) -> None:
+        x = _num(step.get(x_key))
+        y = _num(step.get(y_key))
+        if x <= 0 and y <= 0:
+            return
+        issues: List[str] = []
+        if x <= 0 or x > prev_w:
+            issues.append(f"{x_key}={x} 不在 [1,{prev_w}]")
+        if y <= 0 or y > prev_h:
+            issues.append(f"{y_key}={y} 不在 [1,{prev_h}]")
+        if issues:
+            violations.append(
+                {
+                    "step_index": step_index,
+                    "kind": kind,
+                    "point": x_key.replace("_x", "").replace("start_", "start").replace("end_", "end"),
+                    "x": x,
+                    "y": y,
+                    "preview": {"width": prev_w, "height": prev_h},
+                    "issues": issues,
+                }
+            )
+
+    for step_index, item in enumerate(steps):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("type") or item.get("action") or "").strip().lower()
+        if kind not in visual_kinds:
+            continue
+        if kind in {"click", "tap", "input", "type", "text"}:
+            _check_point(step_index=step_index, kind=kind, x_key="x", y_key="y", step=item)
+        elif kind in {"swipe", "scroll"}:
+            _check_point(step_index=step_index, kind=kind, x_key="start_x", y_key="start_y", step=item)
+            _check_point(step_index=step_index, kind=kind, x_key="end_x", y_key="end_y", step=item)
+    return violations
 
 
 def _scale_ai_plan_coordinates(
@@ -2468,21 +2748,28 @@ def _scale_ai_plan_coordinates(
             "reason": "same_dimensions",
             "device": {"width": orig_w, "height": orig_h},
             "preview": {"width": prev_w, "height": prev_h},
+            "compress_image": bool(screen.get("compress_image")),
+            "compress_ratio": float(screen.get("compress_ratio") or 1.0),
         }
 
-    sx = orig_w / float(prev_w)
-    sy = orig_h / float(prev_h)
+    ratio = float(screen.get("compress_ratio") or 0)
+    use_ratio_scale = bool(screen.get("compress_image")) and ratio > 1.0
+    sx = ratio if use_ratio_scale else (orig_w / float(prev_w))
+    sy = ratio if use_ratio_scale else (orig_h / float(prev_h))
+
+    def _scale_axis(value: float, *, orig_max: int, scale: float) -> int:
+        v = _num(value)
+        if v <= 0:
+            return 0
+        return max(1, min(orig_max, int(round(v * scale))))
 
     def _scale_point(x_key: str, y_key: str, step: Dict[str, Any]) -> bool:
         x = _num(step.get(x_key))
         y = _num(step.get(y_key))
         if x <= 0 or y <= 0:
             return False
-        # 超出 preview 范围则视为已是设备坐标，避免二次放大。
-        if x > prev_w + 8 or y > prev_h + 8:
-            return False
-        step[x_key] = max(1, min(orig_w, int(round(x * sx))))
-        step[y_key] = max(1, min(orig_h, int(round(y * sy))))
+        step[x_key] = _scale_axis(x, orig_max=orig_w, scale=sx)
+        step[y_key] = _scale_axis(y, orig_max=orig_h, scale=sy)
         return True
 
     scaled_steps: List[Dict[str, Any]] = []
@@ -2528,6 +2815,8 @@ def _scale_ai_plan_coordinates(
         "applied": True,
         "device": {"width": orig_w, "height": orig_h},
         "preview": {"width": prev_w, "height": prev_h},
+        "compress_image": bool(screen.get("compress_image")),
+        "compress_ratio": ratio if use_ratio_scale else None,
         "scale_x": round(sx, 6),
         "scale_y": round(sy, 6),
         "samples": samples[:5],
@@ -2536,6 +2825,30 @@ def _scale_ai_plan_coordinates(
 
 def _screen_context_public(screen: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in (screen or {}).items() if k not in {"base64", "data_url"}}
+
+
+def _screen_context_for_llm(screen: Dict[str, Any]) -> Dict[str, Any]:
+    """Screen metadata sent to LLM — coordinate space must match the attached preview image only."""
+    if not screen:
+        return {}
+    base = _screen_context_public(screen)
+    if not base.get("compress_image"):
+        return base
+    pw = int(base.get("preview_width") or 0)
+    ph = int(base.get("preview_height") or 0)
+    if pw <= 0 or ph <= 0:
+        return base
+    return {
+        "image_path": base.get("image_path"),
+        "width": pw,
+        "height": ph,
+        "mime_type": base.get("mime_type"),
+        "note": (
+            f"附图即为 {pw}×{ph} 像素；screen.width={pw}、screen.height={ph} 是坐标唯一依据。"
+            f"x∈[1,{pw}]、y∈[1,{ph}]，超出则拒绝执行。"
+            "禁止按其他分辨率或比例换算坐标。"
+        ),
+    }
 
 
 def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, str]]:
@@ -2554,10 +2867,74 @@ def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, 
         return []
 
 
+def _build_preview_coord_correction_message(
+    violations: List[Dict[str, Any]],
+    screen: Optional[Dict[str, Any]],
+) -> str:
+    pw = int((screen or {}).get("preview_width") or 0)
+    ph = int((screen or {}).get("preview_height") or 0)
+    issue_lines: List[str] = []
+    for item in violations[:3]:
+        issue_lines.extend(str(x) for x in (item.get("issues") or []))
+    issues_text = "；".join(issue_lines) or "坐标越界"
+    return (
+        f"【坐标错误，必须重算】上次返回无效：{issues_text}。"
+        f"附图宽 {pw}px、高 {ph}px；坐标必须满足 x∈[1,{pw}]、y∈[1,{ph}]。"
+        "直接在附图像素上定位目标中心，禁止用设备分辨率、禁止乘除比例。"
+        "请只返回修正后的一个 JSON。"
+    )
+
+
+def _screen_coord_space_hint(screen: Optional[Dict[str, Any]]) -> str:
+    """Explicit coordinate space for the current screenshot (Volcengine only)."""
+    if not screen:
+        return ""
+    pw = int(screen.get("preview_width") or 0)
+    ph = int(screen.get("preview_height") or 0)
+    w = int(screen.get("width") or 0)
+    h = int(screen.get("height") or 0)
+    if pw <= 0 or ph <= 0:
+        return ""
+    if pw == w and ph == h:
+        return (
+            f"【本次坐标系】截图像素 {pw}×{ph}；"
+            f"x∈[1,{pw}]、y∈[1,{ph}]，直接返回附图上的像素坐标。"
+        )
+    return (
+        f"【本次坐标系】截图像素 {pw}×{ph}（附图即为该尺寸，勿用其他 width/height）；"
+        f"x∈[1,{pw}]、y∈[1,{ph}]，超出则 Server 拒绝执行。"
+    )
+
+
+def _screen_coord_examples_hint(screen: Optional[Dict[str, Any]]) -> str:
+    """Dimension-matched click examples so static y=2550 does not confuse compressed preview."""
+    if not screen:
+        return ""
+    pw = int(screen.get("preview_width") or 0)
+    ph = int(screen.get("preview_height") or 0)
+    if pw <= 0 or ph <= 0:
+        return ""
+    top_y = max(72, int(ph * 0.08))
+    bottom_y = max(top_y + 24, int(ph * 0.97))
+    mid_y = int(ph * 0.52)
+    right_x = max(1, int(pw * 0.88))
+    left_x = max(1, int(pw * 0.12))
+    mid_x = max(1, int(pw * 0.50))
+    return (
+        f"【本次坐标示例（preview {pw}×{ph}，禁止照抄其他分辨率的数字）】\n"
+        f'- 右上角文字：{{"kind":"click","x":{right_x},"y":{top_y},"coords_explicit":true,"label":"访客浏览"}}\n'
+        f'- 底部导航左侧：{{"kind":"click","x":{left_x},"y":{bottom_y},"coords_explicit":true,"label":"首页"}}\n'
+        f'- 页面中部按钮：{{"kind":"click","x":{mid_x},"y":{mid_y},"coords_explicit":true,"label":"一键登录"}}\n'
+    )
+
+
 def _append_openai_image(messages: List[Dict[str, Any]], screen: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not screen.get("data_url"):
         return messages
     out = list(messages)
+    # Plan 截图尺寸已由 Server 控制；detail=low 会让部分厂商再次缩小图片，
+    # 导致模型所见分辨率与 preview_width/height 不一致，坐标会系统性偏移。
+    image_detail = "high"
     for idx in range(len(out) - 1, -1, -1):
         if out[idx].get("role") == "user":
             text = str(out[idx].get("content") or "")
@@ -2565,7 +2942,7 @@ def _append_openai_image(messages: List[Dict[str, Any]], screen: Dict[str, Any])
                 **out[idx],
                 "content": [
                     {"type": "text", "text": text},
-                    {"type": "image_url", "image_url": {"url": screen["data_url"], "detail": "low"}},
+                    {"type": "image_url", "image_url": {"url": screen["data_url"], "detail": image_detail}},
                 ],
             }
             return out
@@ -2586,41 +2963,73 @@ def _call_openai_compatible_plan(
     platform: str,
     context: Dict[str, Any],
     screen: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    from server.services.ai.plan.prompt import build_ai_plan_messages
+    extra_user_messages: Optional[List[Dict[str, str]]] = None,
+) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    from server.services.ai.plan.prompt import (
+        _is_volcengine_doubao_provider,
+        build_ai_plan_messages,
+        volcengine_chat_payload_extras,
+    )
 
     base = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
     model = str(provider.get("model") or "").strip()
     if not base or not api_key or not model:
-        return None
+        return None, {}
     ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
     messages = build_ai_plan_messages(
         instruction=instruction,
         platform=platform,
         channel=channel,
         context=ctx_text,
+        provider_id=str(provider.get("id") or ""),
+        model=model,
     )
     messages.append(
         {
             "role": "user",
             "content": (
-                "请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
+                "请只返回 JSON，不要 Markdown。坐标基于附图 screen.width×screen.height（像素）。格式："
                 "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
                 "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
             ),
         }
     )
+    if _is_volcengine_doubao_provider(str(provider.get("id") or ""), model):
+        for hint_fn in (_screen_coord_space_hint, _screen_coord_examples_hint):
+            hint = hint_fn(screen)
+            if hint:
+                messages.append({"role": "user", "content": hint})
+    for extra in extra_user_messages or []:
+        if isinstance(extra, dict) and extra.get("content"):
+            messages.append({"role": "user", "content": str(extra["content"])})
     messages = _append_openai_image(messages, screen or {})
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        **volcengine_chat_payload_extras(provider_id=str(provider.get("id") or ""), model=model),
+    }
     resp = requests.post(
         f"{base}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": model, "messages": messages, "temperature": 0.1},
+        json=payload,
         timeout=_ai_plan_request_timeout(channel),
     )
     resp.raise_for_status()
-    content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    return _extract_json_object(content)
+    resp_json = resp.json()
+    raw_plan, parse_meta = _parse_openai_chat_completion(resp_json)
+    if not raw_plan:
+        img_b64_len = len((screen or {}).get("base64") or "")
+        SLog.w(
+            TAG,
+            f"AI plan JSON parse failed provider={provider.get('id')} channel={channel} "
+            f"finish={parse_meta.get('finish_reason')!r} content_len={parse_meta.get('content_len')} "
+            f"compress={(screen or {}).get('compress_image')} image_b64_len={img_b64_len} "
+            f"preview={parse_meta.get('content_preview')!r}",
+        )
+    return raw_plan, parse_meta
 
 
 def _call_anthropic_compatible_plan(
@@ -2853,9 +3262,9 @@ def verify_expectation_with_ai(
     ctx = dict(context or {})
     platform = str(ctx.get("platform") or platform or "android").lower()
     llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
-    screen = _build_ai_screen_context(sn, platform)
+    screen = _build_ai_screen_context(sn, platform, provider_id=selected_provider_id)
     if screen:
-        llm_ctx["screen"] = _screen_context_public(screen)
+        llm_ctx["screen"] = _screen_context_for_llm(screen)
 
     instruction = f"验证预期：{exp}"
     ctx_text = json.dumps({**llm_ctx, "sn": sn}, ensure_ascii=False, default=str)[:4000]
@@ -2959,15 +3368,25 @@ def verify_expectation_with_ai(
             base = str(provider.get("base_url") or "").rstrip("/")
             api_key = str(provider.get("api_key") or "").strip()
             model = str(provider.get("model") or "").strip()
+            from server.services.ai.plan.prompt import volcengine_chat_payload_extras
+
             resp = requests.post(
                 f"{base}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": messages, "temperature": 0.1},
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": 2048,
+                    **volcengine_chat_payload_extras(
+                        provider_id=str(provider.get("id") or ""),
+                        model=model,
+                    ),
+                },
                 timeout=_ai_plan_request_timeout("case_execution"),
             )
             resp.raise_for_status()
-            content = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-            raw = _extract_json_object(content)
+            raw, _parse_meta = _parse_openai_chat_completion(resp.json())
     except Exception as e:
         err_info = _llm_error_info(e, provider)
         SLog.w(TAG, f"AI assert failed provider={provider.get('id')}: {_sanitize_llm_error(e)}")
@@ -3042,37 +3461,6 @@ def verify_expectation_with_ai(
     }
 
 
-def _prepare_case_screen_for_ai_plan(
-    sn: Optional[str],
-    platform: str,
-    context: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Clear blocking overlays before case AI screenshot."""
-    if not sn:
-        return {"attempted": False, "reason": "no_device"}
-    icon_targets = (context or {}).get("icon_targets")
-    if icon_targets is not None and not isinstance(icon_targets, list):
-        icon_targets = None
-    try:
-        from server.services.local.overlay.overlay_guard_service import run_overlay_guard_on_device
-
-        guard = run_overlay_guard_on_device(
-            str(sn),
-            platform,
-            icon_targets=icon_targets,
-            max_rounds=4,
-        )
-        return {
-            "attempted": bool(guard.get("attempted")),
-            "ok": bool(guard.get("ok")),
-            "msg": guard.get("msg") or "",
-            "rounds": guard.get("rounds") or 0,
-        }
-    except Exception as e:
-        SLog.w(TAG, f"overlay guard before case AI plan failed: {e}")
-        return {"attempted": False, "ok": False, "error": str(e)}
-
-
 def _plan_message_ai(
     text: str,
     *,
@@ -3092,20 +3480,12 @@ def _plan_message_ai(
     known_apps = _ai_known_apps_context(platform)
     if known_apps:
         ctx["known_apps"] = known_apps
-    if sn and normalized_channel in case_channels:
-        guard_meta = _prepare_case_screen_for_ai_plan(sn, platform, ctx)
-        ctx["overlay_guard_before_plan"] = guard_meta
-        if guard_meta.get("attempted"):
-            SLog.i(
-                TAG,
-                f"case AI plan overlay guard ok={guard_meta.get('ok')} "
-                f"rounds={guard_meta.get('rounds')} msg={guard_meta.get('msg')!r}",
-            )
     llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
-    screen = _build_ai_screen_context(sn, platform)
+    screen = _build_ai_screen_context(sn, platform, provider_id=provider_id)
     if screen:
-        llm_ctx["screen"] = _screen_context_public(screen)
+        llm_ctx["screen"] = _screen_context_for_llm(screen)
     provider = ss.get_ai_provider_credentials(provider_id)
+    plan_parse_meta: Dict[str, Any] = {}
     try:
         api_type = str(provider.get("api_type") or "").strip().lower()
         base_url = str(provider.get("base_url") or "")
@@ -3128,7 +3508,7 @@ def _plan_message_ai(
                 screen=screen,
             )
         else:
-            raw_plan = _call_openai_compatible_plan(
+            raw_plan, plan_parse_meta = _call_openai_compatible_plan(
                 provider=provider,
                 instruction=text,
                 channel=channel,
@@ -3150,14 +3530,151 @@ def _plan_message_ai(
             "ai_error_info": err_info,
         }
     if not raw_plan:
+        compress_on = bool((screen or {}).get("compress_image", True))
+        hint = ""
+        if not compress_on:
+            hint = "（已关闭 Plan 截图压缩，原图较大时部分模型可能返回空内容，可尝试开启压缩）"
         SLog.w(
             TAG,
             f"AI plan empty JSON provider={provider.get('id')} channel={channel} "
-            f"instruction={text[:120]!r}",
+            f"instruction={text[:120]!r} compress={compress_on}",
         )
-        return None
+        return {
+            "reply": f"大模型未返回可解析的 Plan JSON{hint}",
+            "steps": [],
+            "navigate": None,
+            "auto_run": False,
+            "planner": {
+                "mode": "ai",
+                "provider_id": provider.get("id"),
+                "model": provider.get("model"),
+                "channel": channel,
+                "reason": "json_parse_failed",
+            },
+            "ai_debug": {
+                "provider": provider.get("id"),
+                "model": provider.get("model"),
+                "screen": _screen_context_public(screen or {}),
+                "compress_image": compress_on,
+                "parse_failed": True,
+                "parse_meta": plan_parse_meta,
+                "raw_content_preview": plan_parse_meta.get("content_preview"),
+            },
+        }
+    raw_plan = _coerce_ai_plan_steps(raw_plan)
     raw_plan_before_scale = json.loads(json.dumps(raw_plan, ensure_ascii=False, default=str))
-    raw_plan, coordinate_scale = _scale_ai_plan_coordinates(raw_plan, screen)
+    coord_retry_log: List[Dict[str, Any]] = []
+    openai_compatible = not (
+        api_type == "gemini"
+        or provider.get("id") == "google"
+        or "generativelanguage.googleapis.com" in base_url
+        or api_type == "anthropic"
+        or provider.get("id") in {"anthropic", "umodelverse"}
+    )
+    preview_coord_violations = _collect_ai_preview_coord_violations(
+        raw_plan_before_scale.get("steps"),
+        screen,
+    )
+    coord_retry_log.append(
+        {
+            "attempt": 1,
+            "violations": preview_coord_violations,
+            "raw_plan": raw_plan_before_scale,
+        }
+    )
+    if preview_coord_violations and openai_compatible:
+        correction = _build_preview_coord_correction_message(preview_coord_violations, screen)
+        SLog.w(
+            TAG,
+            f"AI plan preview coords out of bounds, retrying once channel={channel} "
+            f"violations={preview_coord_violations[:2]}",
+        )
+        try:
+            retry_plan, retry_meta = _call_openai_compatible_plan(
+                provider=provider,
+                instruction=text,
+                channel=channel,
+                platform=platform,
+                context={**llm_ctx, "sn": sn},
+                screen=screen,
+                extra_user_messages=[{"content": correction}],
+            )
+            plan_parse_meta = {**plan_parse_meta, "coord_retry_parse_meta": retry_meta}
+            if retry_plan:
+                raw_plan = _coerce_ai_plan_steps(retry_plan)
+                raw_plan_before_scale = json.loads(
+                    json.dumps(raw_plan, ensure_ascii=False, default=str)
+                )
+                preview_coord_violations = _collect_ai_preview_coord_violations(
+                    raw_plan_before_scale.get("steps"),
+                    screen,
+                )
+                coord_retry_log.append(
+                    {
+                        "attempt": 2,
+                        "violations": preview_coord_violations,
+                        "raw_plan": raw_plan_before_scale,
+                        "correction": correction,
+                    }
+                )
+        except Exception as e:
+            SLog.w(TAG, f"AI plan coord correction retry failed: {e}")
+            coord_retry_log.append({"attempt": 2, "error": str(e)})
+    if preview_coord_violations:
+        first = preview_coord_violations[0]
+        issues_text = "；".join(first.get("issues") or [])
+        SLog.w(
+            TAG,
+            f"AI plan preview coords out of bounds channel={channel} "
+            f"violations={preview_coord_violations[:3]}",
+        )
+        return {
+            "reply": (
+                "大模型返回的坐标超出附图范围，已拒绝执行。"
+                f"（附图 {first.get('preview', {}).get('width')}×"
+                f"{first.get('preview', {}).get('height')}，{issues_text}）"
+            ),
+            "display_reply": "坐标超出附图范围",
+            "steps": [],
+            "navigate": None,
+            "sn": sn,
+            "auto_run": False,
+            "plan_complete": False,
+            "planner": {
+                "mode": "ai",
+                "provider_id": provider.get("id"),
+                "model": provider.get("model"),
+                "channel": channel,
+                "reason": "preview_coords_out_of_bounds",
+            },
+            "ai_debug": {
+                "provider": provider.get("id"),
+                "model": provider.get("model"),
+                "screen": _screen_context_public(screen or {}),
+                "screen_for_llm": _screen_context_for_llm(screen or {}),
+                "raw_plan": raw_plan_before_scale,
+                "coord_retry_log": coord_retry_log,
+                "preview_coord_violations": preview_coord_violations,
+            },
+            "ai_error_info": {
+                "type": "preview_coords_out_of_bounds",
+                "title": "坐标超出附图范围",
+                "message": (
+                    "视觉坐标必须基于发给模型的附图像素（screen.width × screen.height），"
+                    "禁止使用设备分辨率或自行换算比例。"
+                ),
+                "suggestion": (
+                    f"坐标须满足 x∈[1,{first.get('preview', {}).get('width')}]、"
+                    f"y∈[1,{first.get('preview', {}).get('height')}]。"
+                ),
+            },
+        }
+    raw_plan, coordinate_scale = _scale_ai_plan_coordinates(
+        json.loads(json.dumps(raw_plan_before_scale, ensure_ascii=False, default=str)),
+        screen,
+    )
+    if coord_retry_log:
+        coordinate_scale = {**coordinate_scale, "coord_retry_log": coord_retry_log}
     raw_steps = raw_plan.get("steps") or []
     normalized_steps = [
         s
@@ -3172,7 +3689,7 @@ def _plan_message_ai(
         item
         for item in raw_steps
         if isinstance(item, dict)
-        and str(item.get("kind") or item.get("type") or "").strip().lower() in visual_kinds
+        and str(item.get("kind") or item.get("type") or item.get("action") or "").strip().lower() in visual_kinds
         and not _normalize_ai_step(item, require_visual_coordinates=True)
     ]
     if raw_steps and not normalized_steps:
@@ -3185,7 +3702,6 @@ def _plan_message_ai(
         "provider": provider.get("id"),
         "model": provider.get("model"),
         "screen": _screen_context_public(screen),
-        "overlay_guard_before_plan": ctx.get("overlay_guard_before_plan"),
         "raw_plan": raw_plan_before_scale,
         "coordinate_scale": coordinate_scale,
         "normalized_steps": normalized_steps,

@@ -90,7 +90,7 @@ AI（大模型）模式现在走的是**纯坐标化闭环**，不再依赖本�
 }
 ```
 
-OpenAI 系通过 `_append_openai_image`（`3400`，`image_url.detail=low`）注入，Anthropic 系通过 base64 image block 注入（`3510` 附近）。
+OpenAI 系通过 `_append_openai_image`（`image_url.detail=high`）注入；压缩最长边 **512px**（与 OpenAI 视觉 low-detail 上限对齐，`preview_width/height` 必须等于实际上传 JPEG 像素）。Anthropic 系通过 base64 image block 注入。
 
 ### 3. preview 坐标 → 设备坐标映射 —— ✅ 新增（原文档缺失）
 
@@ -217,7 +217,7 @@ AI 模式目标协议：
 
 - 来源：移动引擎直连；`device_bootstrap.ensure_adb_device_online` / `engine.ensure_screen_ready`。
 - 现状：prompt 第 14 条已禁止大模型规划解锁/唤醒/清后台等动作；`_run_mobile_click` 执行前会调 `engine.ensure_screen_ready`（`1865`）作为前置。
-- **不是** AI 可调用 skill，只作执行前置事件。需记录到执行卡片和报告（待补，见「残留项 5」）。
+- **不是** AI 可调用 skill，只作执行前置事件。需记录到执行卡片和报告（待补）。
 
 ### shell_pm_clear（清理应用数据）
 
@@ -277,16 +277,21 @@ AI 模式目标协议：
 4. **日志样例需对齐真实格式**。引擎实际打印（`mAdb.py:1112`）：
    `Gesture audit tap ({x},{y}) label={label!r} skip_label=True consent=... serial=...`，比原验收样例多 `label/consent/serial` 字段。
 
-5. **AI 观察截图未进执行卡片**。`_build_ai_screen_context` 的截图目前只进 `ai_debug`（规划阶段），执行 before/after 卡片走的是 `capture_device_screenshot`/gesture audit（`4351` 等）。若要满足「observe 截图入卡片/报告」，需另接。
+5. ~~**AI 观察截图未进执行卡片**~~ — ✅ 已接：`build_plan_log` 写入 `screen_observe`；`build_operation_plan_tree` 在 `flat_items` 首部插入 `observe` 并暴露 `observe_screen`；`feishu_regression_service` 操作/断言块回退使用观察图；前端 `ExecutionReplayer` / `Dialogue` 展示 👁 观察卡片。
 
 ## AI 用例执行的 local 前置边界（架构重构后）
 
 用例执行选 AI（`should_use_ai_planning("case_execution")`）时，`AiExecutionProfile` 会跳过以下本地写死逻辑：
 
+- `_prepare_case_screen_for_ai_plan` / `run_overlay_guard_on_device`（规划前本地清弹窗）
+- `execute_steps` 内 reactive overlay guard（`enable_overlay_guard=false`）
+- `_verify_step_expected` 内本地 OCR / `identify_for_app` / `identify_page_for_trace` / 本地 `_check_expected`（改走 `_verify_step_expected_ai` 仅 LLM 断言）
 - `ensure_page_ready_before_action`（操作前页面恢复 / OCR 识别 / 本地恢复步骤）
 - `_prepare_screen_for_verify` → `run_overlay_guard_until_clear`（校验前本地清弹窗）
 - `try_recover_and_reverify`（校验失败后的本地页面恢复）
 - 操作失败后的 `try_dismiss_blocking_overlay`（本地 post-recovery）
+
+弹窗、consent / 权限 / 协议页、PageNavigation 恢复均由大模型 Plan 自行规划点击；本地 Overlay Guard 与 PageNavigation 仅保留在 Local 模式。
 
 **仍保留的 shared 底座**（非本地业务判断）：`ensure_adb_device_online`、`ensure_screen_ready`（亮屏解锁）、`guard_test_app_foreground`（前台观察）。
 

@@ -270,6 +270,8 @@ class AIProviderSaveBody(BaseModel):
     enabled: bool = True
     clear_key: bool = False
     set_default: bool = False
+    plan_compress_ratio: float = 3.0
+    case_execution_use: bool = False
 
 
 class AIUsageSaveBody(BaseModel):
@@ -277,6 +279,7 @@ class AIUsageSaveBody(BaseModel):
     case_execution_enabled: bool = False
     case_execution_provider_id: str = ""
     mode: str = "local_first"
+    plan_compress_image: bool = True
 
 
 @router.get("/ai/providers")
@@ -297,6 +300,8 @@ def save_ai_provider(provider_id: str, body: AIProviderSaveBody):
             enabled=body.enabled,
             clear_key=body.clear_key,
             set_default=body.set_default,
+            plan_compress_ratio=body.plan_compress_ratio,
+            case_execution_use=body.case_execution_use,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -316,6 +321,7 @@ def save_ai_usage(body: AIUsageSaveBody):
         case_execution_enabled=body.case_execution_enabled,
         case_execution_provider_id=body.case_execution_provider_id,
         mode=body.mode,
+        plan_compress_image=body.plan_compress_image,
     )
     return {"code": 200, "msg": "已保存", "data": data}
 

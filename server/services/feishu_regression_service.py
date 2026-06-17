@@ -626,6 +626,11 @@ def _run_command_block(
     run_id: str = "",
     profile: Optional[ExecutionProfile] = None,
 ) -> Dict[str, Any]:
+    profile = (
+        profile
+        or context.get("execution_profile")
+        or resolve_execution_profile("case_execution")
+    )
     if not command:
         return {
             "phase": phase,
@@ -650,6 +655,11 @@ def _run_command_block(
             "ok": False,
             "msg": plan.get("reply") or plan.get("error") or "规划失败",
         }
+    planner_mode = str((plan.get("planner") or {}).get("mode") or profile.mode or "local").lower()
+    use_overlay_guard = (
+        planner_mode != "ai"
+        and not bool(context.get("skip_overlay_guard"))
+    )
     results = execute_steps(
         plan.get("steps") or [],
         sn=sn,
@@ -659,7 +669,7 @@ def _run_command_block(
         capture_screenshots=bool(run_id),
         app_id=str(context.get("app_id") or context.get("appId") or ""),
         skip_overlay_clear=bool(context.get("skip_overlay_clear")),
-        enable_overlay_guard=not bool(context.get("skip_overlay_guard")),
+        enable_overlay_guard=use_overlay_guard,
         target_package=str(context.get("package") or ""),
         stop_on_failure=True,
     )
@@ -677,7 +687,7 @@ def _run_command_block(
         pass
     segment_errors = list(plan.get("segment_errors") or [])
     ok = aas.business_step_results_ok(results)
-    if results:
+    if results and use_overlay_guard:
         guard_fail = any(
             not r.get("ok")
             for r in results
@@ -1046,6 +1056,157 @@ def _enrich_page_context_meta(
         return page_context
 
 
+def _verify_step_expected_ai(
+    exp: str,
+    claim_texts: List[str],
+    step_results: List[Dict[str, Any]],
+    *,
+    sn: str,
+    platform: str = "android",
+    package: str = "",
+    app_id: str = "",
+    case: Optional[Dict[str, Any]] = None,
+    run_id: str = "",
+    step_index: int = 0,
+    case_id: str = "",
+    steps_ok: bool = True,
+) -> Dict[str, Any]:
+    """AI 模式预期校验：仅走大模型断言，跳过本地 OCR / 页面识别 / 恢复。"""
+    device_lost = False
+    try:
+        from driver.agent.Crawl.device_bootstrap import is_adb_device_online
+
+        if not is_adb_device_online(sn, platform):
+            device_lost = True
+    except Exception:
+        pass
+
+    if device_lost:
+        return {
+            "ok": False,
+            "msg": f"设备 {sn} 已离线，预期校验中止",
+            "checks": [{"text": exp, "ok": False, "reason": "设备离线"}],
+            "plan_tree": {"thought": "", "plans": []},
+            "plan_log": [],
+            "screen_text_preview": "",
+            "screenshot": "",
+            "page_context": {},
+            "page_recovery": None,
+            "device_offline": True,
+        }
+
+    action_shot = ""
+    for r in reversed(step_results or []):
+        action_shot = r.get("screenshot_after") or r.get("screenshot_before") or ""
+        if action_shot:
+            break
+
+    expected_analysis = _analyze_expected_plans(
+        exp,
+        sn=sn,
+        context={"app_id": app_id or (case or {}).get("case_id"), "platform": platform},
+    )
+
+    if not steps_ok:
+        plan_tree = aas.build_expected_plan_tree(
+            expected_text=exp,
+            checks=[{"text": exp, "ok": False, "reason": "前置操作失败，断言无效"}],
+            reply=expected_analysis.get("reply") or "",
+        )
+        return {
+            "ok": False,
+            "msg": "操作未成功，预期校验无效",
+            "checks": [{"text": exp, "ok": False, "reason": "前置操作失败，断言无效"}],
+            "plan_tree": plan_tree,
+            "plan_log": expected_analysis.get("plan_log") or [],
+            "screen_text_preview": "",
+            "screenshot": action_shot,
+            "page_context": {},
+            "page_recovery": None,
+        }
+
+    ai_assert_result: Optional[Dict[str, Any]] = None
+    checks: List[Dict[str, Any]] = []
+    checks_ok = False
+    try:
+        from server.services import system_settings_service as ss
+
+        if ss.should_use_ai_planning("case_execution").get("enabled") and sn:
+            ai_assert_result = cs.verify_expectation_with_ai(
+                exp,
+                sn=sn,
+                platform=platform,
+                context={
+                    "app_id": app_id,
+                    "platform": platform,
+                },
+            )
+            if ai_assert_result:
+                checks = ai_assert_result.get("checks") or []
+                checks_ok = bool(ai_assert_result.get("ok"))
+                assert_plan = {
+                    "reply": ai_assert_result.get("reply") or f"验证预期：{exp}",
+                    "steps": [],
+                    "planner": ai_assert_result.get("planner"),
+                    "ai_debug": ai_assert_result.get("ai_debug"),
+                }
+                expected_analysis = {
+                    "reply": assert_plan["reply"],
+                    "plan_log": aas.build_plan_log(f"验证预期：{exp}", assert_plan),
+                    "planned": expected_analysis.get("planned") or [],
+                }
+                SLog.i(
+                    TAG,
+                    f"AI assert exp={exp[:32]!r} ok={checks_ok} "
+                    f"provider={(ai_assert_result.get('planner') or {}).get('provider_id')}",
+                )
+    except Exception as e:
+        SLog.w(TAG, f"AI assert integration failed: {e}")
+
+    screenshot = action_shot
+    if not screenshot and ai_assert_result:
+        observe = aas.extract_ai_observe_screen(ai_debug=ai_assert_result.get("ai_debug"))
+        if observe.get("image_path"):
+            screenshot = str(observe["image_path"])
+
+    plan_tree = aas.build_expected_plan_tree(
+        exp,
+        checks,
+        reply=expected_analysis.get("reply") or "",
+    )
+
+    if checks_ok:
+        return {
+            "ok": True,
+            "msg": "预期达成",
+            "checks": checks,
+            "plan_tree": plan_tree,
+            "plan_log": expected_analysis.get("plan_log") or [],
+            "screen_text_preview": "",
+            "screenshot": screenshot,
+            "page_context": {},
+            "page_recovery": None,
+            "planner": (ai_assert_result or {}).get("planner"),
+            "ai_debug": (ai_assert_result or {}).get("ai_debug"),
+        }
+
+    failed = [c.get("text") or exp for c in checks if not c.get("ok")]
+    msg = f"预期未达成: {', '.join(failed[:2])}" if failed else (ai_assert_result or {}).get("msg") or "预期未达成"
+    return {
+        "ok": False,
+        "msg": msg,
+        "checks": checks or [{"text": exp, "ok": False, "reason": msg}],
+        "plan_tree": plan_tree,
+        "plan_log": expected_analysis.get("plan_log") or [],
+        "screen_text_preview": "",
+        "screenshot": screenshot,
+        "page_context": {},
+        "page_recovery": None,
+        "planner": (ai_assert_result or {}).get("planner"),
+        "ai_debug": (ai_assert_result or {}).get("ai_debug"),
+    }
+
+
 def _verify_step_expected(
     expected_text: str,
     step_results: List[Dict[str, Any]],
@@ -1083,6 +1244,24 @@ def _verify_step_expected(
 
     profile = profile or resolve_execution_profile("case_execution")
 
+    steps_ok = aas.business_step_results_ok(step_results)
+
+    if profile.mode == "ai":
+        return _verify_step_expected_ai(
+            exp,
+            claim_texts,
+            step_results,
+            sn=sn,
+            platform=platform,
+            package=package,
+            app_id=app_id,
+            case=case,
+            run_id=run_id,
+            step_index=step_index,
+            case_id=case_id,
+            steps_ok=steps_ok,
+        )
+
     screen_text = ""
     page_context: Dict[str, Any] = {}
     device_lost = False
@@ -1116,20 +1295,21 @@ def _verify_step_expected(
         builtins.TARGET_DEVICE_SN = sn
         engine, (w, h) = bootstrap_mobile_engine(sn, platform)
 
-        if fast_verify:
-            try:
-                from server.services.local.overlay.overlay_guard_service import is_screen_blocked
+        if profile.mode != "ai":
+            if fast_verify:
+                try:
+                    from server.services.local.overlay.overlay_guard_service import is_screen_blocked
 
-                if is_screen_blocked(engine):
-                    _prepare_screen_for_verify(
-                        engine, w, h, sn=sn, platform=platform, profile=profile
-                    )
-            except Exception as e:
-                SLog.w(TAG, f"fast verify overlay check failed: {e}")
-        else:
-            _prepare_screen_for_verify(
-                engine, w, h, sn=sn, platform=platform, profile=profile
-            )
+                    if is_screen_blocked(engine):
+                        _prepare_screen_for_verify(
+                            engine, w, h, sn=sn, platform=platform, profile=profile
+                        )
+                except Exception as e:
+                    SLog.w(TAG, f"fast verify overlay check failed: {e}")
+            else:
+                _prepare_screen_for_verify(
+                    engine, w, h, sn=sn, platform=platform, profile=profile
+                )
 
         max_rounds = 1 if fast_verify else 2
         for attempt in range(max_rounds):
@@ -1330,6 +1510,11 @@ def _verify_step_expected(
                 )
     except Exception as e:
         SLog.w(TAG, f"AI assert integration failed: {e}")
+
+    if not screenshot and ai_assert_result:
+        observe = aas.extract_ai_observe_screen(ai_debug=ai_assert_result.get("ai_debug"))
+        if observe.get("image_path"):
+            screenshot = str(observe["image_path"])
 
     plan_tree = aas.build_expected_plan_tree(
         expected_text,
@@ -1672,7 +1857,9 @@ def _run_case_steps_sequential(
             "ok": action_ok,
             "action_ok": action_ok,
             "msg": action_block.get("msg"),
-            "screenshot": _last_screenshot_from_execute_log(exec_log_ordered),
+            "screenshot": _last_screenshot_from_execute_log(exec_log_ordered)
+            or op_tree.get("observe_screen")
+            or "",
             "page_recovery": display_recovery,
             "page_context": {}
             if delegated_guard
@@ -2324,6 +2511,10 @@ def _execute_cases_batch(
             continue
 
         startup_recovery: Optional[Dict[str, Any]] = None
+        launch_profile = context.get("execution_profile") or resolve_execution_profile(
+            "case_execution"
+        )
+        use_launch_screen_ocr = str(getattr(launch_profile, "mode", "local")).lower() != "ai"
         if not _case_allows_background(case):
             fg = aas.ensure_app_foreground(
                 sn,
@@ -2335,6 +2526,7 @@ def _execute_cases_batch(
                     or getattr(app, "name", "")
                     or ""
                 ),
+                use_screen_ocr=use_launch_screen_ocr,
             )
             _append_foreground_trace(
                 trace,
@@ -2373,6 +2565,7 @@ def _execute_cases_batch(
                         or getattr(app, "name", "")
                         or ""
                     ),
+                    use_screen_ocr=use_launch_screen_ocr,
                 )
                 trace.append(
                     {
@@ -2482,6 +2675,12 @@ def _execute_cases_batch(
             shot_before = _capture_step_screenshot(
                 sn, platform, run_id=run_id, tag=f"case_{case.get('case_id')}_before"
             )
+            exec_profile = context.get("execution_profile") or resolve_execution_profile(
+                "case_execution"
+            )
+            planner_mode = str(
+                (plan.get("planner") or {}).get("mode") or exec_profile.mode or "local"
+            ).lower()
             results = execute_steps(
                 plan.get("steps") or [],
                 sn=sn,
@@ -2490,6 +2689,8 @@ def _execute_cases_batch(
                 run_id=run_id,
                 capture_screenshots=True,
                 app_id=app.id,
+                enable_overlay_guard=planner_mode != "ai",
+                target_package=str(context.get("package") or ""),
             )
             all_results.extend(results)
             item["step_results"] = results

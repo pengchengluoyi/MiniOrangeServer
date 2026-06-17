@@ -105,10 +105,26 @@ AI_PROVIDER_PRESETS: List[Dict[str, Any]] = [
         "name": "火山引擎",
         "api_type": "openai",
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "default_model": "doubao-seed-1-6-250615",
+        "default_model": "doubao-seed-2-0-lite-260215",
         "model_options": [
+            # Seed 2.0 多模态 / Vision / GUI（推荐）
+            "doubao-seed-2-0-pro-260215",
+            "doubao-seed-2-0-lite-260215",
+            "doubao-seed-2-0-mini-260215",
+            # Seed 1.8 多模态
+            "doubao-seed-1-8-251228",
+            # Seed 1.6 多模态 / Vision
+            "doubao-seed-1-6-vision-250815",
             "doubao-seed-1-6-250615",
             "doubao-seed-1-6-thinking-250615",
+            "doubao-seed-1-6-flash-250615",
+            "doubao-seed-1-6-flash-250828",
+            "doubao-seed-1-6-lite-251015",
+            "doubao-seed-1-6-251015",
+            # Seed 1.5 Vision
+            "doubao-1-5-thinking-vision-pro",
+            "doubao-1-5-vision-pro-32k-250115",
+            # 文本 / 推理（无截图坐标 Plan 能力，按需选用）
             "doubao-1-5-pro-32k-250115",
             "deepseek-v3-250324",
             "deepseek-r1-250120",
@@ -126,6 +142,15 @@ def _ai_root() -> Dict[str, Any]:
     return ai
 
 
+def normalize_plan_compress_ratio(value: Any) -> float:
+    """Plan 截图压缩比例：保留一位小数，1.0 表示不压缩。"""
+    try:
+        ratio = round(float(value), 1)
+    except (TypeError, ValueError):
+        ratio = 3.0
+    return max(1.0, min(10.0, ratio))
+
+
 def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     preset = next((p for p in AI_PROVIDER_PRESETS if p["id"] == provider_id), None)
     raw = raw if isinstance(raw, dict) else {}
@@ -133,9 +158,16 @@ def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> 
     model_options = list((preset or {}).get("model_options") or [])
     raw_model = (raw.get("model") or "").strip()
     default_model = ((preset or {}).get("default_model") or "").strip()
-    model = raw_model if (not model_options or raw_model in model_options) else default_model
-    if not model:
-        model = default_model
+    # model_options 仅为 UI 候选；也支持手填 ep- 接入点或方舟新模型 ID
+    model = raw_model or default_model
+    configured = bool(api_key)
+    enabled = raw.get("enabled", True) is not False
+    case_execution_use = raw.get("case_execution_use") is True
+    if not configured:
+        enabled = False
+        case_execution_use = False
+    elif not enabled:
+        case_execution_use = False
     return {
         "id": provider_id,
         "name": raw.get("name") or (preset or {}).get("name") or provider_id,
@@ -144,8 +176,10 @@ def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> 
         "model": model,
         "model_options": model_options,
         "api_key_masked": _mask_secret(api_key),
-        "configured": bool(api_key),
-        "enabled": raw.get("enabled", True) is not False,
+        "configured": configured,
+        "enabled": enabled,
+        "case_execution_use": case_execution_use,
+        "plan_compress_ratio": normalize_plan_compress_ratio(raw.get("plan_compress_ratio", 3.0)),
     }
 
 
@@ -175,6 +209,7 @@ def get_ai_usage_settings() -> Dict[str, Any]:
         "case_execution_enabled": bool(usage.get("case_execution_enabled", False)),
         "case_execution_provider_id": (usage.get("case_execution_provider_id") or "").strip().lower(),
         "mode": usage.get("mode") or "local_first",
+        "plan_compress_image": bool(usage.get("plan_compress_image", True)),
     }
 
 
@@ -184,6 +219,7 @@ def save_ai_usage_settings(
     case_execution_enabled: bool = False,
     case_execution_provider_id: str = "",
     mode: str = "local_first",
+    plan_compress_image: bool = True,
 ) -> Dict[str, Any]:
     ai = _ai_root()
     mode = mode if mode in {"local_first", "ai_first"} else "local_first"
@@ -192,9 +228,27 @@ def save_ai_usage_settings(
         "case_execution_enabled": bool(case_execution_enabled),
         "case_execution_provider_id": (case_execution_provider_id or "").strip().lower(),
         "mode": mode,
+        "plan_compress_image": bool(plan_compress_image),
     }
     SecurityManager.save()
     return get_ai_usage_settings()
+
+
+def ai_plan_compress_image_enabled() -> bool:
+    """兼容旧配置：全局开关仍可读，优先使用各模型 plan_compress_ratio。"""
+    return bool(get_ai_usage_settings().get("plan_compress_image", True))
+
+
+def get_ai_plan_compress_ratio(provider_id: Optional[str] = None) -> float:
+    """返回模型 Plan 截图压缩比例；1.0=不压缩，默认 3.0（宽高各除以 3）。"""
+    ai = _ai_root()
+    target_id = (provider_id or ai.get("_default_provider") or "openai").strip().lower()
+    raw = ai.get(target_id)
+    if isinstance(raw, dict) and raw.get("plan_compress_ratio") is not None:
+        return normalize_plan_compress_ratio(raw.get("plan_compress_ratio"))
+    if not ai_plan_compress_image_enabled():
+        return 1.0
+    return 3.0
 
 
 def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, Any]:
@@ -215,6 +269,10 @@ def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, 
         "model": (raw.get("model") or (preset or {}).get("default_model") or "").strip(),
         "enabled": raw.get("enabled", True) is not False,
         "configured": bool(api_key),
+        "plan_compress_ratio": normalize_plan_compress_ratio(
+            (raw or {}).get("plan_compress_ratio", 3.0)
+        ),
+        "case_execution_use": (raw or {}).get("case_execution_use") is True,
     }
 
 
@@ -233,14 +291,21 @@ def should_use_ai_planning(channel: str, provider_id: Optional[str] = None) -> D
     if normalized in {"case", "case_execution", "regression", "feishu"} and not selected_provider_id:
         selected_provider_id = usage.get("case_execution_provider_id") or None
     provider = get_ai_provider_credentials(selected_provider_id)
-    ok = bool(scope_enabled and provider.get("enabled") and provider.get("configured"))
+    ok = bool(
+        scope_enabled
+        and provider.get("configured")
+        and provider.get("enabled")
+        and provider.get("case_execution_use")
+    )
     reason = ""
     if not scope_enabled:
         reason = f"AI planning disabled for {normalized}"
-    elif not provider.get("enabled"):
-        reason = f"AI provider disabled: {provider.get('id')}"
     elif not provider.get("configured"):
         reason = f"AI provider key missing: {provider.get('id')}"
+    elif not provider.get("enabled"):
+        reason = f"AI provider disabled: {provider.get('id')}"
+    elif not provider.get("case_execution_use"):
+        reason = f"AI provider not selected for case execution: {provider.get('id')}"
     return {
         "enabled": ok,
         "reason": reason,
@@ -261,6 +326,8 @@ def save_ai_provider_settings(
     enabled: bool = True,
     clear_key: bool = False,
     set_default: bool = False,
+    plan_compress_ratio: Optional[float] = None,
+    case_execution_use: Optional[bool] = None,
 ) -> Dict[str, Any]:
     provider_id = (provider_id or "").strip().lower()
     if not provider_id:
@@ -272,11 +339,29 @@ def save_ai_provider_settings(
     current["api_type"] = (api_type or current.get("api_type") or (preset or {}).get("api_type") or "openai").strip()
     current["base_url"] = (base_url or current.get("base_url") or (preset or {}).get("base_url") or "").strip()
     current["model"] = (model or current.get("model") or (preset or {}).get("default_model") or "").strip()
-    current["enabled"] = enabled is not False
     if clear_key:
         current.pop("api_key", None)
     elif api_key and str(api_key).strip():
         current["api_key"] = str(api_key).strip()
+    has_key = bool((current.get("api_key") or "").strip())
+    current["enabled"] = enabled is not False and has_key
+    if case_execution_use is not None:
+        use = bool(case_execution_use) and has_key and (enabled is not False)
+        current["case_execution_use"] = use
+        if use:
+            for pid, row in list(ai.items()):
+                if pid.startswith("_") or pid == provider_id:
+                    continue
+                if isinstance(row, dict) and row.get("case_execution_use"):
+                    row["case_execution_use"] = False
+    elif not has_key:
+        current["case_execution_use"] = False
+    if not current.get("enabled"):
+        current["case_execution_use"] = False
+    if plan_compress_ratio is not None:
+        current["plan_compress_ratio"] = normalize_plan_compress_ratio(plan_compress_ratio)
+    elif "plan_compress_ratio" not in current:
+        current["plan_compress_ratio"] = 3.0
     if set_default:
         ai["_default_provider"] = provider_id
     SecurityManager.save()

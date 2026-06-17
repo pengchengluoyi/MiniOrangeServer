@@ -29,6 +29,10 @@ async def handle_copilot_execute(websocket, data: dict):
     platform = (data.get("platform") or "android").lower()
     if not steps:
         return {"code": 400, "msg": "steps 为空"}
+    planning_mode = str(
+        data.get("planning_mode") or data.get("planningMode") or "local"
+    ).lower()
+    ai_steps = any(s.get("ai_coordinate_only") for s in steps if isinstance(s, dict))
     results = execute_steps(
         steps,
         sn=sn,
@@ -36,6 +40,7 @@ async def handle_copilot_execute(websocket, data: dict):
         run_id=str(data.get("run_id") or data.get("runId") or f"copilot-{uuid.uuid4().hex[:10]}"),
         capture_screenshots=bool(data.get("capture_screenshots", True)),
         app_id=str(data.get("app_id") or data.get("appId") or ""),
+        enable_overlay_guard=planning_mode != "ai" and not ai_steps,
     )
     ok_all = all(r.get("ok") for r in results) if results else False
     return {

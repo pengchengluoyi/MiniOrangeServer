@@ -1107,6 +1107,17 @@ class MAdbEngine(MobileEngine):
                     label=label,
                     method=(locate_method or "coordinate").strip() or "coordinate",
                 )
+            if audit is not None:
+                w, h = self._display_size()
+                audit["screen_size"] = {"w": w, "h": h}
+                audit["target_rect"] = {
+                    "left": max(0, int(x) - 44),
+                    "top": max(0, int(y) - 44),
+                    "width": 88,
+                    "height": 88,
+                    "center": [int(x), int(y)],
+                    "label": label or "",
+                }
             ok = False
             try:
                 SLog.i(

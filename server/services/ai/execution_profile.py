@@ -1,6 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""AI 用例执行 profile：弹窗/页面就绪交给大模型自主规划。"""
+"""AI 用例执行 profile：弹窗/页面就绪/Overlay Guard 均交给大模型 Plan，本地不写死前置。"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

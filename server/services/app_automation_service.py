@@ -361,23 +361,25 @@ def _screen_suggests_test_app(
     *,
     package: str = "",
     app_name: str = "",
+    use_ocr: bool = True,
 ) -> bool:
     """启动过渡期包名可能滞后；用屏上文案辅助判断目标应用是否已出现。"""
     blob = ""
-    try:
-        w = int(getattr(engine, "screen_width", 0) or 0)
-        h = int(getattr(engine, "screen_height", 0) or 0)
-        if w > 0 and h > 0 and hasattr(engine, "ocr"):
-            blob = engine.ocr(w, h) or ""
-    except Exception:
-        blob = ""
-    if not blob:
+    if use_ocr:
         try:
-            from server.services.shared.page_context.page_context_service import _collect_full_screen_text
-
-            blob = _collect_full_screen_text(engine) or ""
+            w = int(getattr(engine, "screen_width", 0) or 0)
+            h = int(getattr(engine, "screen_height", 0) or 0)
+            if w > 0 and h > 0 and hasattr(engine, "ocr"):
+                blob = engine.ocr(w, h) or ""
         except Exception:
             blob = ""
+        if not blob:
+            try:
+                from server.services.shared.page_context.page_context_service import _collect_full_screen_text
+
+                blob = _collect_full_screen_text(engine) or ""
+            except Exception:
+                blob = ""
     if not blob:
         return False
 
@@ -408,6 +410,7 @@ def ensure_app_foreground(
     platform: str = "android",
     *,
     app_name: str = "",
+    use_screen_ocr: bool = True,
 ) -> Dict[str, Any]:
     """
     尽力拉起被测应用。包名未立即匹配时不判失败、不阻断后续步骤；
@@ -451,7 +454,7 @@ def ensure_app_foreground(
             after = _engine_current_package(engine)
             pkg_ok = _pkg_matches(package, after)
             screen_ok = _screen_suggests_test_app(
-                engine, package=package, app_name=app_name
+                engine, package=package, app_name=app_name, use_ocr=use_screen_ocr
             )
             if pkg_ok or screen_ok:
                 break
@@ -465,7 +468,7 @@ def ensure_app_foreground(
                 after = _engine_current_package(engine)
                 pkg_ok = _pkg_matches(package, after)
                 screen_ok = _screen_suggests_test_app(
-                    engine, package=package, app_name=app_name
+                    engine, package=package, app_name=app_name, use_ocr=use_screen_ocr
                 )
                 if pkg_ok or screen_ok:
                     break
@@ -517,6 +520,40 @@ def ensure_app_foreground(
         return {"ok": False, "msg": str(e), "hard_fail": True}
 
 
+def extract_ai_observe_screen(
+    plan: Optional[Dict[str, Any]] = None,
+    *,
+    ai_debug: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """从 AI plan/verify 的 ai_debug 中提取可展示的观察截图（不含 base64）。"""
+    dbg = ai_debug if ai_debug is not None else (plan or {}).get("ai_debug")
+    if not isinstance(dbg, dict):
+        return {}
+    screen = dbg.get("screen")
+    if not isinstance(screen, dict):
+        return {}
+    image_path = str(screen.get("image_path") or "").strip()
+    if not image_path:
+        return {}
+    return dict(screen)
+
+
+def observe_screenshot_from_plan_log(plan_log: Optional[List[Dict[str, Any]]]) -> tuple[str, Dict[str, Any]]:
+    """从 plan_log 读取 screen_observe / ai_debug 里的观察截图。"""
+    for entry in plan_log or []:
+        etype = str(entry.get("type") or "").strip()
+        if etype == "screen_observe":
+            detail = entry.get("detail") if isinstance(entry.get("detail"), dict) else {}
+            shot = str(entry.get("screenshot") or detail.get("image_path") or "").strip()
+            if shot:
+                return shot, detail
+        if etype == "ai_debug":
+            screen = extract_ai_observe_screen(ai_debug=entry.get("detail"))
+            if screen.get("image_path"):
+                return str(screen["image_path"]), screen
+    return "", {}
+
+
 def build_plan_log(command: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = [
         {"type": "command", "text": command, "title": "原始指令"},
@@ -538,6 +575,18 @@ def build_plan_log(command: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         entries.append({"type": "planner", "detail": planner})
     if plan.get("ai_debug"):
         entries.append({"type": "ai_debug", "detail": plan.get("ai_debug")})
+    observe = extract_ai_observe_screen(plan=plan)
+    if observe.get("image_path"):
+        entries.insert(
+            1,
+            {
+                "type": "screen_observe",
+                "title": "AI 观察 · 当前屏幕",
+                "summary": "规划前屏幕截图",
+                "screenshot": observe.get("image_path"),
+                "detail": observe,
+            },
+        )
     if plan.get("ai_error_info"):
         entries.append({"type": "ai_error", "detail": plan.get("ai_error_info")})
     for err in plan.get("segment_errors") or []:
@@ -643,6 +692,7 @@ def build_operation_plan_tree(
     - flat_items 是一个扁平序列：[{type: 'plan'|'action', index: int}, ...]。
     """
     planned = [e for e in (plan_log or []) if e.get("type") == "planned_step"]
+    observe_path, observe_meta = observe_screenshot_from_plan_log(plan_log)
 
     # index -> 执行动作列表
     exec_by_index: Dict[int, List[Dict[str, Any]]] = {}
@@ -689,6 +739,8 @@ def build_operation_plan_tree(
             if not plan_elapsed:
                 plan_elapsed = actions_raw[0].get("run_elapsed") or ""
                 plan_elapsed_ms = int(actions_raw[0].get("run_elapsed_ms") or 0)
+        if not plan_shot and observe_path:
+            plan_shot = observe_path
 
         ps_summary = (ps.get("summary") or ps.get("kind") or "").strip()
         if ps_summary.startswith("守卫 ·"):
@@ -757,10 +809,24 @@ def build_operation_plan_tree(
     elif flat_items:
         flat_items = _sort_flat_items_chronologically(flat_items, plans)
 
+    if observe_path and not any(item.get("type") == "observe" for item in flat_items):
+        flat_items.insert(
+            0,
+            {
+                "type": "observe",
+                "screenshot": observe_path,
+                "screen": observe_meta,
+                "run_elapsed_ms": 0,
+                "run_elapsed": "00:00:00",
+            },
+        )
+
     return {
         "thought": (reply or "").strip(),
         "plans": plans,
         "flat_items": flat_items,
+        "observe_screen": observe_path,
+        "observe_screen_meta": observe_meta,
     }
 
 
