@@ -389,7 +389,6 @@ def _run_mobile_click(
     icon_targets: Optional[List[Dict[str, Any]]] = None,
     exact_label: bool = False,
     skip_label_lookup: bool = False,
-    ai_coordinate_only: bool = False,
     consent_dismiss: bool = False,
     login_icon_order: Optional[Dict[str, int]] = None,
     skip_overlay_clear: bool = False,
@@ -428,8 +427,12 @@ def _run_mobile_click(
             except Exception as e:
                 SLog.w(TAG, f"pre-click ensure_screen_ready failed: {e}")
 
+        from server.services.shared.run_context.regression_run_context import is_ai_execution
+
+        ai_mode = is_ai_execution()
+
         consent_label = _is_consent_action_label(label)
-        if consent_label and "同意并继续" not in (label or ""):
+        if consent_label and "同意并继续" not in (label or "") and not ai_mode:
             try:
                 from server.services.local.navigation.page_navigation_service import (
                     _overlay_dismiss_target_cleared,
@@ -455,7 +458,7 @@ def _run_mobile_click(
 
         clear_locate_debug()
 
-        if ai_coordinate_only:
+        if ai_mode:
             if x <= 0 or y <= 0:
                 return {
                     "ok": False,

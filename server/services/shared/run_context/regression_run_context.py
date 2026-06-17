@@ -12,6 +12,32 @@ from typing import Any, Dict, List, Optional
 _run_ctx: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
     "regression_run_ctx", default=None
 )
+_execution_mode_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "execution_mode", default="local"
+)
+
+
+def normalize_execution_mode(mode: str = "") -> str:
+    m = (mode or "local").strip().lower()
+    return m if m in ("ai", "local") else "local"
+
+
+def set_execution_mode(mode: str = "local") -> str:
+    """设置本次执行的模式（ai / local），供整条执行链统一查询。"""
+    normalized = normalize_execution_mode(mode)
+    _execution_mode_var.set(normalized)
+    ctx = _run_ctx.get()
+    if ctx is not None:
+        ctx["execution_mode"] = normalized
+    return normalized
+
+
+def is_ai_execution() -> bool:
+    """当前执行是否为 AI 模式（截图+坐标，跳过全部 local 定位/OCR/守卫）。"""
+    ctx = _run_ctx.get()
+    if ctx and ctx.get("execution_mode"):
+        return normalize_execution_mode(str(ctx["execution_mode"])) == "ai"
+    return normalize_execution_mode(_execution_mode_var.get()) == "ai"
 
 
 def format_run_elapsed(ms: int) -> str:
@@ -68,13 +94,16 @@ def begin_run(
     platform: str = "android",
     capture_screenshots: bool = True,
     test_package: str = "",
+    execution_mode: str = "local",
 ) -> None:
+    mode = set_execution_mode(execution_mode)
     _run_ctx.set(
         {
             "run_id": run_id or "",
             "sn": sn or "",
             "platform": platform or "android",
             "test_package": (test_package or "").strip(),
+            "execution_mode": mode,
             "capture": bool(capture_screenshots and run_id and sn),
             "gestures": [],
             "watermark": 0,

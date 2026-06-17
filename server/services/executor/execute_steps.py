@@ -38,9 +38,17 @@ def execute_steps(
     enable_overlay_guard: bool = True,
     target_package: str = "",
     stop_on_failure: bool = True,
+    execution_mode: str = "local",
 ) -> List[Dict[str, Any]]:
     """逐步执行并返回每步结果（供前端展示判断循环）。"""
     import builtins
+
+    from server.services.shared.run_context.regression_run_context import (
+        is_ai_execution,
+        set_execution_mode,
+    )
+
+    set_execution_mode(execution_mode)
 
     runtime_icons: List[Dict[str, Any]] = list(icon_targets or [])
     learn_app_id = (app_id or "").strip()
@@ -81,14 +89,18 @@ def execute_steps(
                 sn=str(sn),
                 platform=platform,
                 capture_screenshots=capture_screenshots,
+                execution_mode=execution_mode,
             )
+        elif run_id and sn:
+            set_execution_mode(execution_mode)
     except Exception:
         pass
 
     results: List[Dict[str, Any]] = []
     guard_planned_all: List[Dict[str, Any]] = []
     pkg_guard = (target_package or "").strip()
-    use_reactive_guard = bool(enable_overlay_guard)
+    ai_execution = is_ai_execution()
+    use_reactive_guard = bool(enable_overlay_guard) and not ai_execution
     skip_click_overlay_dismiss = bool(skip_overlay_clear or use_reactive_guard)
     last_click_target: Optional[Dict[str, Any]] = None
 
@@ -100,7 +112,13 @@ def execute_steps(
         SLog.i(TAG, f"Step {i} start: {summary}")
 
         foreground_note = ""
-        if sn and pkg_guard and kind not in ("open_app", "close_app", "verify", "ability"):
+        fg_result: Dict[str, Any] = {}
+        if (
+            not ai_execution
+            and sn
+            and pkg_guard
+            and kind not in ("open_app", "close_app", "verify", "ability")
+        ):
             try:
                 from server.services.app_automation_service import guard_test_app_foreground
 
@@ -109,6 +127,7 @@ def execute_steps(
                 )
                 if fg.get("drift") and fg.get("msg"):
                     foreground_note = str(fg.get("msg"))
+                    fg_result = fg
             except Exception as e:
                 SLog.w(TAG, f"foreground observe failed: {e}")
         out: Dict[str, Any] = {
@@ -119,6 +138,53 @@ def execute_steps(
             "msg": "",
             "started_at": datetime.fromtimestamp(t0).isoformat(timespec="milliseconds"),
         }
+
+        if foreground_note:
+            from server.services.executor.plan_execute_service import should_block_step_on_foreground_drift
+
+            if should_block_step_on_foreground_drift(kind, step, fg_result=fg_result):
+                out.update(
+                    {
+                        "ok": False,
+                        "msg": f"已阻止执行：{foreground_note}",
+                        "method": "foreground_drift_blocked",
+                        "foreground_drift": True,
+                        "foreground_drift_blocked": True,
+                        "needs_replan": True,
+                        "foreground_note": foreground_note,
+                        "foreground_before": fg_result.get("foreground_before"),
+                        "foreground_after": fg_result.get("foreground_after"),
+                        "foreground_app_name": fg_result.get("foreground_app_name"),
+                    }
+                )
+                if capture_screenshots and sn and run_id:
+                    try:
+                        from server.services.shared.screenshot.regression_capture import capture_device_screenshot
+
+                        out["screenshot_before"] = capture_device_screenshot(
+                            sn,
+                            platform,
+                            run_id=run_id,
+                            tag=f"s{i}_{kind or 'step'}_drift_blocked",
+                            settle_ms=120,
+                        )
+                    except Exception:
+                        out["screenshot_before"] = ""
+                out["duration_ms"] = int((time.time() - t0) * 1000)
+                try:
+                    from server.services.shared.run_context.regression_run_context import stamp_run_timing
+
+                    stamp_run_timing(out)
+                except Exception:
+                    pass
+                results.append(out)
+                SLog.w(
+                    TAG,
+                    f"Step {i} blocked foreground drift: {summary} -> {foreground_note}",
+                )
+                if stop_on_failure:
+                    break
+                continue
 
         if capture_screenshots and sn and run_id and kind in ("open_app", "close_app", "back", "system_key"):
             try:
@@ -200,7 +266,7 @@ def execute_steps(
                 while True:
                     mark_step()
 
-                    if step.get("ai_coordinate_only"):
+                    if ai_execution:
                         t_click = time.time()
                         SLog.i(
                             TAG,
@@ -215,7 +281,6 @@ def execute_steps(
                             platform=platform,
                             coords_explicit=True,
                             skip_label_lookup=True,
-                            ai_coordinate_only=True,
                         )
                         out.update(r)
                         out["click_attempt"] = click_attempt
@@ -481,7 +546,7 @@ def execute_steps(
                 from server.services.shared.run_context.regression_run_context import mark_step
 
                 mark_step()
-                if step.get("ai_coordinate_only"):
+                if ai_execution:
                     r = _run_mobile_swipe_coords(
                         sn,
                         int(step.get("start_x") or 0),
@@ -507,7 +572,7 @@ def execute_steps(
                     f"Step {i} input begin text={step.get('text')!r} "
                     f"field={step.get('field_hint')!r}",
                 )
-                if step.get("ai_coordinate_only"):
+                if ai_execution:
                     r = _run_mobile_input_coords(
                         sn,
                         int(step.get("x") or 0),
@@ -589,7 +654,7 @@ def execute_steps(
         else:
             out["msg"] = f"未知步骤类型 {kind}"
 
-        if foreground_note:
+        if foreground_note and not out.get("foreground_drift_blocked"):
             out["foreground_drift"] = True
             out["foreground_note"] = foreground_note
             base_msg = (out.get("msg") or "").strip()
@@ -642,7 +707,7 @@ def execute_steps(
             except Exception:
                 out["screenshot_after"] = ""
 
-        if learn_app_id and sn:
+        if learn_app_id and sn and not ai_execution:
             _attach_step_page_context(
                 out,
                 sn=str(sn),
@@ -651,7 +716,7 @@ def execute_steps(
                 run_id=str(run_id or ""),
             )
 
-        if learn_app_id and kind == "click" and out.get("ok"):
+        if learn_app_id and kind == "click" and out.get("ok") and not ai_execution:
             try:
                 from server.services.shared import icon_target_service as its
 

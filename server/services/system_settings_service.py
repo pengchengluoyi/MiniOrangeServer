@@ -179,7 +179,9 @@ def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> 
         "configured": configured,
         "enabled": enabled,
         "case_execution_use": case_execution_use,
-        "plan_compress_ratio": normalize_plan_compress_ratio(raw.get("plan_compress_ratio", 3.0)),
+        "plan_compress_ratio": normalize_plan_compress_ratio(
+            raw.get("plan_compress_ratio", _default_plan_compress_ratio(provider_id))
+        ),
     }
 
 
@@ -239,6 +241,10 @@ def ai_plan_compress_image_enabled() -> bool:
     return bool(get_ai_usage_settings().get("plan_compress_image", True))
 
 
+def _default_plan_compress_ratio(provider_id: str) -> float:
+    return 3.0
+
+
 def get_ai_plan_compress_ratio(provider_id: Optional[str] = None) -> float:
     """返回模型 Plan 截图压缩比例；1.0=不压缩，默认 3.0（宽高各除以 3）。"""
     ai = _ai_root()
@@ -248,7 +254,7 @@ def get_ai_plan_compress_ratio(provider_id: Optional[str] = None) -> float:
         return normalize_plan_compress_ratio(raw.get("plan_compress_ratio"))
     if not ai_plan_compress_image_enabled():
         return 1.0
-    return 3.0
+    return _default_plan_compress_ratio(target_id)
 
 
 def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, Any]:
@@ -270,7 +276,7 @@ def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, 
         "enabled": raw.get("enabled", True) is not False,
         "configured": bool(api_key),
         "plan_compress_ratio": normalize_plan_compress_ratio(
-            (raw or {}).get("plan_compress_ratio", 3.0)
+            (raw or {}).get("plan_compress_ratio", _default_plan_compress_ratio(target_id))
         ),
         "case_execution_use": (raw or {}).get("case_execution_use") is True,
     }

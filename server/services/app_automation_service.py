@@ -294,10 +294,11 @@ def guard_test_app_foreground(
     platform: str = "android",
     *,
     phase: str = "",
+    app_name: str = "",
 ) -> Dict[str, Any]:
     """
     观察被测应用是否在前台：仅记录离屏，不再自动 start_app 拉回。
-    跨 App 授权（微信登录等）期间应保持当前前台应用。
+    仅比对前台包名；屏上 OCR/文案辅助判断仅在 local 模式 ensure_app_foreground 中使用。
     """
     if not package or not sn:
         return {"ok": True, "msg": "skip", "guarded": False, "drift": False}
@@ -393,6 +394,7 @@ def _screen_suggests_test_app(
     generic_markers = (
         "造物者",
         "造好物",
+        "造物者，你好",
         "同意并继续",
         "隐私条款",
         "用户协议",
@@ -539,19 +541,22 @@ def extract_ai_observe_screen(
 
 
 def observe_screenshot_from_plan_log(plan_log: Optional[List[Dict[str, Any]]]) -> tuple[str, Dict[str, Any]]:
-    """从 plan_log 读取 screen_observe / ai_debug 里的观察截图。"""
+    """从 plan_log 读取 screen_observe / ai_debug 里的观察截图（多次重规划时取最后一次）。"""
+    last_shot = ""
+    last_meta: Dict[str, Any] = {}
     for entry in plan_log or []:
         etype = str(entry.get("type") or "").strip()
         if etype == "screen_observe":
             detail = entry.get("detail") if isinstance(entry.get("detail"), dict) else {}
             shot = str(entry.get("screenshot") or detail.get("image_path") or "").strip()
             if shot:
-                return shot, detail
+                last_shot, last_meta = shot, detail
         if etype == "ai_debug":
             screen = extract_ai_observe_screen(ai_debug=entry.get("detail"))
             if screen.get("image_path"):
-                return str(screen["image_path"]), screen
-    return "", {}
+                last_shot = str(screen["image_path"])
+                last_meta = screen
+    return last_shot, last_meta
 
 
 def build_plan_log(command: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -677,20 +682,243 @@ def business_step_results_ok(results: List[Dict[str, Any]]) -> bool:
     return all(bool(r.get("ok")) for r in last_by_index.values())
 
 
+def _split_plan_log_rounds(
+    plan_log: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """按 drift_replan / goal_continue_replan 切分为多轮 Plan 片段。"""
+    segments: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+    for entry in plan_log or []:
+        etype = str(entry.get("type") or "").strip()
+        if etype in ("drift_replan", "goal_continue_replan"):
+            segments.append({"plan_log": list(current), "replan_trigger": entry})
+            current = []
+        else:
+            current.append(entry)
+    if current:
+        segments.append({"plan_log": list(current), "replan_trigger": None})
+    return segments
+
+
+def _group_execute_by_plan_round(
+    *,
+    step_results: Optional[List[Dict[str, Any]]] = None,
+    execute_log: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[int, List[Dict[str, Any]]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    source = step_results if step_results else (execute_log or [])
+    seen_gestures: set = set()
+    for entry in source:
+        gid = entry.get("gesture_id") or ""
+        if gid:
+            if gid in seen_gestures:
+                continue
+            seen_gestures.add(gid)
+        rnd = int(entry.get("plan_round") or entry.get("replan_attempt") or 1)
+        grouped.setdefault(rnd, []).append(entry)
+    for rnd in grouped:
+        grouped[rnd] = sorted(
+            grouped[rnd],
+            key=lambda a: int(a.get("run_elapsed_ms") or 0),
+        )
+    return grouped
+
+
+def _plan_log_round_reply(plan_log_segment: List[Dict[str, Any]]) -> str:
+    for entry in plan_log_segment or []:
+        if entry.get("type") == "reply":
+            return str(entry.get("text") or "").strip()
+    return ""
+
+
+def _plan_log_round_ai_debug(plan_log_segment: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for entry in plan_log_segment or []:
+        if entry.get("type") == "ai_debug":
+            detail = entry.get("detail")
+            if isinstance(detail, dict):
+                return detail
+    return {}
+
+
+def _has_multi_round_plan(
+    plan_log: Optional[List[Dict[str, Any]]],
+    step_results: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    if any(
+        str(e.get("type") or "") in ("drift_replan", "goal_continue_replan")
+        for e in (plan_log or [])
+    ):
+        return True
+    return any(int(r.get("plan_round") or 1) > 1 for r in (step_results or []))
+
+
+def _build_multi_round_operation_plan_tree(
+    plan_log: List[Dict[str, Any]],
+    execute_log: List[Dict[str, Any]],
+    *,
+    reply: str = "",
+    step_results: Optional[List[Dict[str, Any]]] = None,
+    replan_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    多轮 Plan（前置弹窗 / 离屏重规划）：
+    - 每轮 Plan 同级；
+    - 观察图 / Tap / 重规划触发器挂在该轮 Plan 子级（由 flat_items.nested 标记）。
+    """
+    segments = _split_plan_log_rounds(plan_log)
+    if len(segments) <= 1 and not _has_multi_round_plan(plan_log, step_results):
+        return {}
+
+    by_round = _group_execute_by_plan_round(
+        step_results=step_results,
+        execute_log=execute_log,
+    )
+    plans: List[Dict[str, Any]] = []
+    flat_items: List[Dict[str, Any]] = []
+
+    for round_i, segment in enumerate(segments):
+        plan_round = round_i + 1
+        plan_index = round_i
+        seg_log = segment.get("plan_log") or []
+        planned = [e for e in seg_log if e.get("type") == "planned_step"]
+        observe_path, observe_meta = observe_screenshot_from_plan_log(seg_log)
+        actions_raw = list(by_round.get(plan_round) or [])
+
+        ps = planned[0] if planned else {}
+        ps_summary = (ps.get("summary") or ps.get("kind") or "").strip()
+        round_reply = _plan_log_round_reply(seg_log) or (reply if round_i == 0 else "")
+        ai_debug = _plan_log_round_ai_debug(seg_log)
+
+        plan_shot = ""
+        plan_elapsed = ""
+        plan_elapsed_ms = 0
+        if actions_raw:
+            last_a = actions_raw[-1]
+            plan_shot = (
+                last_a.get("screenshot_before")
+                or last_a.get("screenshot_after")
+                or actions_raw[0].get("screenshot_before")
+                or actions_raw[0].get("screenshot_after")
+                or ""
+            )
+            for a in reversed(actions_raw):
+                ms = int(a.get("run_elapsed_ms") or 0)
+                if ms > 0:
+                    plan_elapsed_ms = ms
+                    plan_elapsed = a.get("run_elapsed") or plan_elapsed
+                    break
+        if not plan_shot and observe_path:
+            plan_shot = observe_path
+
+        if ps_summary.startswith("守卫 ·"):
+            plan_title = ps_summary
+        elif ps_summary:
+            plan_title = f"Plan - {ps_summary}"
+        else:
+            plan_title = f"Plan · 第 {plan_round} 轮"
+
+        trigger = segment.get("replan_trigger")
+        plan_item = {
+            "plan_index": plan_index,
+            "plan_round": plan_round,
+            "summary": ps_summary,
+            "title": plan_title,
+            "kind": ps.get("kind"),
+            "detail": ps.get("detail") or {},
+            "screenshot": plan_shot,
+            "run_elapsed": plan_elapsed,
+            "run_elapsed_ms": plan_elapsed_ms,
+            "ok": actions_raw[-1].get("ok") if actions_raw else None,
+            "reply": round_reply,
+            "ai_debug": ai_debug,
+            "replan_trigger": trigger if isinstance(trigger, dict) else None,
+            "actions": [],
+        }
+        plans.append(plan_item)
+
+        if observe_path:
+            flat_items.append(
+                {
+                    **_plan_flat_item(plan_index, plan_elapsed_ms if plan_elapsed_ms > 0 else -1),
+                    "plan_round": plan_round,
+                    "nested": False,
+                }
+            )
+        else:
+            flat_items.append(
+                {
+                    **_plan_flat_item(plan_index, plan_elapsed_ms if plan_elapsed_ms > 0 else -1),
+                    "plan_round": plan_round,
+                    "nested": False,
+                }
+            )
+
+        for a in actions_raw:
+            kind = a.get("kind") or "step"
+            method = a.get("method") or ""
+            action_with_meta = {
+                **a,
+                "action_name": _action_display_name(kind, method),
+                "title": _format_action_title(kind, method, a.get("summary") or kind),
+                "plan_index": plan_index,
+                "plan_round": plan_round,
+            }
+            plans[-1]["actions"].append(action_with_meta)
+            flat_items.append({**_action_flat_item(plan_index, a), "plan_round": plan_round, "nested": True})
+
+        if isinstance(trigger, dict) and trigger:
+            flat_items.append(
+                {
+                    "type": "replan_trigger",
+                    "plan_index": plan_index,
+                    "plan_round": plan_round,
+                    "nested": True,
+                    "reason": trigger.get("type") or "",
+                    "title": trigger.get("title") or "触发重新规划",
+                    "summary": trigger.get("summary") or "",
+                    "detail": trigger.get("detail") if isinstance(trigger.get("detail"), dict) else {},
+                }
+            )
+
+    first_observe, first_meta = observe_screenshot_from_plan_log(plan_log)
+    return {
+        "thought": (reply or "").strip(),
+        "plans": plans,
+        "flat_items": flat_items,
+        "observe_screen": first_observe,
+        "observe_screen_meta": first_meta,
+        "multi_round": True,
+        "replan_history": list(replan_history or []),
+        "plan_round_count": len(segments),
+    }
+
+
 def build_operation_plan_tree(
     plan_log: List[Dict[str, Any]],
     execute_log: List[Dict[str, Any]],
     *,
     reply: str = "",
+    step_results: Optional[List[Dict[str, Any]]] = None,
+    replan_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     操作步骤的规划与实际动作。
 
-    约定（对齐前端 ExecutionReplayer 的“同级”语义）：
-    - Plan 与具体 Tap/Assert 等动作是同一级别；
-    - 每个 Plan 可以引用若干 index，但“谁先谁后”由 flat_items 控制；
-    - flat_items 是一个扁平序列：[{type: 'plan'|'action', index: int}, ...]。
+    约定（对齐前端 ExecutionReplayer）：
+    - 单轮：Observe / Plan / Tap 同级（depth=1）；
+    - 多轮：Plan 同级（depth=1），观察/Tap/重规划触发器为 Plan 子级（depth=2）。
     """
+    if _has_multi_round_plan(plan_log, step_results):
+        multi = _build_multi_round_operation_plan_tree(
+            plan_log,
+            execute_log,
+            reply=reply,
+            step_results=step_results,
+            replan_history=replan_history,
+        )
+        if multi:
+            return multi
+
     planned = [e for e in (plan_log or []) if e.get("type") == "planned_step"]
     observe_path, observe_meta = observe_screenshot_from_plan_log(plan_log)
 
@@ -827,6 +1055,7 @@ def build_operation_plan_tree(
         "flat_items": flat_items,
         "observe_screen": observe_path,
         "observe_screen_meta": observe_meta,
+        "multi_round": False,
     }
 
 

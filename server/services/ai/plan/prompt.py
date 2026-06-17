@@ -3,7 +3,7 @@
 """Prompt templates for LLM-based Plan generation."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 CASE_CHANNELS = frozenset({"case", "case_execution", "regression", "feishu"})
 
@@ -38,15 +38,13 @@ def _is_doubao_seed2_or_thinking_model(model: str = "") -> bool:
 
 VOLCENGINE_DOUBAO_COORD_PRECISION_APPEND = """
 
-【火山引擎 Doubao 坐标精度补充要求 — 违反将拒绝执行】
-1. 附图像素尺寸即 screen.width × screen.height（通常 600×1304 等，以上下文为准）。所有 x、y 必须且只能基于该尺寸。
-2. 硬性边界（Server 会校验，超出则整单拒绝、不下发点击）：
-   - 1 ≤ x ≤ screen.width
-   - 1 ≤ y ≤ screen.height
-   禁止返回 x>width 或 y>height；禁止用设备物理分辨率填坐标；禁止乘除 compress_ratio。
-3. click/input/swipe 必须给出精确整数坐标（个位），先辨认目标控件可点击区域边界，再取几何中心。
-4. 输出前必须同时满足上述边界；坐标与 label/summary 描述的目标位置一致。
-5. 只输出一个 JSON 对象，不要 Markdown，不要在 JSON 后追加解释；steps 必须是数组。"""
+【火山引擎 Doubao 坐标 — 必须使用 0~1000 归一化，违反将拒绝执行】
+1. click/input/swipe 的坐标必须是 0~1000 的整数，表示目标中心在附图上的相对位置（与附图宽高成比例，与设备分辨率、压缩比例无关）。
+2. 坐标系：左上角 (0,0)，右下角 (1000,1000)。x 越大越靠右，y 越大越靠下。
+3. 计算公式（在脑中完成，不要输出推算过程）：x=round(目标中心距左边缘÷图宽×1000)，y=round(目标中心距上边缘÷图高×1000)。
+4. 硬性边界：0≤x≤1000、0≤y≤1000。禁止输出超过 1000 的绝对像素值；禁止假设 1080/1200/2608 等固定分辨率。
+5. 先辨认目标控件可点击区域，再取几何中心对应的归一化坐标；坐标须与 label/summary 描述一致。
+6. 只输出一个 JSON 对象，不要 Markdown；steps 必须是数组。"""
 
 
 VOLCENGINE_DOUBAO_JSON_ONLY_APPEND = """
@@ -97,14 +95,17 @@ AI_CASE_PLAN_SYSTEM_PROMPT = """你是 MiniOrange 飞书/回归用例的单步 P
 1. 默认只输出 1 个 step，对应该条用例步骤；只有步骤文本明确包含多个动作（如「点击 A，再点击 B」）时才输出多个 step。
 2. click/input/swipe 必须基于截图返回 preview 像素坐标（screen.preview_width × screen.preview_height），并设 coords_explicit=true。
 3. 步骤常是「点击 xxx 按钮/图标」—— xxx 可能是文字按钮、底部图标、圆形图标；必须从截图判断位置，不能只返回 label。
-4. 截图发送前 Server 已尝试清除阻塞弹窗；若仍看到隐私协议/权限弹窗，且步骤不是点「同意/允许」，优先在截图中寻找步骤描述的目标；若目标确实不可见，返回 click 点击步骤描述中最匹配的可见控件。
-5. 禁止返回空 steps；禁止 auto_run=false；不要只写 blockers 而不给可执行 step。
-6. open_app/close_app 使用 known_apps 中的准确 package 字段。
-7. input 必须带 text；summary 保留原始步骤语义（如「点击一键登录按钮」）。
-8. 失败即停：不要规划设备准备、解锁、清缓存等动作。
-9. 不要自行推断业务前置条件（如协议是否已勾选）；按用例步骤原文规划点击/输入坐标。
+4. 截图发送前 Server 已尝试清除阻塞弹窗；若仍看到隐私协议/权限弹窗，且用例步骤不是点「同意/允许」，你应只规划关闭阻碍的一个 click，并设 plan_complete=false（见下条）。
+5. 必须返回 plan_complete 布尔字段：
+   - plan_complete=true：本次 steps 直接完成用例步骤原文目标（例如步骤是「点击一键登录」，你规划的就是点一键登录按钮；步骤是「点击同意并继续」且你点的就是同意并继续/同意，也必须 plan_complete=true，即使该按钮在弹窗里）。
+   - plan_complete=false：仅当用例步骤原文是别的目标（如一键登录），而你本次只处理了弹窗/权限等阻碍、尚未点到步骤要求的目标时。
+6. 禁止返回空 steps；禁止 auto_run=false；不要只写 blockers 而不给可执行 step。
+7. open_app/close_app 使用 known_apps 中的准确 package 字段。
+8. input 必须带 text；summary 应保留用例步骤语义（完成目标时）或写明当前前置动作（plan_complete=false 时）。
+9. 失败即停：不要规划设备准备、解锁、清缓存等动作。
+10. 不要自行推断业务前置条件（如协议是否已勾选）；按用例步骤原文规划点击/输入坐标。
 
-输出 JSON：{"reply":"...","steps":[...],"auto_run":true}"""
+输出 JSON：{"reply":"...","steps":[...],"auto_run":true,"plan_complete":true|false}"""
 
 
 AI_PLAN_USER_PROMPT_TEMPLATE = """请为下面的请求生成 MiniOrange 可执行计划。
@@ -122,11 +123,197 @@ AI_PLAN_USER_PROMPT_TEMPLATE = """请为下面的请求生成 MiniOrange 可执�
 - 如果无法安全规划，说明 blocker，不要生成危险动作。
 - 保留原始 step_text，reason 写明为什么选择该能力。
 - 当前屏幕截图在上下文的 screen 字段中。所有视觉动作必须直接返回坐标，不能把判断交给本地 OCR/CLIP/多通道定位。
-- click 输出示例（底部导航）：{{"kind":"click","x":449,"y":2492,"coords_explicit":true,"label":"造物秀","reason":"截图底部导航栏右侧显示该入口"}}。
-- click 输出示例（顶部导航）：{{"kind":"click","x":720,"y":210,"coords_explicit":true,"label":"想要成真","reason":"截图顶部导航栏第二个 Tab 文字中心"}}。
-- input 输出示例：{{"kind":"input","x":520,"y":1180,"text":"13800138000","coords_explicit":true,"label":"手机号输入框"}}。
-- swipe 输出示例：{{"kind":"swipe","start_x":600,"start_y":1900,"end_x":600,"end_y":850,"duration_ms":350}}。
+- 坐标必须基于 screen.preview_width×screen.preview_height；x∈[1,preview_width]、y∈[1,preview_height]。
+- 禁止照抄固定坐标数字或按设备物理分辨率填坐标；须按当前附图重算目标控件中心。
 """
+
+
+def _preview_dimensions(screen: Optional[dict[str, Any]]) -> tuple[int, int]:
+    if not screen:
+        return 0, 0
+    pw = int(screen.get("preview_width") or screen.get("width") or 0)
+    ph = int(screen.get("preview_height") or screen.get("height") or 0)
+    return pw, ph
+
+
+def screen_coord_space_hint(screen: Optional[dict[str, Any]]) -> str:
+    """Explicit coordinate space for the current screenshot."""
+    pw, ph = _preview_dimensions(screen)
+    if pw <= 0 or ph <= 0:
+        return ""
+    return (
+        f"【本次坐标系】preview_width={pw}、preview_height={ph}；"
+        f"x∈[1,{pw}]、y∈[1,{ph}]，超出则 Server 拒绝执行。"
+    )
+
+
+def screen_coord_space_hint_normalized(screen: Optional[dict[str, Any]]) -> str:
+    """Doubao: 0~1000 normalized coordinate space."""
+    pw, ph = _preview_dimensions(screen)
+    if pw <= 0 or ph <= 0:
+        return ""
+    return (
+        f"【本次坐标系·归一化】附图 {pw}×{ph} 像素；"
+        "x、y 必须输出 0~1000 整数（左上角 0,0，右下角 1000,1000）。"
+        "禁止输出超过 1000 的像素坐标。"
+    )
+
+
+def screen_coord_examples_hint(screen: Optional[dict[str, Any]]) -> str:
+    """Dimension-matched click examples so static device-resolution coords do not confuse the model."""
+    pw, ph = _preview_dimensions(screen)
+    if pw <= 0 or ph <= 0:
+        return ""
+    top_y = max(72, int(ph * 0.08))
+    bottom_y = max(top_y + 24, int(ph * 0.97))
+    mid_y = int(ph * 0.52)
+    dialog_y = max(top_y + 24, int(ph * 0.92))
+    right_x = max(1, int(pw * 0.88))
+    left_x = max(1, int(pw * 0.12))
+    mid_x = max(1, int(pw * 0.50))
+    dialog_agree_x = max(1, int(pw * 0.75))
+    input_y = max(top_y + 24, int(ph * 0.35))
+    swipe_start_y = max(top_y + 24, int(ph * 0.78))
+    swipe_end_y = max(top_y + 24, int(ph * 0.30))
+    return (
+        f"【本次坐标示例（preview {pw}×{ph}，禁止照抄其他分辨率的数字）】\n"
+        f'- 右上角文字：{{"kind":"click","x":{right_x},"y":{top_y},"coords_explicit":true,"label":"访客浏览"}}\n'
+        f'- 底部导航左侧：{{"kind":"click","x":{left_x},"y":{bottom_y},"coords_explicit":true,"label":"首页"}}\n'
+        f'- 页面中部按钮：{{"kind":"click","x":{mid_x},"y":{mid_y},"coords_explicit":true,"label":"一键登录"}}\n'
+        f'- 弹窗右下按钮：{{"kind":"click","x":{dialog_agree_x},"y":{dialog_y},"coords_explicit":true,"label":"同意"}}\n'
+        f'- 输入框：{{"kind":"input","x":{mid_x},"y":{input_y},"text":"13800138000","coords_explicit":true,"label":"手机号输入框"}}\n'
+        f'- 上滑：{{"kind":"swipe","start_x":{mid_x},"start_y":{swipe_start_y},"end_x":{mid_x},"end_y":{swipe_end_y},"duration_ms":350}}\n'
+    )
+
+
+def screen_coord_examples_hint_normalized(screen: Optional[dict[str, Any]]) -> str:
+    """Doubao examples in 0~1000 space (layout ratios, not pixel coords)."""
+    if _preview_dimensions(screen) == (0, 0):
+        return ""
+    return (
+        "【本次坐标示例·归一化 0~1000（须按当前附图重算，禁止照抄）】\n"
+        '- 右上角文字：{"kind":"click","x":880,"y":80,"coords_explicit":true,"label":"访客浏览"}\n'
+        '- 底部导航左侧：{"kind":"click","x":120,"y":970,"coords_explicit":true,"label":"首页"}\n'
+        '- 页面中部按钮：{"kind":"click","x":500,"y":520,"coords_explicit":true,"label":"一键登录"}\n'
+        '- 弹窗右下「同意」：{"kind":"click","x":750,"y":920,"coords_explicit":true,"label":"同意"}\n'
+        '- 输入框：{"kind":"input","x":500,"y":350,"text":"13800138000","coords_explicit":true,"label":"手机号"}\n'
+        '- 上滑：{"kind":"swipe","start_x":500,"start_y":780,"end_x":500,"end_y":300,"duration_ms":350}\n'
+    )
+
+
+def build_ai_plan_prompt_preview(
+    *,
+    provider_id: str = "",
+    model: str = "",
+    screen: Optional[dict[str, Any]] = None,
+    drift_replan: Optional[dict[str, Any]] = None,
+    goal_continue_replan: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Snapshot of coord guidance embedded in the LLM user prompt (for ai_debug)."""
+    pw, ph = _preview_dimensions(screen)
+    if _is_volcengine_doubao_provider(provider_id, model):
+        preview = {
+            "coord_mode": "normalized_1000",
+            "preview_width": pw,
+            "preview_height": ph,
+            "coord_space_hint": screen_coord_space_hint_normalized(screen),
+            "coord_examples_hint": screen_coord_examples_hint_normalized(screen),
+        }
+    else:
+        preview = {
+            "coord_mode": "preview_pixels",
+            "preview_width": pw,
+            "preview_height": ph,
+            "coord_space_hint": screen_coord_space_hint(screen),
+            "coord_examples_hint": screen_coord_examples_hint(screen),
+        }
+    replan_note = build_foreground_drift_replan_note(drift_replan)
+    if replan_note:
+        preview["drift_replan_note"] = replan_note
+    continue_note = build_goal_continue_replan_note(goal_continue_replan)
+    if continue_note:
+        preview["goal_continue_replan_note"] = continue_note
+    return preview
+
+
+def _append_preview_coord_guidance(
+    user_content: str,
+    screen: Optional[dict[str, Any]],
+    *,
+    provider_id: str = "",
+    model: str = "",
+) -> str:
+    if _is_volcengine_doubao_provider(provider_id, model):
+        space_hint = screen_coord_space_hint_normalized(screen)
+        examples_hint = screen_coord_examples_hint_normalized(screen)
+    else:
+        space_hint = screen_coord_space_hint(screen)
+        examples_hint = screen_coord_examples_hint(screen)
+    if space_hint or examples_hint:
+        parts = [user_content.rstrip(), space_hint, examples_hint]
+        return "\n".join(part for part in parts if part)
+    if _is_volcengine_doubao_provider(provider_id, model):
+        return user_content + "\n- 坐标须为 0~1000 归一化整数；禁止输出绝对像素坐标。\n"
+    return (
+        user_content
+        + "\n- 坐标须基于 context.screen.preview_width×preview_height；"
+        "禁止假设设备分辨率或照抄固定像素值。\n"
+    )
+
+
+def build_goal_continue_replan_note(goal_continue: Optional[dict[str, Any]]) -> str:
+    """前置弹窗/阻碍处理完后，要求模型基于新截图继续完成原用例步骤。"""
+    if not isinstance(goal_continue, dict) or not goal_continue:
+        return ""
+    command = str(goal_continue.get("command") or "").strip()
+    prev_reply = str(goal_continue.get("previous_reply") or "").strip()
+    executed_summary = str(goal_continue.get("executed_summary") or "").strip()
+    executed_label = str(goal_continue.get("executed_label") or "").strip()
+    attempt = int(goal_continue.get("attempt") or 1)
+    parts = [
+        f"【继续完成用例步骤·第 {attempt} 次】上一轮仅执行了前置动作，尚未完成用例步骤原文。",
+        f"用例步骤原文（必须在本轮达成）：{command or '（见上文）'}",
+        "附图是执行前置动作后的最新屏幕；请基于新截图规划，禁止沿用旧坐标。",
+        "若用例步骤目标已可见，直接规划点击/输入该目标，并设 plan_complete=true。",
+        "若仍有新的弹窗/权限阻碍，可再规划一个前置 click，并设 plan_complete=false。",
+    ]
+    if executed_summary or executed_label:
+        parts.append(f"上一轮已执行：{executed_summary or executed_label}。")
+    if prev_reply:
+        parts.append(f"上一轮规划说明：{prev_reply[:240]}")
+    parts.append("请只返回一个可执行 JSON，含 plan_complete 字段。")
+    return "\n".join(part for part in parts if part)
+
+
+def build_foreground_drift_replan_note(drift_replan: Optional[dict[str, Any]]) -> str:
+    """离屏阻断后，要求模型基于新截图重新规划。"""
+    if not isinstance(drift_replan, dict) or not drift_replan:
+        return ""
+    drift_note = str(drift_replan.get("drift_note") or "").strip()
+    expected = str(drift_replan.get("expected_package") or "").strip()
+    actual_name = str(drift_replan.get("actual_app_name") or "").strip()
+    actual_pkg = str(drift_replan.get("actual_package") or "").strip()
+    blocked_summary = str(drift_replan.get("blocked_step_summary") or "").strip()
+    previous_reply = str(drift_replan.get("previous_reply") or "").strip()
+    attempt = int(drift_replan.get("attempt") or 1)
+    parts = [
+        f"【离屏重规划·第 {attempt} 次】上次计划在执行前被阻断：{drift_note or '被测应用已不在前台'}。",
+        (
+            f"被测应用包名应为 {expected or '（见上下文 package）'}，"
+            f"但执行时前台为 {actual_name or actual_pkg or '其他应用'}（{actual_pkg or '-'}）。"
+        ),
+        "附图是当前最新屏幕，与上次规划时不同；请基于新截图重新规划，禁止沿用旧坐标。",
+        (
+            "若当前是系统弹窗/权限页/安全中心页，优先规划关闭、拒绝或返回，使被测应用回到前台；"
+            "若已回到被测应用，再完成原用例步骤目标。"
+        ),
+    ]
+    if blocked_summary:
+        parts.append(f"被阻断的步骤：{blocked_summary}。")
+    if previous_reply:
+        parts.append(f"上次规划结论：{previous_reply[:240]}")
+    parts.append("请只返回一个可执行 JSON，坐标必须按本次附图重算。")
+    return "\n".join(part for part in parts if part)
 
 
 def build_ai_plan_messages(
@@ -137,6 +324,9 @@ def build_ai_plan_messages(
     context: str = "",
     provider_id: str = "",
     model: str = "",
+    screen: Optional[dict[str, Any]] = None,
+    drift_replan: Optional[dict[str, Any]] = None,
+    goal_continue_replan: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, str]]:
     """Return OpenAI/Anthropic-style messages excluding the tools payload."""
     is_case = _is_case_channel(channel)
@@ -146,6 +336,7 @@ def build_ai_plan_messages(
         if _is_doubao_seed2_or_thinking_model(model):
             system_prompt = system_prompt + VOLCENGINE_DOUBAO_JSON_ONLY_APPEND
 
+    is_doubao = _is_volcengine_doubao_provider(provider_id, model)
     if is_case:
         user_content = (
             "请为下面的飞书/回归用例单步操作生成 MiniOrange 可执行计划。\n\n"
@@ -155,12 +346,19 @@ def build_ai_plan_messages(
             f"设备/环境上下文：\n{context or '无'}\n\n"
             "规划要求：\n"
             "- 只规划这一条用例步骤，默认输出 1 个 step。\n"
-            "- 必须根据 screen 截图返回 preview 像素坐标，coords_explicit=true。\n"
+            "- 必须根据 screen 截图返回坐标，coords_explicit=true。\n"
             "- 图标按钮（微信、手机、一键登录等）也要从截图判断位置。\n"
             "- 必须 auto_run=true，禁止返回空 steps。\n"
-            "- 坐标必须基于 screen.width×screen.height（附图像素）；x 不得超过 width，y 不得超过 height，否则 Server 拒绝执行。\n"
-            '- click 示例（preview 坐标，须按当前截图重算）：{"kind":"click","x":300,"y":680,"coords_explicit":true,"label":"一键登录","summary":"点击页面中部一键登录按钮中心"}。\n'
-            '- input 示例：{"kind":"input","x":180,"y":420,"text":"17633379569","coords_explicit":true,"summary":"输入手机号"}。\n'
+            "- 必须返回 plan_complete：true=完成用例步骤目标；false=仅处理弹窗/权限等前置阻碍。\n"
+            "- screen.foreground_package / foreground_note 仅为设备前台包名观察数据，由你结合截图自行判断是否离屏，Server 不会在 AI 模式下据此阻断执行。\n"
+            + (
+                "- 坐标必须为 0~1000 归一化整数；示例见下方【本次坐标示例·归一化】。\n"
+                if is_doubao
+                else (
+                    "- 坐标必须基于 screen.preview_width×preview_height；x 不得超过 preview_width，y 不得超过 preview_height，否则 Server 拒绝执行。\n"
+                    "- 坐标示例见下方【本次坐标示例】；须按当前截图重算，禁止照抄其他分辨率的数字。\n"
+                )
+            )
         )
     else:
         user_content = (
@@ -174,17 +372,28 @@ def build_ai_plan_messages(
             "- 如果无法安全规划，说明 blocker，不要生成危险动作。\n"
             "- 保留原始 step_text，reason 写明为什么选择该能力。\n"
             "- 当前屏幕截图在上下文的 screen 字段中。所有视觉动作必须直接返回坐标，不能把判断交给本地 OCR/CLIP/多通道定位。\n"
-            "- 坐标必须基于 screen.preview_width × screen.preview_height（发给模型的截图像素），Server 会映射到设备 screen.width × screen.height。\n"
-            "- 示例坐标仅说明 preview 坐标系，须按当前截图重算，禁止照抄固定数字。\n"
-            '- click 示例（顶部，y≈preview_height×0.09）：{"kind":"click","x":720,"y":72,"coords_explicit":true,"label":"访客浏览","reason":"右上角文字中心，避开状态栏"}。\n'
-            '- click 示例（底部，y≈preview_height×0.97）：{"kind":"click","x":120,"y":745,"coords_explicit":true,"label":"首页","reason":"底部导航栏左侧入口中心"}。\n'
-            '- input 输出示例：{"kind":"input","x":180,"y":420,"text":"13800138000","coords_explicit":true,"label":"手机号输入框"}。\n'
-            '- swipe 输出示例：{"kind":"swipe","start_x":220,"start_y":680,"end_x":220,"end_y":300,"duration_ms":350}。\n'
+            + (
+                "- 坐标必须为 0~1000 归一化整数；示例见下方【本次坐标示例·归一化】。\n"
+                if is_doubao
+                else (
+                    "- 坐标必须基于 screen.preview_width × screen.preview_height（发给模型的截图像素），Server 会映射到设备物理分辨率。\n"
+                    "- 坐标示例见下方【本次坐标示例】；须按当前截图重算，禁止照抄其他分辨率的数字。\n"
+                )
+            )
         )
-    if _is_volcengine_doubao_provider(provider_id, model):
+    user_content = _append_preview_coord_guidance(
+        user_content, screen, provider_id=provider_id, model=model
+    )
+    replan_note = build_foreground_drift_replan_note(drift_replan)
+    if replan_note:
+        user_content = f"{user_content}\n\n{replan_note}"
+    continue_note = build_goal_continue_replan_note(goal_continue_replan)
+    if continue_note:
+        user_content = f"{user_content}\n\n{continue_note}"
+    if is_doubao:
         user_content += (
             "\n- 【重要】回复必须且只能是一个 JSON 对象，禁止输出思考过程或坐标推算文字。\n"
-            "- 【坐标边界】x≤screen.width、y≤screen.height，超出则 Server 拒绝执行并重试一次。\n"
+            "- 【坐标边界】0≤x≤1000、0≤y≤1000；禁止输出绝对像素坐标。\n"
         )
         if _is_doubao_seed2_or_thinking_model(model):
             user_content += (

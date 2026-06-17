@@ -2597,13 +2597,47 @@ def _parse_openai_chat_completion(resp_json: Dict[str, Any]) -> tuple[Optional[D
     return parsed, meta
 
 
+def _ai_foreground_metadata(
+    sn: Optional[str],
+    platform: str,
+    *,
+    expected_package: str = "",
+) -> Dict[str, Any]:
+    """仅读取前台包名，供 AI 规划参考；不触发 OCR。"""
+    if not sn:
+        return {}
+    try:
+        from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+        from server.services.app_automation_service import _engine_current_package, _pkg_matches
+
+        engine, _ = bootstrap_mobile_engine(str(sn), platform)
+        fg_pkg = (_engine_current_package(engine) or "").strip()
+        meta: Dict[str, Any] = {"foreground_package": fg_pkg}
+        expected = (expected_package or "").strip()
+        if expected:
+            meta["expected_package"] = expected
+            if fg_pkg and not _pkg_matches(expected, fg_pkg):
+                meta["foreground_drift"] = True
+                meta["foreground_note"] = (
+                    f"设备前台包名为 {fg_pkg}，被测应用包名为 {expected}。"
+                    "请结合截图自行判断是否仍在被测应用流程内（如微信授权栈），再决定坐标与动作。"
+                )
+        return meta
+    except Exception as e:
+        SLog.w(TAG, f"read foreground package for AI failed: {e}")
+        return {}
+
+
 def _build_ai_screen_context(
     sn: Optional[str],
     platform: str,
     provider_id: Optional[str] = None,
+    *,
+    expected_package: str = "",
 ) -> Dict[str, Any]:
     if not sn:
         return {}
+    fg_meta = _ai_foreground_metadata(sn, platform, expected_package=expected_package)
     try:
         from PIL import Image
 
@@ -2620,12 +2654,13 @@ def _build_ai_screen_context(
             max_attempts=2,
         )
         if not static_path:
-            return {}
+            return fg_meta
         name = static_path.split("/static/")[-1] if "/static/" in static_path else os.path.basename(static_path)
         local_path = os.path.join(APP_DATA_DIR, "uploads", name)
         if not os.path.isfile(local_path):
-            return {"image_path": static_path}
+            return {"image_path": static_path, **fg_meta}
         ratio = get_ai_plan_compress_ratio(provider_id)
+        configured_ratio = ratio
         compress = ratio > 1.0
         with Image.open(local_path) as img:
             img = img.convert("RGB")
@@ -2641,13 +2676,15 @@ def _build_ai_screen_context(
                 img.save(buf, format="JPEG", quality=92, optimize=True)
             encoded = base64.b64encode(buf.getvalue()).decode("ascii")
             preview_w, preview_h = img.size
-            return {
+            result = {
                 "image_path": static_path,
                 "width": original_w,
                 "height": original_h,
                 "preview_width": preview_w,
                 "preview_height": preview_h,
                 "compress_image": compress,
+                "configured_compress_ratio": configured_ratio,
+                "effective_compress_ratio": ratio if compress else 1.0,
                 "compress_ratio": ratio if compress else 1.0,
                 "mime_type": "image/jpeg",
                 "base64": encoded,
@@ -2658,42 +2695,190 @@ def _build_ai_screen_context(
                     "点击点应对准目标控件可点击区域中心，不要落在系统状态栏或屏幕外缘。"
                 ),
             }
+            result.update(fg_meta)
+            return result
     except Exception as e:
         SLog.w(TAG, f"build AI screen context failed: {e}")
-        return {}
+        return fg_meta
 
 
 def _collect_ai_preview_coord_violations(
     steps: Any,
     screen: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Return model coords that fall outside preview_width × preview_height (pre-scale)."""
+    violations, _coord_space = _analyze_ai_plan_coordinates(steps, screen)
+    return violations
+
+
+def _doubao_coord_input_mode(x: float, y: float, screen: Dict[str, Any]) -> str:
+    """Guess whether Doubao returned normalized_1000 / device_pixels / preview_pixels."""
+    orig_w = int(screen.get("width") or 0)
+    orig_h = int(screen.get("height") or 0)
+    prev_w = int(screen.get("preview_width") or orig_w)
+    prev_h = int(screen.get("preview_height") or orig_h)
+    if x <= 0 and y <= 0:
+        return "skip"
+    if x > 1000 or y > 1000:
+        if orig_w > 0 and orig_h > 0 and x <= orig_w and y <= orig_h:
+            return "device_pixels"
+        return "invalid"
+    if orig_w > 1000 or orig_h > 1000:
+        return "normalized_1000"
+    if x <= prev_w and y <= prev_h:
+        return "preview_pixels"
+    return "normalized_1000"
+
+
+def _doubao_point_to_device(
+    x: float,
+    y: float,
+    *,
+    mode: str,
+    screen: Dict[str, Any],
+) -> tuple[int, int]:
+    orig_w = int(screen.get("width") or 0)
+    orig_h = int(screen.get("height") or 0)
+    prev_w = int(screen.get("preview_width") or orig_w)
+    prev_h = int(screen.get("preview_height") or orig_h)
+    if mode == "normalized_1000":
+        dx = max(1, min(orig_w, int(round(x * orig_w / 1000.0))))
+        dy = max(1, min(orig_h, int(round(y * orig_h / 1000.0))))
+        return dx, dy
+    if mode == "preview_pixels" and prev_w > 0 and prev_h > 0:
+        dx = max(1, min(orig_w, int(round(x * orig_w / float(prev_w)))))
+        dy = max(1, min(orig_h, int(round(y * orig_h / float(prev_h)))))
+        return dx, dy
+    return max(1, min(orig_w, int(round(x)))), max(1, min(orig_h, int(round(y))))
+
+
+def _convert_doubao_plan_to_device_coords(
+    raw_plan: Dict[str, Any],
+    screen: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Map Doubao visual coords (normalized / preview / device) to device pixel space."""
+    plan = dict(raw_plan or {})
+    if not screen:
+        return plan, {"applied": False, "reason": "no_screen"}
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return plan, {"applied": False, "reason": "no_steps"}
+
+    visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
+    detected_mode = ""
+    samples: List[Dict[str, Any]] = []
+
+    def _detect_from_point(x: float, y: float) -> str:
+        return _doubao_coord_input_mode(x, y, screen)
+
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        if kind not in visual_kinds:
+            continue
+        if kind in {"click", "tap", "input", "type", "text"}:
+            mode = _detect_from_point(_num(item.get("x")), _num(item.get("y")))
+        else:
+            mode = _detect_from_point(_num(item.get("start_x")), _num(item.get("start_y")))
+        if mode not in {"", "skip"}:
+            detected_mode = mode
+            break
+
+    if not detected_mode or detected_mode == "invalid":
+        return plan, {"applied": False, "reason": "unknown_coord_mode", "detected_mode": detected_mode}
+
+    converted_steps: List[Dict[str, Any]] = []
+    for item in steps:
+        if not isinstance(item, dict):
+            converted_steps.append(item)
+            continue
+        step = dict(item)
+        kind = str(step.get("kind") or step.get("type") or "").strip().lower()
+        if kind in {"click", "tap", "input", "type", "text"}:
+            bx, by = _num(step.get("x")), _num(step.get("y"))
+            if bx > 0 and by > 0:
+                ax, ay = _doubao_point_to_device(bx, by, mode=detected_mode, screen=screen)
+                samples.append({"kind": kind, "before": {"x": bx, "y": by}, "after": {"x": ax, "y": ay}})
+                step["x"], step["y"] = ax, ay
+        elif kind in {"swipe", "scroll"}:
+            for xk, yk in (("start_x", "start_y"), ("end_x", "end_y")):
+                bx, by = _num(step.get(xk)), _num(step.get(yk))
+                if bx > 0 and by > 0:
+                    ax, ay = _doubao_point_to_device(bx, by, mode=detected_mode, screen=screen)
+                    step[xk], step[yk] = ax, ay
+            if any(step.get(k) for k in ("start_x", "start_y", "end_x", "end_y")):
+                samples.append(
+                    {
+                        "kind": kind,
+                        "before": {k: step.get(k) for k in ("start_x", "start_y", "end_x", "end_y")},
+                        "after": {k: step.get(k) for k in ("start_x", "start_y", "end_x", "end_y")},
+                    }
+                )
+        converted_steps.append(step)
+
+    plan["steps"] = converted_steps
+    return plan, {
+        "applied": True,
+        "provider_coord_mode": detected_mode,
+        "device": {"width": int(screen.get("width") or 0), "height": int(screen.get("height") or 0)},
+        "preview": {
+            "width": int(screen.get("preview_width") or 0),
+            "height": int(screen.get("preview_height") or 0),
+        },
+        "samples": samples[:5],
+    }
+
+
+def _analyze_ai_plan_coordinates(
+    steps: Any,
+    screen: Optional[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], str]:
+    """Classify model coords as preview / device / invalid (mixed or out of range)."""
     if not isinstance(steps, list) or not screen:
-        return []
+        return [], "preview"
     prev_w = int(screen.get("preview_width") or 0)
     prev_h = int(screen.get("preview_height") or 0)
     orig_w = int(screen.get("width") or 0)
     orig_h = int(screen.get("height") or 0)
     if prev_w <= 0 or prev_h <= 0:
-        return []
+        return [], "preview"
     if prev_w == orig_w and prev_h == orig_h:
-        return []
+        return [], "preview"
 
     visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
     violations: List[Dict[str, Any]] = []
+    saw_preview = False
+    saw_device = False
 
-    def _check_point(
+    def _classify_point(x: float, y: float) -> str:
+        if x <= 0 and y <= 0:
+            return "skip"
+        in_preview = x > 0 and y > 0 and x <= prev_w and y <= prev_h
+        in_device = (
+            x > 0
+            and y > 0
+            and orig_w > 0
+            and orig_h > 0
+            and x <= orig_w
+            and y <= orig_h
+        )
+        exceeds_preview = x > prev_w or y > prev_h
+        if in_preview and not exceeds_preview:
+            return "preview"
+        if exceeds_preview and in_device:
+            return "device"
+        return "invalid"
+
+    def _record_violation(
         *,
         step_index: int,
         kind: str,
         x_key: str,
         y_key: str,
         step: Dict[str, Any],
+        x: float,
+        y: float,
     ) -> None:
-        x = _num(step.get(x_key))
-        y = _num(step.get(y_key))
-        if x <= 0 and y <= 0:
-            return
         issues: List[str] = []
         if x <= 0 or x > prev_w:
             issues.append(f"{x_key}={x} 不在 [1,{prev_w}]")
@@ -2708,9 +2893,40 @@ def _collect_ai_preview_coord_violations(
                     "x": x,
                     "y": y,
                     "preview": {"width": prev_w, "height": prev_h},
+                    "device": {"width": orig_w, "height": orig_h},
                     "issues": issues,
                 }
             )
+
+    def _check_point(
+        *,
+        step_index: int,
+        kind: str,
+        x_key: str,
+        y_key: str,
+        step: Dict[str, Any],
+    ) -> None:
+        nonlocal saw_preview, saw_device
+        x = _num(step.get(x_key))
+        y = _num(step.get(y_key))
+        space = _classify_point(x, y)
+        if space == "skip":
+            return
+        if space == "preview":
+            saw_preview = True
+            return
+        if space == "device":
+            saw_device = True
+            return
+        _record_violation(
+            step_index=step_index,
+            kind=kind,
+            x_key=x_key,
+            y_key=y_key,
+            step=step,
+            x=x,
+            y=y,
+        )
 
     for step_index, item in enumerate(steps):
         if not isinstance(item, dict):
@@ -2723,25 +2939,92 @@ def _collect_ai_preview_coord_violations(
         elif kind in {"swipe", "scroll"}:
             _check_point(step_index=step_index, kind=kind, x_key="start_x", y_key="start_y", step=item)
             _check_point(step_index=step_index, kind=kind, x_key="end_x", y_key="end_y", step=item)
+
+    if violations:
+        return violations, "invalid"
+    if saw_device and not saw_preview:
+        return [], "device"
+    return [], "preview"
+
+
+def _validate_device_coord_violations(
+    steps: Any,
+    screen: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """After Doubao coord conversion, ensure device-space pixels are in range."""
+    if not isinstance(steps, list) or not screen:
+        return []
+    dev_w = int(screen.get("width") or 0)
+    dev_h = int(screen.get("height") or 0)
+    if dev_w <= 0 or dev_h <= 0:
+        return []
+    visual_kinds = {"click", "tap", "input", "type", "text", "swipe", "scroll"}
+    violations: List[Dict[str, Any]] = []
+
+    def _check(step_index: int, kind: str, x_key: str, y_key: str, step: Dict[str, Any]) -> None:
+        x = _num(step.get(x_key))
+        y = _num(step.get(y_key))
+        if x <= 0 and y <= 0:
+            return
+        issues: List[str] = []
+        if x <= 0 or x > dev_w:
+            issues.append(f"{x_key}={x} 不在 [1,{dev_w}]")
+        if y <= 0 or y > dev_h:
+            issues.append(f"{y_key}={y} 不在 [1,{dev_h}]")
+        if issues:
+            violations.append(
+                {
+                    "step_index": step_index,
+                    "kind": kind,
+                    "x": x,
+                    "y": y,
+                    "device": {"width": dev_w, "height": dev_h},
+                    "issues": issues,
+                }
+            )
+
+    for step_index, item in enumerate(steps):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("type") or item.get("action") or "").strip().lower()
+        if kind not in visual_kinds:
+            continue
+        if kind in {"click", "tap", "input", "type", "text"}:
+            _check(step_index, kind, "x", "y", item)
+        elif kind in {"swipe", "scroll"}:
+            _check(step_index, kind, "start_x", "start_y", item)
+            _check(step_index, kind, "end_x", "end_y", item)
     return violations
 
 
 def _scale_ai_plan_coordinates(
     raw_plan: Dict[str, Any],
     screen: Optional[Dict[str, Any]],
+    *,
+    coord_space: str = "preview",
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Map model coordinates from preview image space to device screen space."""
     plan = dict(raw_plan or {})
     steps = plan.get("steps")
     if not isinstance(steps, list) or not screen:
-        return plan, {"applied": False, "reason": "no_steps_or_screen"}
+        return plan, {"applied": False, "reason": "no_steps_or_screen", "coord_space": coord_space}
 
     orig_w = int(screen.get("width") or 0)
     orig_h = int(screen.get("height") or 0)
     prev_w = int(screen.get("preview_width") or orig_w)
     prev_h = int(screen.get("preview_height") or orig_h)
     if orig_w <= 0 or orig_h <= 0 or prev_w <= 0 or prev_h <= 0:
-        return plan, {"applied": False, "reason": "invalid_dimensions"}
+        return plan, {"applied": False, "reason": "invalid_dimensions", "coord_space": coord_space}
+    if coord_space == "device":
+        return plan, {
+            "applied": False,
+            "reason": "already_device_space",
+            "coord_space": "device",
+            "device": {"width": orig_w, "height": orig_h},
+            "preview": {"width": prev_w, "height": prev_h},
+            "compress_image": bool(screen.get("compress_image")),
+            "compress_ratio": float(screen.get("compress_ratio") or 1.0),
+        }
     if prev_w == orig_w and prev_h == orig_h:
         return plan, {
             "applied": False,
@@ -2813,6 +3096,7 @@ def _scale_ai_plan_coordinates(
     plan["steps"] = scaled_steps
     return plan, {
         "applied": True,
+        "coord_space": coord_space,
         "device": {"width": orig_w, "height": orig_h},
         "preview": {"width": prev_w, "height": prev_h},
         "compress_image": bool(screen.get("compress_image")),
@@ -2827,15 +3111,50 @@ def _screen_context_public(screen: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in (screen or {}).items() if k not in {"base64", "data_url"}}
 
 
-def _screen_context_for_llm(screen: Dict[str, Any]) -> Dict[str, Any]:
-    """Screen metadata sent to LLM — coordinate space must match the attached preview image only."""
+def _screen_context_for_llm(
+    screen: Dict[str, Any],
+    *,
+    provider_id: str = "",
+    model: str = "",
+) -> Dict[str, Any]:
+    """Screen metadata sent to LLM. Doubao 仅暴露 preview_width/height，不含设备 width/height。"""
+    from server.services.ai.plan.prompt import _is_volcengine_doubao_provider
+
     if not screen:
         return {}
     base = _screen_context_public(screen)
+    fg_fields = {
+        k: base[k]
+        for k in ("foreground_package", "expected_package", "foreground_drift", "foreground_note")
+        if k in base
+    }
+    pw = int(base.get("preview_width") or base.get("width") or 0)
+    ph = int(base.get("preview_height") or base.get("height") or 0)
+
+    if _is_volcengine_doubao_provider(provider_id, model):
+        if pw <= 0 or ph <= 0:
+            return {
+                k: v
+                for k, v in base.items()
+                if k not in {"width", "height", "base64", "data_url"}
+            }
+        return {
+            "image_path": base.get("image_path"),
+            "preview_width": pw,
+            "preview_height": ph,
+            "mime_type": base.get("mime_type"),
+            "coord_mode": "normalized_1000",
+            "note": (
+                f"附图 {pw}×{ph} 像素（压缩后发给模型的 JPEG，与附件一致）。"
+                "坐标必须输出 0~1000 归一化整数：左上角(0,0)、右下角(1000,1000)，"
+                "与附图宽高成比例、与设备分辨率无关；Server 会映射到设备像素。"
+                "禁止输出超过 1000 的绝对像素坐标。"
+            ),
+            **fg_fields,
+        }
+
     if not base.get("compress_image"):
         return base
-    pw = int(base.get("preview_width") or 0)
-    ph = int(base.get("preview_height") or 0)
     if pw <= 0 or ph <= 0:
         return base
     return {
@@ -2848,7 +3167,49 @@ def _screen_context_for_llm(screen: Dict[str, Any]) -> Dict[str, Any]:
             f"x∈[1,{pw}]、y∈[1,{ph}]，超出则拒绝执行。"
             "禁止按其他分辨率或比例换算坐标。"
         ),
+        **fg_fields,
     }
+
+
+def _ai_image_pipeline_debug(screen: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Clarify configured vs effective Plan screenshot compression (Doubao overrides to 1.0)."""
+    if not screen:
+        return {}
+    return {
+        "device": {
+            "width": int(screen.get("width") or 0),
+            "height": int(screen.get("height") or 0),
+        },
+        "preview": {
+            "width": int(screen.get("preview_width") or 0),
+            "height": int(screen.get("preview_height") or 0),
+        },
+        "compress_image": bool(screen.get("compress_image")),
+        "configured_compress_ratio": screen.get("configured_compress_ratio"),
+        "effective_compress_ratio": screen.get("effective_compress_ratio"),
+    }
+
+
+def _ai_debug_screen_context(
+    screen: Optional[Dict[str, Any]],
+    *,
+    provider_id: str = "",
+    model: str = "",
+) -> Dict[str, Any]:
+    """ai_debug / 观察卡片中的 screen：豆包与发给模型的一致，不含设备 width/height。"""
+    if not screen:
+        return {}
+    from server.services.ai.plan.prompt import _is_volcengine_doubao_provider
+
+    if _is_volcengine_doubao_provider(provider_id, model):
+        base = _screen_context_for_llm(screen, provider_id=provider_id, model=model)
+        return {
+            **base,
+            "compress_image": bool(screen.get("compress_image")),
+            "configured_compress_ratio": screen.get("configured_compress_ratio"),
+            "effective_compress_ratio": screen.get("effective_compress_ratio"),
+        }
+    return _screen_context_public(screen)
 
 
 def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, str]]:
@@ -2870,62 +3231,40 @@ def _ai_known_apps_context(platform: str, *, limit: int = 48) -> List[Dict[str, 
 def _build_preview_coord_correction_message(
     violations: List[Dict[str, Any]],
     screen: Optional[Dict[str, Any]],
+    *,
+    provider_id: str = "",
+    model: str = "",
 ) -> str:
+    from server.services.ai.plan.prompt import (
+        _is_volcengine_doubao_provider,
+        screen_coord_examples_hint,
+        screen_coord_examples_hint_normalized,
+        screen_coord_space_hint,
+        screen_coord_space_hint_normalized,
+    )
+
     pw = int((screen or {}).get("preview_width") or 0)
     ph = int((screen or {}).get("preview_height") or 0)
     issue_lines: List[str] = []
     for item in violations[:3]:
         issue_lines.extend(str(x) for x in (item.get("issues") or []))
     issues_text = "；".join(issue_lines) or "坐标越界"
-    return (
-        f"【坐标错误，必须重算】上次返回无效：{issues_text}。"
-        f"附图宽 {pw}px、高 {ph}px；坐标必须满足 x∈[1,{pw}]、y∈[1,{ph}]。"
-        "直接在附图像素上定位目标中心，禁止用设备分辨率、禁止乘除比例。"
-        "请只返回修正后的一个 JSON。"
-    )
-
-
-def _screen_coord_space_hint(screen: Optional[Dict[str, Any]]) -> str:
-    """Explicit coordinate space for the current screenshot (Volcengine only)."""
-    if not screen:
-        return ""
-    pw = int(screen.get("preview_width") or 0)
-    ph = int(screen.get("preview_height") or 0)
-    w = int(screen.get("width") or 0)
-    h = int(screen.get("height") or 0)
-    if pw <= 0 or ph <= 0:
-        return ""
-    if pw == w and ph == h:
-        return (
-            f"【本次坐标系】截图像素 {pw}×{ph}；"
-            f"x∈[1,{pw}]、y∈[1,{ph}]，直接返回附图上的像素坐标。"
-        )
-    return (
-        f"【本次坐标系】截图像素 {pw}×{ph}（附图即为该尺寸，勿用其他 width/height）；"
-        f"x∈[1,{pw}]、y∈[1,{ph}]，超出则 Server 拒绝执行。"
-    )
-
-
-def _screen_coord_examples_hint(screen: Optional[Dict[str, Any]]) -> str:
-    """Dimension-matched click examples so static y=2550 does not confuse compressed preview."""
-    if not screen:
-        return ""
-    pw = int(screen.get("preview_width") or 0)
-    ph = int(screen.get("preview_height") or 0)
-    if pw <= 0 or ph <= 0:
-        return ""
-    top_y = max(72, int(ph * 0.08))
-    bottom_y = max(top_y + 24, int(ph * 0.97))
-    mid_y = int(ph * 0.52)
-    right_x = max(1, int(pw * 0.88))
-    left_x = max(1, int(pw * 0.12))
-    mid_x = max(1, int(pw * 0.50))
-    return (
-        f"【本次坐标示例（preview {pw}×{ph}，禁止照抄其他分辨率的数字）】\n"
-        f'- 右上角文字：{{"kind":"click","x":{right_x},"y":{top_y},"coords_explicit":true,"label":"访客浏览"}}\n'
-        f'- 底部导航左侧：{{"kind":"click","x":{left_x},"y":{bottom_y},"coords_explicit":true,"label":"首页"}}\n'
-        f'- 页面中部按钮：{{"kind":"click","x":{mid_x},"y":{mid_y},"coords_explicit":true,"label":"一键登录"}}\n'
-    )
+    is_doubao = _is_volcengine_doubao_provider(provider_id, model)
+    parts = [
+        f"【坐标错误，必须重算】上次返回无效：{issues_text}。",
+        (
+            "坐标必须为 0~1000 归一化整数，禁止输出绝对像素。请只返回修正后的一个 JSON。"
+            if is_doubao
+            else (
+                f"附图宽 {pw}px、高 {ph}px；坐标必须满足 x∈[1,{pw}]、y∈[1,{ph}]。"
+                "直接在附图像素上定位目标中心，禁止用设备分辨率、禁止乘除比例。"
+                "请只返回修正后的一个 JSON。"
+            )
+        ),
+        screen_coord_space_hint_normalized(screen) if is_doubao else screen_coord_space_hint(screen),
+        screen_coord_examples_hint_normalized(screen) if is_doubao else screen_coord_examples_hint(screen),
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def _append_openai_image(messages: List[Dict[str, Any]], screen: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2977,6 +3316,12 @@ def _call_openai_compatible_plan(
     if not base or not api_key or not model:
         return None, {}
     ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    drift_replan = (context or {}).get("drift_replan")
+    if not isinstance(drift_replan, dict):
+        drift_replan = None
+    goal_continue_replan = (context or {}).get("goal_continue_replan")
+    if not isinstance(goal_continue_replan, dict):
+        goal_continue_replan = None
     messages = build_ai_plan_messages(
         instruction=instruction,
         platform=platform,
@@ -2984,22 +3329,26 @@ def _call_openai_compatible_plan(
         context=ctx_text,
         provider_id=str(provider.get("id") or ""),
         model=model,
+        screen=screen,
+        drift_replan=drift_replan,
+        goal_continue_replan=goal_continue_replan,
     )
     messages.append(
         {
             "role": "user",
             "content": (
-                "请只返回 JSON，不要 Markdown。坐标基于附图 screen.width×screen.height（像素）。格式："
+                "请只返回 JSON，不要 Markdown。"
+                + (
+                    "坐标使用 0~1000 归一化整数（左上角 0,0，右下角 1000,1000）。"
+                    if _is_volcengine_doubao_provider(str(provider.get("id") or ""), model)
+                    else "坐标基于附图 screen.width×screen.height（像素）。"
+                )
+                + "格式："
                 "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
-                "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+                "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true,\"plan_complete\":true}。"
             ),
         }
     )
-    if _is_volcengine_doubao_provider(str(provider.get("id") or ""), model):
-        for hint_fn in (_screen_coord_space_hint, _screen_coord_examples_hint):
-            hint = hint_fn(screen)
-            if hint:
-                messages.append({"role": "user", "content": hint})
     for extra in extra_user_messages or []:
         if isinstance(extra, dict) and extra.get("content"):
             messages.append({"role": "user", "content": str(extra["content"])})
@@ -3050,11 +3399,22 @@ def _call_anthropic_compatible_plan(
         return None
 
     ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    drift_replan = (context or {}).get("drift_replan")
+    if not isinstance(drift_replan, dict):
+        drift_replan = None
+    goal_continue_replan = (context or {}).get("goal_continue_replan")
+    if not isinstance(goal_continue_replan, dict):
+        goal_continue_replan = None
     plan_messages = build_ai_plan_messages(
         instruction=instruction,
         platform=platform,
         channel=channel,
         context=ctx_text,
+        provider_id=str(provider.get("id") or ""),
+        model=model,
+        screen=screen,
+        drift_replan=drift_replan,
+        goal_continue_replan=goal_continue_replan,
     )
     system_parts: List[str] = []
     user_parts: List[str] = []
@@ -3069,7 +3429,7 @@ def _call_anthropic_compatible_plan(
     user_parts.append(
         "请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
         "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
-        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true,\"plan_complete\":true}。"
     )
 
     content_blocks: List[Dict[str, Any]] = [{"type": "text", "text": "\n\n".join(user_parts)}]
@@ -3179,11 +3539,22 @@ def _call_gemini_plan(
         return None
 
     ctx_text = json.dumps(context or {}, ensure_ascii=False, default=str)[:4000]
+    drift_replan = (context or {}).get("drift_replan")
+    if not isinstance(drift_replan, dict):
+        drift_replan = None
+    goal_continue_replan = (context or {}).get("goal_continue_replan")
+    if not isinstance(goal_continue_replan, dict):
+        goal_continue_replan = None
     messages = build_ai_plan_messages(
         instruction=instruction,
         platform=platform,
         channel=channel,
         context=ctx_text,
+        provider_id=str(provider.get("id") or ""),
+        model=model,
+        screen=screen,
+        drift_replan=drift_replan,
+        goal_continue_replan=goal_continue_replan,
     )
     prompt = "\n\n".join(
         f"{item.get('role', 'user')}: {item.get('content', '')}"
@@ -3193,7 +3564,7 @@ def _call_gemini_plan(
     prompt += (
         "\n\n请只返回 JSON，不要 Markdown。坐标基于 screen.preview_width×preview_height。格式："
         "{\"reply\":\"...\",\"steps\":[{\"kind\":\"click|input|swipe|open_app|close_app|back|system_key|ability\","
-        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true}。"
+        "\"x\":123,\"y\":456,\"coords_explicit\":true,\"label\":\"审计文案\",\"summary\":\"...\"}],\"auto_run\":true,\"plan_complete\":true}。"
     )
     parts: List[Dict[str, Any]] = [{"text": prompt}]
     if (screen or {}).get("base64"):
@@ -3262,9 +3633,18 @@ def verify_expectation_with_ai(
     ctx = dict(context or {})
     platform = str(ctx.get("platform") or platform or "android").lower()
     llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
-    screen = _build_ai_screen_context(sn, platform, provider_id=selected_provider_id)
+    screen = _build_ai_screen_context(
+        sn,
+        platform,
+        provider_id=selected_provider_id,
+        expected_package=str(ctx.get("package") or ""),
+    )
     if screen:
-        llm_ctx["screen"] = _screen_context_for_llm(screen)
+        llm_ctx["screen"] = _screen_context_for_llm(
+            screen,
+            provider_id=selected_provider_id,
+            model=str(provider.get("model") or ""),
+        )
 
     instruction = f"验证预期：{exp}"
     ctx_text = json.dumps({**llm_ctx, "sn": sn}, ensure_ascii=False, default=str)[:4000]
@@ -3405,7 +3785,11 @@ def verify_expectation_with_ai(
             "ai_debug": {
                 "provider": provider.get("id"),
                 "model": provider.get("model"),
-                "screen": _screen_context_public(screen),
+                "screen": _ai_debug_screen_context(
+                    screen,
+                    provider_id=str(provider.get("id") or ""),
+                    model=str(provider.get("model") or ""),
+                ),
                 "error": _sanitize_llm_error(e),
                 "error_info": err_info,
             },
@@ -3427,7 +3811,11 @@ def verify_expectation_with_ai(
             "ai_debug": {
                 "provider": provider.get("id"),
                 "model": provider.get("model"),
-                "screen": _screen_context_public(screen),
+                "screen": _ai_debug_screen_context(
+                    screen,
+                    provider_id=str(provider.get("id") or ""),
+                    model=str(provider.get("model") or ""),
+                ),
                 "raw_response": None,
             },
         }
@@ -3441,7 +3829,11 @@ def verify_expectation_with_ai(
     ai_debug = {
         "provider": provider.get("id"),
         "model": provider.get("model"),
-        "screen": _screen_context_public(screen),
+        "screen": _ai_debug_screen_context(
+            screen,
+            provider_id=str(provider.get("id") or ""),
+            model=str(provider.get("model") or ""),
+        ),
         "raw_response": raw,
         "task": "assert",
     }
@@ -3481,10 +3873,19 @@ def _plan_message_ai(
     if known_apps:
         ctx["known_apps"] = known_apps
     llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
-    screen = _build_ai_screen_context(sn, platform, provider_id=provider_id)
-    if screen:
-        llm_ctx["screen"] = _screen_context_for_llm(screen)
     provider = ss.get_ai_provider_credentials(provider_id)
+    screen = _build_ai_screen_context(
+        sn,
+        platform,
+        provider_id=provider_id,
+        expected_package=str(ctx.get("package") or ""),
+    )
+    if screen:
+        llm_ctx["screen"] = _screen_context_for_llm(
+            screen,
+            provider_id=str(provider.get("id") or provider_id),
+            model=str(provider.get("model") or ""),
+        )
     plan_parse_meta: Dict[str, Any] = {}
     try:
         api_type = str(provider.get("api_type") or "").strip().lower()
@@ -3554,7 +3955,11 @@ def _plan_message_ai(
             "ai_debug": {
                 "provider": provider.get("id"),
                 "model": provider.get("model"),
-                "screen": _screen_context_public(screen or {}),
+                "screen": _ai_debug_screen_context(
+                    screen or {},
+                    provider_id=str(provider.get("id") or ""),
+                    model=str(provider.get("model") or ""),
+                ),
                 "compress_image": compress_on,
                 "parse_failed": True,
                 "parse_meta": plan_parse_meta,
@@ -3562,7 +3967,28 @@ def _plan_message_ai(
             },
         }
     raw_plan = _coerce_ai_plan_steps(raw_plan)
+    from server.services.ai.plan.prompt import _is_volcengine_doubao_provider, build_ai_plan_prompt_preview
+
+    is_doubao = _is_volcengine_doubao_provider(
+        str(provider.get("id") or provider_id or ""),
+        str(provider.get("model") or ""),
+    )
+    raw_plan_model_response = json.loads(json.dumps(raw_plan, ensure_ascii=False, default=str))
+    doubao_coord_convert: Dict[str, Any] = {}
+    if is_doubao and screen:
+        raw_plan, doubao_coord_convert = _convert_doubao_plan_to_device_coords(raw_plan, screen)
     raw_plan_before_scale = json.loads(json.dumps(raw_plan, ensure_ascii=False, default=str))
+    prompt_preview = build_ai_plan_prompt_preview(
+        provider_id=str(provider.get("id") or provider_id or ""),
+        model=str(provider.get("model") or ""),
+        screen=screen,
+        drift_replan=ctx.get("drift_replan") if isinstance(ctx.get("drift_replan"), dict) else None,
+        goal_continue_replan=(
+            ctx.get("goal_continue_replan")
+            if isinstance(ctx.get("goal_continue_replan"), dict)
+            else None
+        ),
+    )
     coord_retry_log: List[Dict[str, Any]] = []
     openai_compatible = not (
         api_type == "gemini"
@@ -3571,19 +3997,41 @@ def _plan_message_ai(
         or api_type == "anthropic"
         or provider.get("id") in {"anthropic", "umodelverse"}
     )
-    preview_coord_violations = _collect_ai_preview_coord_violations(
-        raw_plan_before_scale.get("steps"),
-        screen,
-    )
+    if is_doubao:
+        preview_coord_violations = _validate_device_coord_violations(
+            raw_plan_before_scale.get("steps"),
+            screen,
+        )
+        coord_space = "device"
+    else:
+        preview_coord_violations, coord_space = _analyze_ai_plan_coordinates(
+            raw_plan_before_scale.get("steps"),
+            screen,
+        )
     coord_retry_log.append(
         {
             "attempt": 1,
             "violations": preview_coord_violations,
+            "coord_space": coord_space,
             "raw_plan": raw_plan_before_scale,
+            "raw_plan_model": raw_plan_model_response,
+            "doubao_coord_convert": doubao_coord_convert,
         }
     )
+    if coord_space == "device" and not is_doubao:
+        SLog.i(
+            TAG,
+            f"AI plan coords treated as device space channel={channel} "
+            f"preview={(screen or {}).get('preview_width')}x{(screen or {}).get('preview_height')} "
+            f"device={(screen or {}).get('width')}x{(screen or {}).get('height')}",
+        )
     if preview_coord_violations and openai_compatible:
-        correction = _build_preview_coord_correction_message(preview_coord_violations, screen)
+        correction = _build_preview_coord_correction_message(
+            preview_coord_violations,
+            screen,
+            provider_id=str(provider.get("id") or ""),
+            model=str(provider.get("model") or ""),
+        )
         SLog.w(
             TAG,
             f"AI plan preview coords out of bounds, retrying once channel={channel} "
@@ -3602,18 +4050,35 @@ def _plan_message_ai(
             plan_parse_meta = {**plan_parse_meta, "coord_retry_parse_meta": retry_meta}
             if retry_plan:
                 raw_plan = _coerce_ai_plan_steps(retry_plan)
+                raw_plan_model_response = json.loads(
+                    json.dumps(raw_plan, ensure_ascii=False, default=str)
+                )
+                if is_doubao and screen:
+                    raw_plan, doubao_coord_convert = _convert_doubao_plan_to_device_coords(
+                        raw_plan, screen
+                    )
                 raw_plan_before_scale = json.loads(
                     json.dumps(raw_plan, ensure_ascii=False, default=str)
                 )
-                preview_coord_violations = _collect_ai_preview_coord_violations(
-                    raw_plan_before_scale.get("steps"),
-                    screen,
-                )
+                if is_doubao:
+                    preview_coord_violations = _validate_device_coord_violations(
+                        raw_plan_before_scale.get("steps"),
+                        screen,
+                    )
+                    coord_space = "device"
+                else:
+                    preview_coord_violations, coord_space = _analyze_ai_plan_coordinates(
+                        raw_plan_before_scale.get("steps"),
+                        screen,
+                    )
                 coord_retry_log.append(
                     {
                         "attempt": 2,
                         "violations": preview_coord_violations,
+                        "coord_space": coord_space,
                         "raw_plan": raw_plan_before_scale,
+                        "raw_plan_model": raw_plan_model_response,
+                        "doubao_coord_convert": doubao_coord_convert,
                         "correction": correction,
                     }
                 )
@@ -3650,9 +4115,16 @@ def _plan_message_ai(
             "ai_debug": {
                 "provider": provider.get("id"),
                 "model": provider.get("model"),
-                "screen": _screen_context_public(screen or {}),
-                "screen_for_llm": _screen_context_for_llm(screen or {}),
+                "screen": _ai_debug_screen_context(
+                    screen or {},
+                    provider_id=str(provider.get("id") or ""),
+                    model=str(provider.get("model") or ""),
+                ),
                 "raw_plan": raw_plan_before_scale,
+                "raw_plan_model": raw_plan_model_response,
+                "prompt_preview": prompt_preview,
+                "image_pipeline": _ai_image_pipeline_debug(screen),
+                "doubao_coord_convert": doubao_coord_convert,
                 "coord_retry_log": coord_retry_log,
                 "preview_coord_violations": preview_coord_violations,
             },
@@ -3672,6 +4144,7 @@ def _plan_message_ai(
     raw_plan, coordinate_scale = _scale_ai_plan_coordinates(
         json.loads(json.dumps(raw_plan_before_scale, ensure_ascii=False, default=str)),
         screen,
+        coord_space=coord_space,
     )
     if coord_retry_log:
         coordinate_scale = {**coordinate_scale, "coord_retry_log": coord_retry_log}
@@ -3701,8 +4174,16 @@ def _plan_message_ai(
     ai_debug = {
         "provider": provider.get("id"),
         "model": provider.get("model"),
-        "screen": _screen_context_public(screen),
+        "screen": _ai_debug_screen_context(
+            screen,
+            provider_id=str(provider.get("id") or ""),
+            model=str(provider.get("model") or ""),
+        ),
         "raw_plan": raw_plan_before_scale,
+        "raw_plan_model": raw_plan_model_response,
+        "prompt_preview": prompt_preview,
+        "image_pipeline": _ai_image_pipeline_debug(screen),
+        "doubao_coord_convert": doubao_coord_convert,
         "coordinate_scale": coordinate_scale,
         "normalized_steps": normalized_steps,
         "invalid_visual_steps": invalid_visual_steps,
@@ -3732,6 +4213,28 @@ def _plan_message_ai(
             },
         }
     blockers = raw_plan.get("blockers") or []
+    from server.services.executor.plan_execute_service import infer_plan_complete, step_fulfills_case_command
+
+    plan_complete_raw = raw_plan.get("plan_complete")
+    inferred_complete = infer_plan_complete(
+        text,
+        normalized_steps,
+        str(raw_plan.get("reply") or ""),
+    )
+    fulfills_command = step_fulfills_case_command(text, normalized_steps)
+    if plan_complete_raw is None:
+        plan_complete = inferred_complete
+    else:
+        plan_complete = bool(plan_complete_raw)
+        if plan_complete and not inferred_complete and not fulfills_command:
+            SLog.i(
+                TAG,
+                f"AI plan_complete overridden to false channel={channel} "
+                f"instruction={text[:48]!r}",
+            )
+            plan_complete = False
+    if fulfills_command:
+        plan_complete = True
     # Copilot 对话：步骤已被 Server 规范化（含包名纠错）后应自动执行；
     # 模型因包名猜测不确定而设 auto_run=false 不应阻断执行。
     auto_run = bool(normalized_steps) or raw_plan.get("auto_run", True)
@@ -3748,7 +4251,7 @@ def _plan_message_ai(
         "navigate": raw_plan.get("navigate"),
         "sn": sn,
         "auto_run": auto_run,
-        "plan_complete": bool(normalized_steps),
+        "plan_complete": plan_complete,
         "planner": {
             "mode": "ai",
             "provider_id": provider.get("id"),

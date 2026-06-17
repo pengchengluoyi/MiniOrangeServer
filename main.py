@@ -297,7 +297,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "version": "0.0.95",
+        "version": "0.0.96",
         "ip": get_local_ip(),
         "mdns": f"http://miniorange-{safe_hostname}.local:10104"
     }

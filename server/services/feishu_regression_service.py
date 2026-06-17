@@ -626,106 +626,18 @@ def _run_command_block(
     run_id: str = "",
     profile: Optional[ExecutionProfile] = None,
 ) -> Dict[str, Any]:
-    profile = (
-        profile
-        or context.get("execution_profile")
-        or resolve_execution_profile("case_execution")
-    )
-    if not command:
-        return {
-            "phase": phase,
-            "command": "",
-            "plan_log": [],
-            "execute_log": [],
-            "step_results": [],
-            "ok": True,
-        }
-    plan_ctx = {**context, "case_step_text": command}
-    if icon_targets:
-        plan_ctx["icon_targets"] = icon_targets
-    plan = cs.plan_message(command, sn=sn, context=plan_ctx, channel="case_execution")
-    plan_log = aas.build_plan_log(command, plan)
-    if plan.get("error") or not plan.get("steps"):
-        return {
-            "phase": phase,
-            "command": command,
-            "plan_log": plan_log,
-            "execute_log": [],
-            "step_results": [],
-            "ok": False,
-            "msg": plan.get("reply") or plan.get("error") or "规划失败",
-        }
-    planner_mode = str((plan.get("planner") or {}).get("mode") or profile.mode or "local").lower()
-    use_overlay_guard = (
-        planner_mode != "ai"
-        and not bool(context.get("skip_overlay_guard"))
-    )
-    results = execute_steps(
-        plan.get("steps") or [],
+    from server.services.executor.plan_execute_service import run_command_block
+
+    return run_command_block(
+        command,
         sn=sn,
         platform=platform,
+        context=context,
         icon_targets=icon_targets,
+        phase=phase,
         run_id=run_id,
-        capture_screenshots=bool(run_id),
-        app_id=str(context.get("app_id") or context.get("appId") or ""),
-        skip_overlay_clear=bool(context.get("skip_overlay_clear")),
-        enable_overlay_guard=use_overlay_guard,
-        target_package=str(context.get("package") or ""),
-        stop_on_failure=True,
+        profile=profile,
     )
-    try:
-        from server.services.shared.run_context.regression_run_context import get_ctx
-        from server.services.local.overlay.overlay_guard_service import merge_guard_plan_log
-
-        gctx = get_ctx()
-        guard_planned = (gctx or {}).get("guard_planned_steps") or []
-        if guard_planned:
-            plan_log = merge_guard_plan_log(plan_log, guard_planned)
-            if gctx is not None:
-                gctx["guard_planned_steps"] = []
-    except Exception:
-        pass
-    segment_errors = list(plan.get("segment_errors") or [])
-    ok = aas.business_step_results_ok(results)
-    if results and use_overlay_guard:
-        guard_fail = any(
-            not r.get("ok")
-            for r in results
-            if (r.get("phase") or "") == "overlay_guard"
-            and (r.get("kind") or "") in ("overlay_guard", "click")
-        )
-        if guard_fail:
-            ok = False
-    # segment_errors 仅记入 plan_log 告警，不把已成功的点击操作标为失败
-    fail_msgs = [r.get("msg") or "" for r in results if not r.get("ok")]
-    if segment_errors:
-        fail_msgs = segment_errors + fail_msgs
-    return {
-        "phase": phase,
-        "command": command,
-        "plan_log": plan_log,
-        "execute_log": aas.build_execute_log(results),
-        "step_results": results,
-        "reply": plan.get("reply") or "",
-        "ok": ok,
-        "msg": "；".join(m for m in fail_msgs if m)[:400],
-        "segment_errors": segment_errors,
-        "plan_complete": plan.get("plan_complete", len(segment_errors) == 0),
-        "knowledge_hints": list(plan.get("knowledge_hints") or []),
-        "page_hint": plan.get("page_hint") or "",
-        "thought_meta": {
-            "reply": plan.get("display_reply") or plan.get("reply") or "",
-            "plan_reply": plan.get("display_reply") or plan.get("reply") or "",
-            "knowledge_hints": list(plan.get("knowledge_hints") or []),
-            "page_hint": plan.get("page_hint") or "",
-            "segment_errors": list(segment_errors),
-            "plan_log": plan_log,
-            "planner": plan.get("planner") or {},
-            "ai_debug": plan.get("ai_debug"),
-        },
-        "planner": plan.get("planner") or {},
-        "ai_debug": plan.get("ai_debug"),
-    }
 
 
 def _stamp_case_duration(item: Dict[str, Any], case_started: float) -> None:
@@ -1831,6 +1743,8 @@ def _run_case_steps_sequential(
             plan_log,
             exec_log_ordered,
             reply=action_block.get("reply") or "",
+            step_results=action_block.get("step_results") or [],
+            replan_history=action_block.get("replan_history") or [],
         )
         display_recovery = None if delegated_guard else (dict(page_recovery) if page_recovery else None)
         if display_recovery and recovery_exec:
@@ -1852,6 +1766,10 @@ def _run_case_steps_sequential(
             "knowledge_hints": action_block.get("knowledge_hints") or [],
             "plans": op_tree.get("plans") or [],
             "flat_items": op_tree.get("flat_items") or [],
+            "multi_round": bool(op_tree.get("multi_round")),
+            "replan_history": op_tree.get("replan_history") or action_block.get("replan_history") or [],
+            "goal_continue_count": action_block.get("goal_continue_count") or 0,
+            "drift_replan_count": action_block.get("drift_replan_count") or 0,
             "plan_log": plan_log,
             "execute_log": exec_log_ordered,
             "ok": action_ok,
@@ -2652,21 +2570,31 @@ def _execute_cases_batch(
                 continue
         else:
             command = item["command"]
-            plan = cs.plan_message(command, sn=sn, context=context, channel="case_execution")
-            plan_log = aas.build_plan_log(command, plan)
+            action_block = _run_command_block(
+                command,
+                sn=sn,
+                platform=platform,
+                context=context,
+                icon_targets=icon_targets,
+                phase="action",
+                run_id=run_id,
+                profile=context.get("execution_profile"),
+            )
+            plan_log = action_block.get("plan_log") or []
+            results = action_block.get("step_results") or []
             trace.append(
                 {
                     "phase": "plan",
                     "title": "步骤拆解",
                     "command": command,
                     "plan_log": plan_log,
-                    "reply": plan.get("reply"),
+                    "reply": action_block.get("reply"),
+                    "drift_replan_count": action_block.get("drift_replan_count") or 0,
                 }
             )
-
-            if plan.get("error") or not plan.get("steps"):
+            if not action_block.get("ok") and not results:
                 item["status"] = "fail"
-                item["msg"] = plan.get("reply") or plan.get("error") or "规划失败"
+                item["msg"] = action_block.get("msg") or "规划失败"
                 item["execution_trace"] = trace
                 run_doc["failed"] += 1
                 _stamp_case_duration(item, case_started)
@@ -2675,23 +2603,6 @@ def _execute_cases_batch(
             shot_before = _capture_step_screenshot(
                 sn, platform, run_id=run_id, tag=f"case_{case.get('case_id')}_before"
             )
-            exec_profile = context.get("execution_profile") or resolve_execution_profile(
-                "case_execution"
-            )
-            planner_mode = str(
-                (plan.get("planner") or {}).get("mode") or exec_profile.mode or "local"
-            ).lower()
-            results = execute_steps(
-                plan.get("steps") or [],
-                sn=sn,
-                platform=platform,
-                icon_targets=icon_targets,
-                run_id=run_id,
-                capture_screenshots=True,
-                app_id=app.id,
-                enable_overlay_guard=planner_mode != "ai",
-                target_package=str(context.get("package") or ""),
-            )
             all_results.extend(results)
             item["step_results"] = results
             trace.append(
@@ -2699,7 +2610,8 @@ def _execute_cases_batch(
                     "phase": "execute",
                     "title": "执行动作",
                     "screenshot_before": shot_before,
-                    "execute_log": aas.build_execute_log(results),
+                    "execute_log": action_block.get("execute_log") or aas.build_execute_log(results),
+                    "drift_replan_count": action_block.get("drift_replan_count") or 0,
                 }
             )
 
