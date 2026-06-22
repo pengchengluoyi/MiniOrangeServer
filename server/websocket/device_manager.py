@@ -2,6 +2,7 @@
 # -*-coding:utf-8 -*-
 
 import json
+import re
 import time
 import uuid
 from typing import Callable, Dict, Optional, TypeVar
@@ -16,6 +17,13 @@ from server.models.mDevice import MDevice, MDeviceLog
 from server.core.log_database import LogSessionLocal
 from server.models.log import WorkflowLog
 from script.log import SLog
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover
+    httpx = None
+
+DEFAULT_PAIR_PORT = 10105
 
 # 创建会话工厂
 SessionLocal = sessionmaker(bind=engine)
@@ -149,6 +157,33 @@ class DeviceManager:
         except Exception as e:
             SLog.w("DeviceManager", f"PAIR_CONFIG failed sn={sn}: {e}")
 
+    async def _push_pair_config_http(self, ip: str, config: dict) -> bool:
+        """向 ClawNode 局域网 HTTP 配对端口推送 PAIR_CONFIG（被动配对）。"""
+        if not ip or not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
+            SLog.w("DeviceManager", f"HTTP pair push skip invalid ip={ip!r}")
+            return False
+        if httpx is None:
+            SLog.w("DeviceManager", "HTTP pair push skip: httpx not installed")
+            return False
+        port = int(config.get("pair_port") or DEFAULT_PAIR_PORT)
+        url = f"http://{ip}:{port}/pair"
+        payload = {
+            "ws_url": config.get("ws_url", ""),
+            "auth_token": config.get("auth_token", ""),
+            "gateway_id": config.get("gateway_id", ""),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload)
+                SLog.i(
+                    "DeviceManager",
+                    f"HTTP pair push ip={ip}:{port} status={resp.status_code} body={resp.text[:160]}",
+                )
+                return resp.status_code == 200
+        except Exception as e:
+            SLog.w("DeviceManager", f"HTTP pair push failed ip={ip}:{port}: {e}")
+            return False
+
     async def adopt_clawnode(self, sn: str, config: dict) -> dict:
         """桌面端确认添加设备：下发配对配置，或等待 pairing 模式连接。"""
         if not sn:
@@ -168,7 +203,17 @@ class DeviceManager:
             self.pending_pairings.pop(sn, None)
             SLog.i("DeviceManager", f"adopt_clawnode PAIR_CONFIG delivered immediately sn={sn}")
         else:
-            SLog.i("DeviceManager", f"adopt_clawnode waiting pairing mode connect sn={sn}")
+            device_ip = (config.get("ip") or "").strip()
+            pushed = await self._push_pair_config_http(device_ip, config) if device_ip else False
+            if pushed:
+                self.pending_pairings.pop(sn, None)
+                SLog.i("DeviceManager", f"adopt_clawnode HTTP pair delivered sn={sn} ip={device_ip}")
+            else:
+                SLog.i(
+                    "DeviceManager",
+                    f"adopt_clawnode HTTP pair pending sn={sn} ip={device_ip or 'none'} "
+                    f"(device listens on :{config.get('pair_port') or DEFAULT_PAIR_PORT})",
+                )
         await self.notify_device_list_changed("adopt", sn)
         from server.services.device_service import DeviceService
 

@@ -408,6 +408,7 @@ async def handle_adopt_clawnode(websocket, data: dict):
         "gateway_id": identity.get("instance_id", ""),
         "model": (data.get("model") or "").strip(),
         "ip": ip,
+        "pair_port": int(data.get("pair_port") or 10105),
         "type": "android_direct",
     }
     SLog.i("wsHandlers", f"adopt_clawnode sn={sn} host={host} ws_url={ws_url} device_ip={ip or '(none)'} model={config['model']}")
