@@ -44,6 +44,7 @@ from server.routers import rSchedule as schedule_router
 from server.routers import rFeishuRegression as feishu_router
 from server.routers import rAppAutomation as app_automation_router
 from server.routers import rSettings as settings_router
+from server.routers import rClawNode as clawnode_router
 import server.models.app_regression_run  # noqa: F401 — register ORM table
 import server.models.app_icon_target  # noqa: F401 — register ORM table
 
@@ -271,6 +272,7 @@ app.include_router(schedule_router.router)
 app.include_router(feishu_router.router)
 app.include_router(app_automation_router.router)
 app.include_router(settings_router.router)
+app.include_router(clawnode_router.router)
 
 
 @app.get("/")
@@ -283,7 +285,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.96",
+        "version": "0.0.97",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

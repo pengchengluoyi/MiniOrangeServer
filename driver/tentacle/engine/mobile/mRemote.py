@@ -181,8 +181,12 @@ class RemoteEngine(MobileEngine):
         return None
 
     def screen_on(self):
-        self._request("WAKE_UP", {})
+        # ClawNode 通过无障碍 dispatchGesture 操作，无需 WakeUpActivity（会抢前台）。
         return None
+
+    def ensure_screen_ready(self, node_sn=None) -> bool:
+        """纯像素节点无 adb 亮屏/解锁；手势不依赖本 App 在前台。"""
+        return True
 
     def start_app(self, package_name=None):
         # 纯像素节点无法 am start；记录告警，返回 None 不中断上层

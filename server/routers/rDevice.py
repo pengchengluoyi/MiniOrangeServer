@@ -18,6 +18,7 @@ class DeviceInfo(BaseModel):
     status: str
     role: Optional[str] = "node"
     password: Optional[str] = None
+    app_version: Optional[str] = None
     last_online: Optional[str] = None
 
 class CommandReq(BaseModel):
@@ -34,7 +35,9 @@ def get_device_list():
     """获取设备列表"""
     try:
         result = []
+        dm = DeviceManager()
         for d in DeviceService.list_all():
+            meta = dm.device_meta.get(d.sn, {})
             result.append({
                 "sn": d.sn,
                 "type": d.device_type,
@@ -43,6 +46,7 @@ def get_device_list():
                 "status": d.status,
                 "role": d.role,
                 "password": d.password,
+                "app_version": meta.get("app_version"),
                 "last_online": str(d.last_online_time) if d.last_online_time else None
             })
         return result

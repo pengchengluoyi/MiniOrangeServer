@@ -11,7 +11,7 @@ from server.websocket.routers.wNode import (
 from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_list, handle_get_component, \
     handle_get_device_password, handle_set_device_password, handle_get_world_model, handle_get_app_graph, handle_ask_local_ai, \
     handle_get_workflow_detail, handle_sync_timeline, handle_get_timeline, handle_get_timeline_list, \
-    handle_get_run_context
+    handle_get_run_context, handle_adopt_clawnode, handle_fetch_clawnode_logs, handle_unbind_clawnode
 from server.websocket.routers.wCopilot import handle_copilot_chat, handle_copilot_execute
 from server.websocket.routers.wClawNode import (
     handle_clawnode_register,
@@ -55,6 +55,9 @@ HANDLERS = {
     "upload": handle_upload,
     "run_workflow": handle_run_workflow,
     "get_device_list": handle_get_device_list,
+    "adopt_clawnode": handle_adopt_clawnode,
+    "fetch_clawnode_logs": handle_fetch_clawnode_logs,
+    "unbind_clawnode": handle_unbind_clawnode,
     "get_component": handle_get_component,
     "get_device_password": handle_get_device_password,
     "set_device_password": handle_set_device_password,

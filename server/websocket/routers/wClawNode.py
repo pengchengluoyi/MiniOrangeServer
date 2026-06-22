@@ -120,11 +120,45 @@ def translate_control_to_clawnode(params: dict) -> dict:
         kev = params.get("keyevent") or params.get("key") or params.get("event")
         return {"trace_id": trace_id, "action_type": "KEY_EVENT", "payload": {"keyevent": kev}}
 
-    if action in ("stop_app", "force_stop"):
+    if action in ("stop_app", "force_stop", "close_app"):
         return {
             "trace_id": trace_id,
-            "action_type": "STOP_APP",
+            "action_type": "CLOSE_APP",
             "payload": {"package": params.get("package") or params.get("pkg") or ""},
+        }
+
+    if action in ("kill_app", "force_kill"):
+        return {
+            "trace_id": trace_id,
+            "action_type": "KILL_APP",
+            "payload": {"package": params.get("package") or params.get("pkg") or ""},
+        }
+
+    if action in ("clear_app_cache", "clear_cache"):
+        return {
+            "trace_id": trace_id,
+            "action_type": "CLEAR_APP_CACHE",
+            "payload": {"package": params.get("package") or params.get("pkg") or ""},
+        }
+
+    if action in ("export_logs", "upload_logs"):
+        minutes = params.get("minutes")
+        payload = {}
+        if minutes is not None:
+            try:
+                payload["minutes"] = int(minutes)
+            except (TypeError, ValueError):
+                pass
+        return {"trace_id": params.get("trace_id") or trace_id, "action_type": "EXPORT_LOGS", "payload": payload}
+
+    if action in ("open_app", "start_app", "launch_app"):
+        return {
+            "trace_id": trace_id,
+            "action_type": "OPEN_APP",
+            "payload": {
+                "package": params.get("package") or params.get("pkg") or "",
+                "activity": params.get("activity"),
+            },
         }
 
     return None

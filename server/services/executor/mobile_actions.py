@@ -639,10 +639,15 @@ def _run_mobile_click(
             except TypeError:
                 clicked = engine.click(None, position=(cx, cy), label=tap_label)
             if clicked is False:
+                tap_hint = (
+                    "触控注入失败，请确认 ClawNode 无障碍已开启且设备 WebSocket 在线"
+                    if str(sn).startswith("claw-")
+                    else "触控注入失败，请检查 USB 调试(安全设置) 与无障碍 ATX"
+                )
                 return _with_locate_debug(
                     {
                         "ok": False,
-                        "msg": f"{detail} — 触控注入失败，请检查 USB 调试(安全设置) 与无障碍 ATX",
+                        "msg": f"{detail} — {tap_hint}",
                         "method": method,
                         "x": cx,
                         "y": cy,

@@ -181,8 +181,32 @@ class DeviceManager:
                 )
                 return resp.status_code == 200
         except Exception as e:
-            SLog.w("DeviceManager", f"HTTP pair push failed ip={ip}:{port}: {e}")
+            SLog.w("DeviceManager", f"HTTP pair push failed ip={ip}:{port}: {type(e).__name__}: {e!r}")
             return False
+
+    async def _push_pair_config_http_with_retry(
+        self, ip: str, config: dict, attempts: int = 6, interval: float = 2.0,
+    ) -> bool:
+        for attempt in range(attempts):
+            if await self._push_pair_config_http(ip, config):
+                return True
+            if attempt < attempts - 1:
+                await asyncio.sleep(interval)
+        return False
+
+    async def _pending_http_pair_loop(self, sn: str):
+        """HTTP 首次失败后后台重试，直到配对成功或 pending 过期。"""
+        while True:
+            pending = self.pending_pairings.get(sn)
+            if not pending or pending.get("expires", 0) <= time.time():
+                return
+            ip = (pending.get("ip") or "").strip()
+            if ip and await self._push_pair_config_http(ip, pending):
+                self.pending_pairings.pop(sn, None)
+                SLog.i("DeviceManager", f"adopt_clawnode HTTP pair delivered (retry) sn={sn} ip={ip}")
+                await self.notify_device_list_changed("pair_pushed", sn)
+                return
+            await asyncio.sleep(3)
 
     async def adopt_clawnode(self, sn: str, config: dict) -> dict:
         """桌面端确认添加设备：下发配对配置，或等待 pairing 模式连接。"""
@@ -204,7 +228,10 @@ class DeviceManager:
             SLog.i("DeviceManager", f"adopt_clawnode PAIR_CONFIG delivered immediately sn={sn}")
         else:
             device_ip = (config.get("ip") or "").strip()
-            pushed = await self._push_pair_config_http(device_ip, config) if device_ip else False
+            pushed = (
+                await self._push_pair_config_http_with_retry(device_ip, config)
+                if device_ip else False
+            )
             if pushed:
                 self.pending_pairings.pop(sn, None)
                 SLog.i("DeviceManager", f"adopt_clawnode HTTP pair delivered sn={sn} ip={device_ip}")
@@ -214,6 +241,8 @@ class DeviceManager:
                     f"adopt_clawnode HTTP pair pending sn={sn} ip={device_ip or 'none'} "
                     f"(device listens on :{config.get('pair_port') or DEFAULT_PAIR_PORT})",
                 )
+                if device_ip:
+                    asyncio.create_task(self._pending_http_pair_loop(sn))
         await self.notify_device_list_changed("adopt", sn)
         from server.services.device_service import DeviceService
 

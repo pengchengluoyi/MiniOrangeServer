@@ -27,6 +27,52 @@ def is_valid_sn(sn: Optional[str]) -> bool:
     return True
 
 
+def _normalize_model(model: Optional[str]) -> str:
+    """提取型号标识，用于合并 USB hub 与 ClawNode 重复条目。"""
+    if not model:
+        return ""
+    import re
+    text = str(model).strip().upper()
+    match = re.search(r"[A-Z0-9]{5,}", text)
+    return match.group(0) if match else text
+
+
+def _is_claw_direct(device: MDevice) -> bool:
+    sn = str(device.sn or "")
+    return sn.startswith("claw-") or str(device.device_type or "") == "android_direct"
+
+
+def dedupe_devices(devices: List[MDevice]) -> List[MDevice]:
+    """
+    同一台手机可能同时以 USB hub（adb serial）和 ClawNode WS（claw-*）注册。
+    展示时保留 ClawNode 直连，隐藏重复的 hub 条目。
+    """
+    claws_by_model: dict[str, MDevice] = {}
+    claws_by_ip: dict[str, MDevice] = {}
+    for device in devices:
+        if not _is_claw_direct(device):
+            continue
+        model_key = _normalize_model(device.model)
+        if model_key:
+            claws_by_model[model_key] = device
+        ip = str(device.ip_address or "").strip()
+        if ip and ip.upper() != "USB":
+            claws_by_ip[ip] = device
+
+    skip_sns: set[str] = set()
+    for device in devices:
+        if str(device.device_type or "") != "android" or str(device.role or "") != "hub":
+            continue
+        model_key = _normalize_model(device.model)
+        ip = str(device.ip_address or "").strip()
+        if model_key and model_key in claws_by_model:
+            skip_sns.add(str(device.sn))
+        elif ip and ip in claws_by_ip:
+            skip_sns.add(str(device.sn))
+
+    return [device for device in devices if str(device.sn) not in skip_sns]
+
+
 class DeviceService:
     @staticmethod
     def get_by_sn(sn: str, db=None) -> Optional[MDevice]:
@@ -102,12 +148,13 @@ class DeviceService:
         return devices[0].sn if devices else None
 
     @staticmethod
-    def list_all(db=None) -> List[MDevice]:
+    def list_all(db=None, *, dedupe: bool = True) -> List[MDevice]:
         close = db is None
         if close:
             db = SessionLocal()
         try:
-            return [d for d in db.query(MDevice).all() if is_valid_sn(d.sn)]
+            devices = [d for d in db.query(MDevice).all() if is_valid_sn(d.sn)]
+            return dedupe_devices(devices) if dedupe else devices
         finally:
             if close:
                 db.close()
