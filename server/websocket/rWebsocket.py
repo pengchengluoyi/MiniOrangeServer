@@ -52,7 +52,7 @@ async def websocket_endpoint(
     # [安全校验] 检查 Access Token
     server_token = SecurityManager.get_token()
     dm = DeviceManager()
-    SLog.i(TAG, f"⚡ [WS] New connection attempt. Client token: {token}. Server token (from get_token): {server_token}")
+    SLog.i(TAG, f"⚡ [WS] New connection attempt pairing={pairing} node_sn={node_sn} token={'set' if token else 'none'}")
 
     if pairing and node_sn:
         pending = dm.pending_pairings.get(node_sn)
