@@ -72,6 +72,12 @@ class DeviceManager:
     pending_pairings: Dict[str, dict] = {}
     # [ClawNode] 注册时上报的扩展元数据 { sn: {app_version, ...} }
     device_meta: Dict[str, dict] = {}
+    # 最近一次应用层 heartbeat 时间戳（秒）
+    _last_app_heartbeat: Dict[str, float] = {}
+
+    # ClawNode 后台 WS 可能因 OEM 省电短暂断连；宽限期内不因 disconnect 立即下线
+    CLAWNODE_WS_GRACE_SEC = 180  # WS 断开后仍视为在线的最长秒数（依赖最近 heartbeat）
+    CLAWNODE_HEARTBEAT_TIMEOUT_SEC = 180  # 无 WS 且无 heartbeat 时的离线阈值
 
     def __new__(cls):
         if cls._instance is None:
@@ -126,6 +132,7 @@ class DeviceManager:
         if not data.get("type"):
             data = {**data, "type": "android_direct"}
         self._register_device(sn, data)
+        self._last_app_heartbeat[sn] = time.time()
         self._save_log(sn, "receive", "register_clawnode", json.dumps(data))
         SLog.i("DeviceManager", f"register_clawnode sn={sn} model={data.get('model')} app={data.get('app_version')}")
         asyncio.create_task(self._after_clawnode_register(websocket, sn))
@@ -290,6 +297,16 @@ class DeviceManager:
                     device.ip_address = ip
                 db.commit()
                 SLog.i("DeviceManager", f"Adopted device pre-registered: {sn}")
+                from server.services.device_service import remove_duplicate_hubs_for_claw
+
+                removed = remove_duplicate_hubs_for_claw(
+                    sn,
+                    model=(config.get("model") or "").strip(),
+                    ip=(config.get("ip") or "").strip(),
+                    db=db,
+                )
+                if removed:
+                    SLog.i("DeviceManager", f"Merged duplicate hub(s) {removed} into {sn}")
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error adopt register: {e}")
 
@@ -391,14 +408,12 @@ class DeviceManager:
 
     async def heartbeat(self, websocket: WebSocket, data: dict):
         """处理心跳 (对应 wsMap 中的 heartbeat)"""
-        sn = data.get("sn")
+        sn = data.get("sn") or (data.get("data") or {}).get("sn")
         if sn:
-            # 修复：如果设备是热插拔接入（未经过 register），或者服务重启后内存丢失
-            # 只要收到心跳，就认为该设备可通过当前 WebSocket 访问，重建映射
-            # 同时也处理设备漫游的情况（从一个节点移动到另一个节点），更新 WebSocket 引用
             if sn not in self.active_connections or self.active_connections[sn] != websocket:
                 self.active_connections[sn] = websocket
                 SLog.i("DeviceManager", f"Active connection updated for {sn} via heartbeat")
+            self._last_app_heartbeat[sn] = time.time()
             self._update_device_status(sn, "online")
         return {"code": 200}
 
@@ -411,9 +426,21 @@ class DeviceManager:
             await self._cleanup_on_disconnect(sn)
             if sn in self._stop_command_sent:
                 self._stop_command_sent.remove(sn)  # 清理标记
-            self.direct_nodes.discard(sn)  # [ClawNode] 清理直连标记
             if sn in self.active_connections:
                 del self.active_connections[sn]
+
+            # ClawNode 后台断连时保留 direct_nodes 与在线状态，由 heartbeat 监控判真正离线
+            if sn in self.direct_nodes:
+                recent = self._last_app_heartbeat.get(sn, 0)
+                if recent and (time.time() - recent) <= self.CLAWNODE_WS_GRACE_SEC:
+                    SLog.i(
+                        "DeviceManager",
+                        f"ClawNode {sn} WS dropped, defer offline (last_hb={int(time.time() - recent)}s ago)",
+                    )
+                    asyncio.create_task(self.notify_device_list_changed("disconnect_deferred", sn))
+                    continue
+
+            self.direct_nodes.discard(sn)
             self._update_device_status(sn, "offline")
             SLog.i("DeviceManager", f"Device disconnected: {sn}")
             asyncio.create_task(self.notify_device_list_changed("disconnect", sn))
@@ -804,27 +831,41 @@ class DeviceManager:
 
     async def monitor_heartbeats(self):
         """后台任务：监控设备心跳，超时自动下线"""
-        # 启动时先执行一次清理重复设备
         self._cleanup_duplicate_devices()
         SLog.i("DeviceManager", "Starting heartbeat monitor...")
         while True:
-            await asyncio.sleep(30) # 每30秒检查一次
+            await asyncio.sleep(30)
+            now_ts = time.time()
+
             def _sweep():
                 with SessionLocal() as db:
-                    timeout_threshold = datetime.now() - timedelta(seconds=60)
-                    devices = db.query(MDevice).filter(
-                        MDevice.status == "online",
-                        MDevice.last_online_time < timeout_threshold,
-                    ).all()
+                    devices = db.query(MDevice).filter(MDevice.status == "online").all()
 
                     for dev in devices:
-                        SLog.w("DeviceManager", f"Device {dev.sn} heartbeat timeout. Marking offline.")
+                        sn = str(dev.sn)
+                        ws = self.active_connections.get(sn)
+                        if ws is not None:
+                            # 连接仍在：刷新 DB 在线时间，避免仅 mDNS 可达时被误判
+                            dev.status = "online"
+                            dev.last_online_time = datetime.now().replace(microsecond=0)
+                            continue
+                        recent = self._last_app_heartbeat.get(sn, 0)
+                        grace_sec = (
+                            self.CLAWNODE_HEARTBEAT_TIMEOUT_SEC
+                            if sn in self.direct_nodes
+                            else 90
+                        )
+                        timeout_threshold = datetime.now() - timedelta(seconds=grace_sec)
+                        if recent and (now_ts - recent) <= grace_sec:
+                            continue
+                        if dev.last_online_time and dev.last_online_time >= timeout_threshold:
+                            continue
+                        SLog.w("DeviceManager", f"Device {sn} heartbeat timeout. Marking offline.")
                         dev.status = "offline"
-                        if dev.sn in self.active_connections:
-                            del self.active_connections[dev.sn]
+                        self.active_connections.pop(sn, None)
+                        self._last_app_heartbeat.pop(sn, None)
 
-                    if devices:
-                        db.commit()
+                    db.commit()
 
             try:
                 _with_db_retry(_sweep)
@@ -965,6 +1006,17 @@ class DeviceManager:
                 device.last_online_time = now.replace(microsecond=0)
                 db.commit()
                 SLog.i("DeviceManager", f"Device registered/updated: {sn}")
+                if str(sn).startswith("claw-"):
+                    from server.services.device_service import remove_duplicate_hubs_for_claw
+
+                    removed = remove_duplicate_hubs_for_claw(
+                        sn,
+                        model=info.get("model") or device.model,
+                        ip=info.get("ip") or device.ip_address,
+                        db=db,
+                    )
+                    if removed:
+                        SLog.i("DeviceManager", f"Merged duplicate hub(s) {removed} into {sn}")
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error register: {e}")
 
