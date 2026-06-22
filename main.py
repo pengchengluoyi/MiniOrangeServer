@@ -142,26 +142,8 @@ def get_local_ip():
 
 
 async def register_mdns(port):
-    local_ip = get_local_ip()
-    # [修改] 使用主机名作为服务标识，防止局域网内多实例名称冲突
-    hostname = platform.node().split('.')[0]
-    safe_hostname = "".join(c for c in hostname if c.isalnum() or c == "-") or "miniorange"
-
-    mdns_hostname = f"miniorange-{safe_hostname}.local."
-    info = ServiceInfo(
-        "_http._tcp.local.",
-        f"miniorange-{safe_hostname}._http._tcp.local.",
-        addresses=[socket.inet_aton(local_ip)],
-        port=port,
-        server=mdns_hostname
-    )
-    aiozc = AsyncZeroconf(ip_version=IPVersion.V4Only)
-    try:
-        await aiozc.async_register_service(info, allow_name_change=True)
-        SLog.i(TAG, f"--- [System] mDNS Registered: http://{mdns_hostname.rstrip('.')}:{port} ({local_ip}) ---")
-    except Exception as e:
-        SLog.i(TAG, f"--- [Warning] mDNS Registration failed: {e} ---")
-    return aiozc, info
+    from server.core.gateway_beacon import register_gateway_beacons
+    return await register_gateway_beacons(port=port, ws_path="/ws")
 
 
 # -------------------------------------------------------------
@@ -181,7 +163,8 @@ async def lifespan(app: FastAPI):
     configure_proxy_bypass()
 
     # 启动后台服务
-    aiozc, srv_info = await register_mdns(10104)
+    beacon_handle = await register_mdns(10104)
+    app.state.gateway_beacon = beacon_handle
 
     from server.websocket.device_manager import DeviceManager
     # [ClawNode] 捕获主 event loop，供 RemoteEngine 从 worker 线程提交 WS 发送
@@ -254,8 +237,8 @@ async def lifespan(app: FastAPI):
     yield
 
     SLog.i(TAG, "--- [LifeSpan] Shutting down... ---")
-    await aiozc.async_unregister_service(srv_info)
-    await aiozc.async_close()
+    from server.core.gateway_beacon import unregister_gateway_beacons
+    await unregister_gateway_beacons(getattr(app.state, "gateway_beacon", None))
     
     if app.state.device_client_task:
         app.state.device_client_task.cancel()
@@ -292,14 +275,27 @@ app.include_router(settings_router.router)
 
 @app.get("/")
 def health_check():
-    hostname = platform.node().split('.')[0]
-    safe_hostname = "".join(c for c in hostname if c.isalnum() or c == "-") or "miniorange"
+    from server.core.gateway_beacon import build_gateway_identity
 
+    identity = build_gateway_identity(get_local_ip())
+    port = 10104
+    ws_path = "/ws"
+    ip = identity["local_ip"]
     return {
         "status": "ok",
         "version": "0.0.96",
-        "ip": get_local_ip(),
-        "mdns": f"http://miniorange-{safe_hostname}.local:10104"
+        "ip": ip,
+        "mdns": f"http://{identity['lan_host']}:{port}",
+        "gateway": {
+            "role": "gateway",
+            "transport": "gateway",
+            "displayName": identity["display_name"],
+            "instanceId": identity["instance_id"],
+            "lanHost": identity["lan_host"],
+            "gatewayPort": port,
+            "path": ws_path,
+            "wsUrl": f"ws://{ip}:{port}{ws_path}",
+        },
     }
 
 @app.get("/get_api")
