@@ -3,6 +3,7 @@
 
 import json
 import time
+import uuid
 from typing import Callable, Dict, Optional, TypeVar
 from fastapi import WebSocket
 from sqlalchemy.orm import sessionmaker
@@ -59,6 +60,11 @@ class DeviceManager:
     # 在 main.py lifespan 启动时赋值。
     loop = None
 
+    # [ClawNode] 待桌面端确认的配对配置 { sn: {ws_url, auth_token, gateway_id, expires} }
+    pending_pairings: Dict[str, dict] = {}
+    # [ClawNode] 注册时上报的扩展元数据 { sn: {app_version, ...} }
+    device_meta: Dict[str, dict] = {}
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DeviceManager, cls).__new__(cls)
@@ -97,27 +103,211 @@ class DeviceManager:
     def register_clawnode(self, websocket: WebSocket, data: dict):
         """
         [ClawNode] 注册直连节点。
-
-        与 register 的区别：额外把 SN 记入 direct_nodes 集合，标记其为
-        ClawNode 直连身份。落库复用 _register_device（device_type 默认
-        android_direct），因此自动出现在 get_device_list 中。
         """
         sn = data.get("sn")
         if not sn:
             return
+        self.observers.discard(websocket)
         self.active_connections[sn] = websocket
         self.direct_nodes.add(sn)
-        # 默认类型标记为 android_direct，便于前端/日志区分直连节点
+        if data.get("app_version"):
+            self.device_meta[sn] = {
+                **self.device_meta.get(sn, {}),
+                "app_version": data.get("app_version"),
+            }
         if not data.get("type"):
             data = {**data, "type": "android_direct"}
         self._register_device(sn, data)
         self._save_log(sn, "receive", "register_clawnode", json.dumps(data))
+        SLog.i("DeviceManager", f"register_clawnode sn={sn} model={data.get('model')} app={data.get('app_version')}")
+        asyncio.create_task(self._after_clawnode_register(websocket, sn))
+
+    async def _after_clawnode_register(self, websocket: WebSocket, sn: str):
+        pending = self.pending_pairings.get(sn)
+        if pending and pending.get("expires", 0) > time.time():
+            SLog.i("DeviceManager", f"register_clawnode pending PAIR_CONFIG sn={sn}")
+            await self._send_pair_config(websocket, sn, pending)
+            self.pending_pairings.pop(sn, None)
+        await self.notify_device_list_changed("register", sn)
+
+    async def _send_pair_config(self, websocket: WebSocket, sn: str, config: dict):
+        payload = {
+            "type": "PAIR_CONFIG",
+            "data": {
+                "ws_url": config.get("ws_url", ""),
+                "auth_token": config.get("auth_token", ""),
+                "gateway_id": config.get("gateway_id", ""),
+            },
+        }
+        try:
+            await websocket.send_text(json.dumps(payload))
+            SLog.i(
+                "DeviceManager",
+                f"PAIR_CONFIG sent sn={sn} ws_url={config.get('ws_url')} gateway={config.get('gateway_id')} "
+                f"token_len={len(config.get('auth_token') or '')}",
+            )
+        except Exception as e:
+            SLog.w("DeviceManager", f"PAIR_CONFIG failed sn={sn}: {e}")
+
+    async def adopt_clawnode(self, sn: str, config: dict) -> dict:
+        """桌面端确认添加设备：下发配对配置，或等待 pairing 模式连接。"""
+        if not sn:
+            return {"code": 400, "msg": "missing sn"}
+        self._ensure_adopted_device(sn, config)
+        config = {**config, "expires": time.time() + 300}
+        self.pending_pairings[sn] = config
+        ws = self.active_connections.get(sn)
+        online = ws is not None
+        SLog.i(
+            "DeviceManager",
+            f"adopt_clawnode sn={sn} online={online} ws_url={config.get('ws_url')} "
+            f"gateway={config.get('gateway_id')} expires_in=300s pending_keys={list(self.pending_pairings.keys())}",
+        )
+        if ws:
+            await self._send_pair_config(ws, sn, config)
+            self.pending_pairings.pop(sn, None)
+            SLog.i("DeviceManager", f"adopt_clawnode PAIR_CONFIG delivered immediately sn={sn}")
+        else:
+            SLog.i("DeviceManager", f"adopt_clawnode waiting pairing mode connect sn={sn}")
+        await self.notify_device_list_changed("adopt", sn)
+        from server.services.device_service import DeviceService
+
+        devices = []
+        for d in DeviceService.list_all():
+            meta = self.device_meta.get(d.sn, {})
+            devices.append({
+                "sn": d.sn,
+                "type": d.device_type,
+                "role": d.role,
+                "model": d.model,
+                "ip": d.ip_address,
+                "status": d.status,
+                "app_version": meta.get("app_version"),
+                "last_online": str(d.last_online_time) if d.last_online_time else None,
+            })
+        return {
+            "code": 200,
+            "msg": "adopt ok",
+            "data": {"sn": sn, "pending": sn in self.pending_pairings, "devices": devices},
+        }
+
+    def _ensure_adopted_device(self, sn: str, config: dict):
+        """添加时预写入设备表（offline），桌面端列表立即可见。"""
+        from server.services.device_service import is_valid_sn
+
+        if not is_valid_sn(sn):
+            SLog.d("DeviceManager", f"Skip invalid adopt sn={sn!r}")
+            return
+        try:
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == sn).first()
+                if not device:
+                    device = MDevice(sn=sn)
+                    db.add(device)
+                if device.status != "online":
+                    device.status = "offline"
+                device.device_type = config.get("type") or device.device_type or "android_direct"
+                device.role = device.role or "node"
+                model = (config.get("model") or "").strip()
+                if model:
+                    device.model = model
+                ip = (config.get("ip") or "").strip()
+                if ip:
+                    device.ip_address = ip
+                db.commit()
+                SLog.i("DeviceManager", f"Adopted device pre-registered: {sn}")
+        except Exception as e:
+            SLog.e("DeviceManager", f"DB Error adopt register: {e}")
+
+    async def notify_device_list_changed(self, event: str, sn: str = ""):
+        from server.services.device_service import DeviceService
+
+        devices = []
+        for d in DeviceService.list_all():
+            meta = self.device_meta.get(d.sn, {})
+            devices.append({
+                "sn": d.sn,
+                "type": d.device_type,
+                "role": d.role,
+                "model": d.model,
+                "ip": d.ip_address,
+                "status": d.status,
+                "app_version": meta.get("app_version"),
+                "last_online": str(d.last_online_time) if d.last_online_time else None,
+            })
+        payload = {
+            "type": "device_list_update",
+            "data": {
+                "event": event,
+                "sn": sn,
+                "devices": devices,
+            },
+        }
+        await self.broadcast_to_observers(payload)
+
+    async def request_clawnode_logs(self, sn: str, minutes: int = 5) -> dict:
+        """向在线 ClawNode 下发 EXPORT_LOGS，触发设备上传日志。"""
+        from server.websocket.routers.wClawNode import translate_control_to_clawnode
+
+        ws = self.active_connections.get(sn)
+        if not ws or sn not in self.direct_nodes:
+            return {"code": 404, "msg": "device offline or not clawnode"}
+        trace_id = f"log-{uuid.uuid4().hex[:12]}"
+        frame = translate_control_to_clawnode({
+            "action": "export_logs",
+            "trace_id": trace_id,
+            "minutes": max(1, min(int(minutes or 5), 24 * 60)),
+        })
+        ok = await self._safe_send(ws, frame)
+        return {"code": 200 if ok else 500, "msg": "export requested" if ok else "send failed", "trace_id": trace_id}
+
+    async def _send_unpair_config(self, websocket: WebSocket, sn: str):
+        payload = {"type": "UNPAIR_CONFIG", "data": {"sn": sn}}
+        try:
+            await websocket.send_text(json.dumps(payload))
+            SLog.i("DeviceManager", f"UNPAIR_CONFIG sent to {sn}")
+        except Exception as e:
+            SLog.w("DeviceManager", f"UNPAIR_CONFIG failed {sn}: {e}")
+
+    async def unbind_device(self, sn: str) -> dict:
+        """从 Server 解绑设备：通知客户端清除配对、关闭连接并删除库表记录。"""
+        if not sn:
+            return {"code": 400, "msg": "missing sn"}
+        ws = self.active_connections.get(sn)
+        if ws:
+            await self._send_unpair_config(ws, sn)
+            try:
+                await ws.close(code=1000, reason="unbind")
+            except Exception:
+                pass
+        self.active_connections.pop(sn, None)
+        self.direct_nodes.discard(sn)
+        self.device_meta.pop(sn, None)
+        self.pending_pairings.pop(sn, None)
+        if ws:
+            self.observers.discard(ws)
+
+        def _delete():
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == sn).first()
+                if device:
+                    db.delete(device)
+                    db.commit()
+
+        try:
+            _with_db_retry(_delete)
+        except Exception as e:
+            SLog.e("DeviceManager", f"unbind db error {sn}: {e}")
+            return {"code": 500, "msg": str(e)}
+
+        await self.notify_device_list_changed("unbind", sn)
+        SLog.i("DeviceManager", f"Device unbound: {sn}")
+        return {"code": 200, "msg": "unbound", "data": {"sn": sn}}
 
     async def broadcast_to_observers(self, payload: dict, exclude: WebSocket = None):
-        """[ClawNode] 把消息广播给所有连接与观察者（截图/动作结果回传给前端）。"""
+        """广播给桌面端观察者，不包含设备直连 WebSocket。"""
         msg_str = json.dumps(payload)
-        targets = set(self.active_connections.values()) | self.observers
-        for ws in targets:
+        for ws in set(self.observers):
             if ws is exclude:
                 continue
             try:
@@ -136,7 +326,7 @@ class DeviceManager:
                 self.active_connections[sn] = websocket
                 SLog.i("DeviceManager", f"Active connection updated for {sn} via heartbeat")
             self._update_device_status(sn, "online")
-        return None  # 心跳通常不需要回复内容，或者回复简单的 ack
+        return {"code": 200}
 
     async def disconnect(self, websocket: WebSocket, data: dict):
         # 找出断开的连接对应的 SN
@@ -152,6 +342,7 @@ class DeviceManager:
                 del self.active_connections[sn]
             self._update_device_status(sn, "offline")
             SLog.i("DeviceManager", f"Device disconnected: {sn}")
+            asyncio.create_task(self.notify_device_list_changed("disconnect", sn))
 
     async def _cleanup_on_disconnect(self, disconnected_sn: str):
         """
@@ -204,11 +395,12 @@ class DeviceManager:
         return {"code": 404, "msg": "device offline"}
 
     # [新增] 安全发送辅助方法
-    async def _safe_send(self, ws: WebSocket, msg: dict):
+    async def _safe_send(self, ws: WebSocket, msg: dict) -> bool:
         try:
             await ws.send_text(json.dumps(msg))
-        except:
-            pass
+            return True
+        except Exception:
+            return False
 
     async def send_command(self, sn: str, command: str, params: dict = None):
         """给设备发送指令"""

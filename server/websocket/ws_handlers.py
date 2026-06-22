@@ -24,13 +24,17 @@ async def handle_get_device_list(websocket, data: dict):
 
     try:
         result = []
+        dm = DeviceManager()
         for d in DeviceService.list_all():
+            meta = dm.device_meta.get(d.sn, {})
             result.append({
                 "sn": d.sn,
                 "type": d.device_type,
+                "role": d.role,
                 "model": d.model,
                 "ip": d.ip_address,
                 "status": d.status,
+                "app_version": meta.get("app_version"),
                 "last_online": str(d.last_online_time) if d.last_online_time else None
             })
         return {"code": 200, "data": result}
@@ -376,3 +380,60 @@ async def handle_get_timeline(websocket, data: dict):
         return {"code": 500, "msg": str(e)}
     finally:
         session.close()
+
+
+import re
+
+async def handle_adopt_clawnode(websocket, data: dict):
+    """桌面端确认添加局域网 ClawNode：下发 ws/token/gateway 配置。"""
+    from server.core.security import SecurityManager
+    from server.core.gateway_beacon import build_gateway_identity
+
+    sn = (data.get("sn") or "").strip()
+    if not sn:
+        return {"code": 400, "msg": "missing sn"}
+    identity = build_gateway_identity()
+    port = int(data.get("port") or 10104)
+    host = (data.get("host") or "").strip()
+    if not re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        host = identity["local_ip"]
+    token = SecurityManager.get_token() or ""
+    ws_url = f"ws://{host}:{port}/ws"
+    ip = (data.get("ip") or "").strip()
+    if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
+        ip = ""
+    config = {
+        "ws_url": ws_url,
+        "auth_token": token,
+        "gateway_id": identity.get("instance_id", ""),
+        "model": (data.get("model") or "").strip(),
+        "ip": ip,
+        "type": "android_direct",
+    }
+    SLog.i("wsHandlers", f"adopt_clawnode sn={sn} host={host} ws_url={ws_url} device_ip={ip or '(none)'} model={config['model']}")
+    dm = DeviceManager()
+    result = await dm.adopt_clawnode(sn, config)
+    pending = result.get("data", {}).get("pending")
+    SLog.i("wsHandlers", f"adopt_clawnode done sn={sn} pending={pending}")
+    return result
+
+
+async def handle_fetch_clawnode_logs(websocket, data: dict):
+    sn = (data.get("sn") or "").strip()
+    if not sn:
+        return {"code": 400, "msg": "missing sn"}
+    minutes = data.get("minutes", 5)
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        minutes = 5
+    dm = DeviceManager()
+    return await dm.request_clawnode_logs(sn, minutes=minutes)
+
+
+async def handle_unbind_clawnode(websocket, data: dict):
+    sn = (data.get("sn") or "").strip()
+    if not sn:
+        return {"code": 400, "msg": "missing sn"}
+    dm = DeviceManager()
+    return await dm.unbind_device(sn)

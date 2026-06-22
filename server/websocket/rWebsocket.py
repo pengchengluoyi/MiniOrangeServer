@@ -1,6 +1,7 @@
 import json
 import time
 import asyncio
+import copy
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from script.log import SLog
 from server.websocket.wsMap import HANDLERS
@@ -12,26 +13,71 @@ router = APIRouter()
 
 TAG = "rWebSocket"
 
+_B64_KEYS = frozenset({"base64_image", "base64", "image_base64", "screenshot"})
+
+
+def _truncate_b64(value) -> str:
+    if value is None:
+        return "<empty>"
+    text = str(value)
+    if len(text) <= 64:
+        return text
+    return f"<base64 {len(text)} chars>"
+
+
+def _sanitize_ws_log_payload(payload: dict) -> dict:
+    """日志中省略截图等大字段，避免终端被 base64 淹没。"""
+    if not isinstance(payload, dict):
+        return payload
+    out = copy.deepcopy(payload)
+    for key in _B64_KEYS:
+        if key in out:
+            out[key] = _truncate_b64(payload.get(key))
+    data = out.get("data")
+    if isinstance(data, dict):
+        for key in _B64_KEYS:
+            if key in data:
+                data[key] = _truncate_b64(payload["data"].get(key))
+    return out
+
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+    pairing: int = Query(0),
+    node_sn: str = Query(None),
+):
     # 注意：monitor_heartbeats 建议在 main.py 的 lifespan 中启动，避免每个连接都启动
 
     # [安全校验] 检查 Access Token
     server_token = SecurityManager.get_token()
+    dm = DeviceManager()
     SLog.i(TAG, f"⚡ [WS] New connection attempt. Client token: {token}. Server token (from get_token): {server_token}")
-    if server_token is None:
+
+    if pairing and node_sn:
+        pending = dm.pending_pairings.get(node_sn)
+        if pending and pending.get("expires", 0) > time.time():
+            SLog.i(TAG, f"⚡ [Pairing Mode] Accept sn={node_sn} ws_url={pending.get('ws_url')} gateway={pending.get('gateway_id')}")
+            await websocket.accept()
+            dm.active_connections[node_sn] = websocket
+            await dm._send_pair_config(websocket, node_sn, pending)
+            dm.pending_pairings.pop(node_sn, None)
+            SLog.i(TAG, f"⚡ [Pairing Mode] PAIR_CONFIG delivered sn={node_sn}")
+        else:
+            SLog.w(TAG, f"⛔ Pairing rejected sn={node_sn} pending={bool(pending)} expired={pending.get('expires', 0) <= time.time() if pending else 'n/a'}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    elif server_token is None:
         # Case 1: 初始化模式 (Setup Mode)
-        # 服务端还没配置 Token，允许前端连接以获取二维码
         SLog.i(TAG, "⚠️ [Setup Mode] No server token configured. Accepting connection.")
         await websocket.accept()
+        dm.observers.add(websocket)
     elif token == server_token:
         # Case 2: 正常鉴权通过
-        # SLog.i(TAG, "✅ Client authenticated.")
         await websocket.accept()
-
+        dm.observers.add(websocket)
     else:
         # Case 3: 鉴权失败
-        # 服务端有 Token，但客户端没传或者传错了
         SLog.w(TAG, f"⛔ Connection rejected. Server Token: {str(server_token)[:6]}... Client Sent: {token}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -46,7 +92,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
         action = payload.get("action") or payload.get("type")
         req_id = payload.get("req_id") or payload.get("trace_id")
         if action != "heartbeat" and action != "upload":
-            SLog.i(TAG, payload)
+            SLog.i(TAG, _sanitize_ws_log_payload(payload))
 
         data = payload.get("data", {}).copy()
 
@@ -166,6 +212,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
             
     except WebSocketDisconnect:
         SLog.i(TAG, "Client disconnected")
+        dm.observers.discard(websocket)
         if "disconnect" in HANDLERS:
             await HANDLERS["disconnect"](websocket, {})
     except Exception as e:
