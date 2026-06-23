@@ -16,7 +16,11 @@ from server.core.database import engine
 from server.models.mDevice import MDevice, MDeviceLog
 from server.core.log_database import LogSessionLocal
 from server.models.log import WorkflowLog
+from server.core.gateway_beacon import build_gateway_identity
 from script.log import SLog
+
+import re
+from urllib.parse import urlparse, urlunparse
 
 try:
     import httpx
@@ -505,16 +509,63 @@ class DeviceManager:
         except Exception:
             return False
 
+    def _to_device_reachable_url(self, url: str | None) -> str | None:
+        """把前端可能传进来的 127/localhost/相对路径，改写成设备能连上的 server LAN 地址。
+
+        这是为了彻底避免“把apk下到server后，给clawnode一个localhost地址”的傻逼问题。
+        设备是通过 WS 连到 server 的真实 IP（例如 192.168.x.x），所以必须给它同样的 host。
+        """
+        if not url:
+            return url
+
+        identity = build_gateway_identity()
+        lan_ip = identity.get("local_ip") or "127.0.0.1"
+        port = 10104
+
+        # 已经是完整 http/https 地址
+        if url.startswith("http://") or url.startswith("https://"):
+            try:
+                p = urlparse(url)
+                host = (p.hostname or "").lower()
+                if host in ("127.0.0.1", "localhost", "::1") or host.startswith("127."):
+                    new_netloc = f"{lan_ip}:{p.port or port}"
+                    return urlunparse((p.scheme, new_netloc, p.path, p.params, p.query, p.fragment))
+                # 已经是可达地址，直接用
+                return url
+            except Exception:
+                # 解析失败就原样返回（让设备自己报错，便于调试）
+                return url
+
+        # 相对路径（/api/... 或 static/...）
+        if url.startswith("/"):
+            return f"http://{lan_ip}:{port}{url}"
+        return f"http://{lan_ip}:{port}/{url}"
+
     async def send_command(self, sn: str, command: str, params: dict = None):
-        """给设备发送指令"""
+        """给设备发送指令。
+        重要：对于 INSTALL_APK 等需要设备下载的场景，必须确保 params 里的 url 是设备能访问 server 的地址（LAN IP），
+        而不是前端浏览器看到的 127.0.0.1 / localhost。
+        """
         if sn not in self.active_connections:
             SLog.w("DeviceManager", f"Device {sn} is offline")
             return False
-        
+
+        params = dict(params or {})
+        cmd_upper = (command or "").upper()
+
+        if cmd_upper in ("INSTALL_APK", "INSTALLAPK"):
+            if "url" in params:
+                params["url"] = self._to_device_reachable_url(params.get("url"))
+            # 如果前端只给了相对路径或 file_name，我们也尽量补一个可达地址（以后可扩展从上传记录拿）
+            # smb_path 保持原样，server 另外处理成 http url 再下发
+            if not params.get("url") and params.get("file_name"):
+                # 极端情况：只有文件名，没有 url，构造一个指向 server uploads 的地址
+                params["url"] = self._to_device_reachable_url(f"/static/{params['file_name']}")
+
         msg = {
             "type": "command",
             "command": command,
-            "params": params or {},
+            "params": params,
             "timestamp": datetime.now().isoformat()
         }
 

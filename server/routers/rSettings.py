@@ -349,3 +349,39 @@ def get_skills_catalog():
     from server.services.skills_registry import list_skills_catalog
 
     return {"code": 200, "data": list_skills_catalog()}
+
+
+# ------------------------------
+# 系统设置：ClawNode 日志存储路径等
+# ------------------------------
+
+class ClawnodeLogsDirBody(BaseModel):
+    path: str = ""
+
+
+@router.get("/system/clawnode/logs-dir")
+def get_clawnode_logs_dir():
+    from server.core.security import SecurityManager
+    configured = SecurityManager.get_clawnode_logs_dir()
+    # 也返回一个建议的默认值（前端可用于“恢复默认”）
+    try:
+        from pathlib import Path
+        default = str((Path.home() / "Downloads" / "ClawNodeLogs").resolve())
+    except Exception:
+        default = ""
+    effective = configured or default
+    return {
+        "code": 200,
+        "data": {
+            "configured": configured,
+            "effective": effective,
+            "default": default,
+        }
+    }
+
+
+@router.put("/system/clawnode/logs-dir")
+def set_clawnode_logs_dir(body: ClawnodeLogsDirBody):
+    from server.core.security import SecurityManager
+    SecurityManager.set_clawnode_logs_dir(body.path or "")
+    return {"code": 200, "msg": "已保存", "data": {"configured": SecurityManager.get_clawnode_logs_dir()}}

@@ -3,15 +3,14 @@
 """
 ClawNode 直连节点适配器。
 
-ClawNode 是 Android 端的 headless agent，直接连到服务端 /ws（不经过 PC + adb），
-说的是自己的协议方言：下行 {trace_id, action_type, payload}，上行
-{trace_id, type, data}。
+ClawNode (1.7.23+) 与 server 使用完全相同的命令格式：
+  下发：{ "type": "command", "command": "TAP", "params": {...}, "trace_id": "..." }
+  回传：{ "trace_id": "...", "type": "ACTION_RESULT", "data": {...} }
 
-本模块是 PC Node 协议与 ClawNode 协议之间的“翻译层”，完全独立，
-不触碰 driver/client.py 的任何逻辑：
-  - handle_clawnode_register: 处理 ClawNode 注册，让它进设备列表；
-  - handle_clawnode_result:   接收 ClawNode 回传的截图/动作结果，广播给前端；
-  - translate_control_to_clawnode: 把服务端的 control/截图 指令翻译成 ClawNode 方言。
+本模块负责：
+  - ClawNode 注册
+  - 结果回传广播
+  - 少数控制/流/日志指令的适配（仍输出统一 command+params 格式）
 """
 
 import json
@@ -75,119 +74,97 @@ async def handle_clawnode_result(websocket: WebSocket, data: dict):
 
 def translate_control_to_clawnode(params: dict) -> dict:
     """
-    把服务端/前端的 control 指令翻译成 ClawNode 方言 {trace_id, action_type, payload}。
+    把控制类指令翻译成与 server send_command 完全一致的格式：
+      { "type": "command", "command": "TAP", "params": {...}, "trace_id": "..." }
 
-    服务端 control 字段：{ action: "click"/"tap"/"swipe", x, y, x1, y1, x2, y2, duration }
-    ClawNode 协议见各阶段定义：TAP 用 x/y；SWIPE 用 x/y(起点)+x2/y2(终点)+duration_ms。
-
-    返回 None 表示该动作 ClawNode 不支持。
+    这样 ClawNode 和其他节点收到的命令对象结构完全相同。
     """
     action = (params.get("action") or "").lower()
     trace_id = params.get("req_id") or f"srv-{uuid.uuid4().hex[:12]}"
 
+    def cmd(name, payload):
+        return {"type": "command", "command": name, "params": payload, "trace_id": trace_id}
+
     if action in ("click", "tap"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "TAP",
-            "payload": {
-                "x": params.get("x"),
-                "y": params.get("y"),
-                "duration_ms": params.get("duration", 80),
-            },
-        }
+        return cmd("TAP", {
+            "x": params.get("x"),
+            "y": params.get("y"),
+            "duration_ms": params.get("duration", 80),
+        })
 
     if action == "swipe":
-        # 兼容两种来源字段：x1/y1/x2/y2 或 x/y/x2/y2
         x1 = params.get("x1", params.get("x"))
         y1 = params.get("y1", params.get("y"))
-        return {
-            "trace_id": trace_id,
-            "action_type": "SWIPE",
-            "payload": {
-                "x": x1,
-                "y": y1,
-                "x2": params.get("x2"),
-                "y2": params.get("y2"),
-                "duration_ms": params.get("duration", 300),
-            },
-        }
+        return cmd("SWIPE", {
+            "x": x1,
+            "y": y1,
+            "x2": params.get("x2"),
+            "y2": params.get("y2"),
+            "duration_ms": params.get("duration", 300),
+        })
 
     if action in ("wake", "wake_up"):
-        return {"trace_id": trace_id, "action_type": "WAKE_UP", "payload": {}}
+        return cmd("WAKE_UP", {})
 
     if action in ("key", "keyevent", "key_event", "press_key"):
-        # 返回键/Home 等：keyevent 可为 back/home 或 Android keycode
         kev = params.get("keyevent") or params.get("key") or params.get("event")
-        return {"trace_id": trace_id, "action_type": "KEY_EVENT", "payload": {"keyevent": kev}}
+        return cmd("KEY_EVENT", {"keyevent": kev})
 
     if action in ("stop_app", "force_stop", "close_app"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "CLOSE_APP",
-            "payload": {"package": params.get("package") or params.get("pkg") or ""},
-        }
+        return cmd("CLOSE_APP", {"package": params.get("package") or params.get("pkg") or ""})
 
     if action in ("kill_app", "force_kill"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "KILL_APP",
-            "payload": {"package": params.get("package") or params.get("pkg") or ""},
-        }
+        return cmd("KILL_APP", {"package": params.get("package") or params.get("pkg") or ""})
 
     if action in ("clear_app_cache", "clear_cache"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "CLEAR_APP_CACHE",
-            "payload": {"package": params.get("package") or params.get("pkg") or ""},
-        }
+        return cmd("CLEAR_APP_CACHE", {"package": params.get("package") or params.get("pkg") or ""})
 
     if action in ("run_shell", "shell"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "RUN_SHELL",
-            "payload": {"command": params.get("command") or params.get("cmd") or ""},
-        }
+        return cmd("RUN_SHELL", {"command": params.get("command") or params.get("cmd") or ""})
 
     if action in ("export_logs", "upload_logs"):
         minutes = params.get("minutes")
-        payload = {}
+        p = {}
         if minutes is not None:
             try:
-                payload["minutes"] = int(minutes)
+                p["minutes"] = int(minutes)
             except (TypeError, ValueError):
                 pass
-        return {"trace_id": params.get("trace_id") or trace_id, "action_type": "EXPORT_LOGS", "payload": payload}
+        return {"type": "command", "command": "EXPORT_LOGS", "params": p, "trace_id": params.get("trace_id") or trace_id}
 
     if action in ("open_app", "start_app", "launch_app"):
-        return {
-            "trace_id": trace_id,
-            "action_type": "OPEN_APP",
-            "payload": {
-                "package": params.get("package") or params.get("pkg") or "",
-                "activity": params.get("activity"),
-            },
-        }
+        return cmd("OPEN_APP", {
+            "package": params.get("package") or params.get("pkg") or "",
+            "activity": params.get("activity"),
+        })
 
     return None
 
 
 def translate_screenshot_to_clawnode(params: dict) -> dict:
-    """单次截图指令翻译。params 可含 quality。"""
+    """单次截图指令翻译。使用与 send_command 相同的格式。"""
     trace_id = params.get("req_id") or f"srv-{uuid.uuid4().hex[:12]}"
     return {
+        "type": "command",
+        "command": "GET_SCREENSHOT",
+        "params": {"quality": params.get("quality", 80)},
         "trace_id": trace_id,
-        "action_type": "GET_SCREENSHOT",
-        "payload": {"quality": params.get("quality", 80)},
     }
 
 
 def translate_stream_to_clawnode(start: bool, params: dict) -> dict:
-    """推流开关指令翻译。"""
+    """推流开关指令翻译。使用与 send_command 相同的格式。"""
     trace_id = params.get("req_id") or f"srv-{uuid.uuid4().hex[:12]}"
     if start:
         return {
+            "type": "command",
+            "command": "START_STREAM",
+            "params": {"fps": params.get("fps", 15)},
             "trace_id": trace_id,
-            "action_type": "START_STREAM",
-            "payload": {"fps": params.get("fps", 15)},
         }
-    return {"trace_id": trace_id, "action_type": "STOP_STREAM", "payload": {}}
+    return {
+        "type": "command",
+        "command": "STOP_STREAM",
+        "params": {},
+        "trace_id": trace_id,
+    }

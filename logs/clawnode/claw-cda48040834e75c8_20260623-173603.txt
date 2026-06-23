@@ -1,0 +1,165 @@
+=== ClawNode Log Export ===
+version=1.7.21(33)
+model=Xiaomi 25102RKBEC
+android=16 sdk=36
+sn=claw-cda48040834e75c8
+window_minutes=5
+time=1782207359032
+===========================
+
+2026-06-23 17:30:59.176 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:31:08.494 D [WsManager] [BP:heartbeat] seq=87 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:31:08.506 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207069.159055, "node_status": "offline", "code": 200}
+2026-06-23 17:31:08.509 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:31:12.893 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:31:28.183 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:31:28.502 D [WsManager] [BP:heartbeat] seq=88 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:31:28.605 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207089.182782, "node_status": "offline", "code": 200}
+2026-06-23 17:31:28.609 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:31:28.991 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:31:37.901 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:31:48.517 D [WsManager] [BP:heartbeat] seq=89 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:31:48.560 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207109.1987488, "node_status": "offline", "code": 200}
+2026-06-23 17:31:48.564 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:31:52.364 W [WsManager] [BP:ws_closing] code=1012 reason=
+2026-06-23 17:31:52.372 D [WsManager] [BP:heartbeat_stop] lastSeq=89
+2026-06-23 17:31:52.374 W [WsManager] [BP:ws_closed] code=1012 reason=
+2026-06-23 17:31:52.375 D [WsManager] [BP:state_change] Authenticated → Disconnected(reason=closed[1012] )
+2026-06-23 17:31:52.377 D [WsManager] [BP:state_change] Disconnected(reason=closed[1012] ) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 17:31:52.378 W [WsManager] [BP:reconnect_scheduled] reason=closed[1012]  attempt=1 delayMs=1137
+2026-06-23 17:31:53.456 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 17:31:53.464 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:31:53.466 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=4
+2026-06-23 17:31:53.468 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 17:31:53.469 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:31:53.470 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:31:53.472 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:31:53.473 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 17:31:53.473 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=5 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:31:53.697 E [WsManager] [BP:ws_failure] http=null msg=Failed to connect to /192.168.202.36:10104 | ConnectException: Failed to connect to /192.168.202.36:10104
+2026-06-23 17:31:53.710 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Failed to connect to /192.168.202.36:10104)
+2026-06-23 17:31:53.713 D [WsManager] [BP:state_change] Disconnected(reason=Failed to connect to /192.168.202.36:10104) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 17:31:53.714 W [WsManager] [BP:reconnect_scheduled] reason=failure: Failed to connect to /192.168.202.36:10104 attempt=1 delayMs=1137
+2026-06-23 17:31:54.215 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:31:54.218 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=6
+2026-06-23 17:31:54.219 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 17:31:54.221 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:31:54.222 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:31:54.223 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:31:54.224 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=7 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:31:54.433 E [WsManager] [BP:ws_failure] http=null msg=Failed to connect to /192.168.202.36:10104 | ConnectException: Failed to connect to /192.168.202.36:10104
+2026-06-23 17:31:54.440 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Failed to connect to /192.168.202.36:10104)
+2026-06-23 17:31:54.443 D [WsManager] [BP:state_change] Disconnected(reason=Failed to connect to /192.168.202.36:10104) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 17:31:54.444 W [WsManager] [BP:reconnect_scheduled] reason=failure: Failed to connect to /192.168.202.36:10104 attempt=1 delayMs=1137
+2026-06-23 17:31:54.944 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:31:54.948 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=8
+2026-06-23 17:31:54.950 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 17:31:54.950 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:31:54.952 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:31:54.953 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:31:54.954 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=9 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:31:55.358 E [WsManager] [BP:ws_failure] http=null msg=Failed to connect to /192.168.202.36:10104 | ConnectException: Failed to connect to /192.168.202.36:10104
+2026-06-23 17:31:55.365 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Failed to connect to /192.168.202.36:10104)
+2026-06-23 17:31:55.367 D [WsManager] [BP:state_change] Disconnected(reason=Failed to connect to /192.168.202.36:10104) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 17:31:55.369 W [WsManager] [BP:reconnect_scheduled] reason=failure: Failed to connect to /192.168.202.36:10104 attempt=1 delayMs=1137
+2026-06-23 17:31:55.873 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:31:55.876 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=10
+2026-06-23 17:31:55.879 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 17:31:55.880 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:31:55.881 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:31:55.882 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:31:55.883 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=11 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:31:56.124 E [WsManager] [BP:ws_failure] http=null msg=Failed to connect to /192.168.202.36:10104 | ConnectException: Failed to connect to /192.168.202.36:10104
+2026-06-23 17:31:56.130 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Failed to connect to /192.168.202.36:10104)
+2026-06-23 17:31:56.132 D [WsManager] [BP:state_change] Disconnected(reason=Failed to connect to /192.168.202.36:10104) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 17:31:56.134 W [WsManager] [BP:reconnect_scheduled] reason=failure: Failed to connect to /192.168.202.36:10104 attempt=1 delayMs=1137
+2026-06-23 17:31:56.638 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:31:56.642 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=12
+2026-06-23 17:31:56.644 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 17:31:56.645 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:31:56.647 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:31:56.648 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:31:56.649 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=13 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:31:58.197 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:31:59.006 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:32:02.909 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 17:32:02.912 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=14
+2026-06-23 17:32:02.913 D [WsManager] [BP:state_change] Connecting → Idle
+2026-06-23 17:32:02.914 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 17:32:02.915 D [WsManager] [BP:connect_loop] entered
+2026-06-23 17:32:02.917 D [WsManager] [BP:state_change] Idle → Connecting
+2026-06-23 17:32:02.918 D [WsManager] [BP:ws_open] sn=claw-cda48040834e75c8 epoch=15 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:32:06.284 D [WsManager] [BP:state_change] Connecting → Connected
+2026-06-23 17:32:06.286 D [WsManager] [BP:ws_open_ok] code=101 sn=claw-cda48040834e75c8 epoch=15
+2026-06-23 17:32:06.288 D [WsManager] [BP:register_sent] sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:32:06.294 D [WsManager] [BP:heartbeat] seq=1 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:32:06.468 D [WsManager] [BP:rx] {"action": "register_clawnode", "req_id": null, "timestamp": 1782207127.009156, "node_status": "offline", "code": 200, "…
+2026-06-23 17:32:06.472 D [WsManager] [BP:rx_ack] action=register_clawnode code=200
+2026-06-23 17:32:06.473 D [WsManager] [BP:state_change] Connected → Authenticated
+2026-06-23 17:32:06.475 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207127.090098, "node_status": "offline", "code": 200}
+2026-06-23 17:32:06.477 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:32:08.047 W [WsManager] [BP:ws_open_stale] epoch=13 current=15 url=ws://192.168.202.36:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 17:32:08.347 D [WsManager] [BP:ws_closed_stale] epoch=13 code=1000
+2026-06-23 17:32:23.367 D [WsManager] [BP:rx] {"type": "command", "command": "INSTALL_APK", "params": {"url": "https://github.com/pengchengluoyi/ClawNode_app/releases…
+2026-06-23 17:32:23.371 W [WsManager] [BP:rx_drop] malformed: {"type": "command", "command": "INSTALL_APK", "params": {"url": "https://github.com/pengchengluoyi/ClawNode_app/releases…
+2026-06-23 17:32:26.302 D [WsManager] [BP:heartbeat] seq=2 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:32:26.383 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207147.022112, "node_status": "offline", "code": 200}
+2026-06-23 17:32:26.387 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:32:27.920 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:32:28.212 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:32:29.092 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:32:46.310 D [WsManager] [BP:heartbeat] seq=3 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:32:46.332 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207166.979698, "node_status": "offline", "code": 200}
+2026-06-23 17:32:46.336 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:32:52.930 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:32:58.228 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:32:59.090 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:33:06.318 D [WsManager] [BP:heartbeat] seq=4 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:33:06.338 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207186.984041, "node_status": "offline", "code": 200}
+2026-06-23 17:33:06.344 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:33:17.938 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:33:26.324 D [WsManager] [BP:heartbeat] seq=5 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:33:26.381 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207207.03069, "node_status": "offline", "code": 200}
+2026-06-23 17:33:26.385 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:33:28.250 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:33:29.056 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:33:42.949 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:33:46.332 D [WsManager] [BP:heartbeat] seq=6 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:33:47.148 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207227.781931, "node_status": "offline", "code": 200}
+2026-06-23 17:33:47.152 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:33:58.264 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:33:59.179 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:34:06.340 D [WsManager] [BP:heartbeat] seq=7 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:34:06.365 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207247.00676, "node_status": "offline", "code": 200}
+2026-06-23 17:34:06.370 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:34:07.958 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:34:26.354 D [WsManager] [BP:heartbeat] seq=8 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:34:26.376 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207267.0260632, "node_status": "offline", "code": 200}
+2026-06-23 17:34:26.379 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:34:28.280 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:34:29.294 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:34:32.969 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:34:46.362 D [WsManager] [BP:heartbeat] seq=9 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:34:46.404 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207287.052407, "node_status": "offline", "code": 200}
+2026-06-23 17:34:46.409 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:34:57.980 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:34:58.295 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:34:59.196 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:35:06.369 D [WsManager] [BP:heartbeat] seq=10 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:35:06.400 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207307.044435, "node_status": "offline", "code": 200}
+2026-06-23 17:35:06.404 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:35:22.991 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:35:26.377 D [WsManager] [BP:heartbeat] seq=11 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:35:26.544 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207327.194838, "node_status": "offline", "code": 200}
+2026-06-23 17:35:26.548 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:35:28.309 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:35:29.217 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 17:35:46.384 D [WsManager] [BP:heartbeat] seq=12 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 17:35:46.425 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782207347.061337, "node_status": "offline", "code": 200}
+2026-06-23 17:35:46.429 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 17:35:48.002 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 17:35:58.322 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 17:35:59.012 D [WsManager] [BP:rx] {"trace_id": "log-c94f17fb8370", "action_type": "EXPORT_LOGS", "payload": {"minutes": 5}}
+2026-06-23 17:35:59.016 D [WsManager] [BP:cmd_emit] trace=log-c94f17fb8370 action=EXPORT_LOGS ok=true
+2026-06-23 17:35:59.017 D [CommandDispatcher] [BP:dispatch] trace=log-c94f17fb8370 action=EXPORT_LOGS
+2026-06-23 17:35:59.226 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8

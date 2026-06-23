@@ -1,0 +1,35 @@
+=== ClawNode Log Export ===
+version=1.7.23(35)
+model=Xiaomi 25102RKBEC
+android=16 sdk=36
+sn=claw-cda48040834e75c8
+window_minutes=5
+time=1782215027179
+===========================
+
+2026-06-23 19:38:57.861 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:38:58.803 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:39:27.865 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:39:28.842 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:39:57.872 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:39:58.825 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:40:27.880 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:40:28.813 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:40:57.882 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:40:58.792 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:41:27.889 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:41:28.734 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:41:53.395 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 19:41:53.398 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 19:41:57.891 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:41:58.752 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:42:27.895 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:42:28.893 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:42:57.899 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:42:58.673 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 19:43:12.152 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 19:43:12.155 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 19:43:17.568 D [MainActivity] [BP:onResume] refresh states
+2026-06-23 19:43:17.569 W [SystemController] [BP:restricted_check_fail] fallback=true msg=verifyIncomingOp: uid 10308 does not have any of {MANAGE_APPOPS, GET_APP_OPS_STATS, MANAGE_APP_OPS_MODES}
+2026-06-23 19:43:27.904 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 19:43:28.737 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8

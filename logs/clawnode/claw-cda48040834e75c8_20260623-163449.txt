@@ -1,0 +1,96 @@
+=== ClawNode Log Export ===
+version=1.7.20(32)
+model=Xiaomi 25102RKBEC
+android=16 sdk=36
+sn=claw-cda48040834e75c8
+window_minutes=5
+time=1782203688804
+===========================
+
+2026-06-23 16:29:56.291 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:29:57.267 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:30:06.655 D [WsManager] [BP:heartbeat] seq=91 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:30:06.794 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203407.417668, "node_status": "offline", "code": 200}
+2026-06-23 16:30:06.798 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:30:10.419 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:30:26.304 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:30:26.662 D [WsManager] [BP:heartbeat] seq=92 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:30:26.684 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203427.301791, "node_status": "offline", "code": 200}
+2026-06-23 16:30:26.689 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:30:27.210 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:30:35.430 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:30:46.672 D [WsManager] [BP:heartbeat] seq=93 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:30:46.814 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203447.4384909, "node_status": "offline", "code": 200}
+2026-06-23 16:30:46.818 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:30:56.317 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:30:57.286 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:31:00.437 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:31:06.684 D [WsManager] [BP:heartbeat] seq=94 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:31:06.710 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203467.327892, "node_status": "offline", "code": 200}
+2026-06-23 16:31:06.714 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:31:25.448 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:31:26.328 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:31:26.697 D [WsManager] [BP:heartbeat] seq=95 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:31:26.715 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203487.339978, "node_status": "offline", "code": 200}
+2026-06-23 16:31:26.719 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:31:27.093 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:31:46.708 D [WsManager] [BP:heartbeat] seq=96 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:31:46.840 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203507.450558, "node_status": "offline", "code": 200}
+2026-06-23 16:31:46.846 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:31:50.459 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:31:53.447 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 16:31:53.450 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:31:53.463 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 16:31:56.348 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:31:57.180 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:32:06.716 D [WsManager] [BP:heartbeat] seq=97 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:32:06.751 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203527.3752801, "node_status": "offline", "code": 200}
+2026-06-23 16:32:06.756 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:32:15.425 D [WsManager] [BP:rx] {"type": "command", "command": "INSTALL_APK", "params": {"url": "https://github.com/pengchengluoyi/ClawNode_app/releases…
+2026-06-23 16:32:15.436 W [WsManager] [BP:rx_drop] malformed: {"type": "command", "command": "INSTALL_APK", "params": {"url": "https://github.com/pengchengluoyi/ClawNode_app/releases…
+2026-06-23 16:32:15.465 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:32:26.357 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:32:26.726 D [WsManager] [BP:heartbeat] seq=98 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:32:26.752 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203547.368238, "node_status": "offline", "code": 200}
+2026-06-23 16:32:26.756 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:32:27.315 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:32:40.472 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:32:46.739 D [WsManager] [BP:heartbeat] seq=99 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:32:46.831 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203567.4498072, "node_status": "offline", "code": 200}
+2026-06-23 16:32:46.835 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:32:56.372 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:32:57.217 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:33:05.479 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:33:06.753 D [WsManager] [BP:heartbeat] seq=100 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:33:06.778 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203587.4014232, "node_status": "offline", "code": 200}
+2026-06-23 16:33:06.781 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:33:26.386 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:33:26.765 D [WsManager] [BP:heartbeat] seq=101 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:33:26.785 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203607.407163, "node_status": "offline", "code": 200}
+2026-06-23 16:33:26.788 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:33:27.396 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:33:30.487 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:33:46.780 D [WsManager] [BP:heartbeat] seq=102 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:33:46.802 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203627.428868, "node_status": "offline", "code": 200}
+2026-06-23 16:33:46.804 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:33:55.495 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:33:56.402 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:33:57.418 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:34:06.787 D [WsManager] [BP:heartbeat] seq=103 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:34:06.815 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203647.438758, "node_status": "offline", "code": 200}
+2026-06-23 16:34:06.819 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:34:20.507 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:34:26.414 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-cda48040834e75c8
+2026-06-23 16:34:26.798 D [WsManager] [BP:heartbeat] seq=104 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:34:26.817 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203667.442833, "node_status": "offline", "code": 200}
+2026-06-23 16:34:26.820 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 16:34:27.425 D [NodeBeacon] [BP:registered] name=clawnode-claw-cda48040834e75c8 sn=claw-cda48040834e75c8
+2026-06-23 16:34:39.940 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:34:43.091 D [MainActivity] [BP:onResume] refresh states
+2026-06-23 16:34:43.092 W [SystemController] [BP:restricted_check_fail] fallback=true msg=verifyIncomingOp: uid 10308 does not have any of {MANAGE_APPOPS, GET_APP_OPS_STATS, MANAGE_APP_OPS_MODES}
+2026-06-23 16:34:45.509 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 16:34:46.802 D [WsManager] [BP:heartbeat] seq=105 sn=claw-cda48040834e75c8 ok=true
+2026-06-23 16:34:46.887 D [MainActivity] [BP:onResume] refresh states
+2026-06-23 16:34:46.887 W [SystemController] [BP:restricted_check_fail] fallback=true msg=verifyIncomingOp: uid 10308 does not have any of {MANAGE_APPOPS, GET_APP_OPS_STATS, MANAGE_APP_OPS_MODES}
+2026-06-23 16:34:46.905 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782203687.523312, "node_status": "offline", "code": 200}
+2026-06-23 16:34:46.906 D [WsManager] [BP:rx_ack] action=heartbeat code=200

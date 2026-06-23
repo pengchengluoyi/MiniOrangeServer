@@ -397,8 +397,23 @@ async def handle_adopt_clawnode(websocket, data: dict):
     host = (data.get("host") or "").strip()
     if not re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
         host = identity["local_ip"]
+    # 额外保险：如果还是 127/localhost，强制用真实 LAN IP
+    if host in ("127.0.0.1", "localhost", "::1") or host.startswith("127."):
+        host = identity["local_ip"]
     token = SecurityManager.get_token() or ""
-    ws_url = f"ws://{host}:{port}/ws"
+
+    # For the ws_url we send in PAIR_CONFIG we prefer the current numeric LAN IP.
+    # This guarantees the device can connect immediately after adopt/pair.
+    # Resilience to future IP changes (Wi-Fi switch, DHCP) is achieved by:
+    #   - The device stores pairedGatewayId (the mDNS instance id)
+    #   - On reconnect failures / net change it re-runs mDNS discovery (ServerDiscovery)
+    #     which uses NSD to find the current address of that instance and connects to it.
+    # We still broadcast lan_host in the mDNS TXT record so discovery can see the stable name if needed.
+    primary_host = identity.get("local_ip") or host
+    if primary_host in ("127.0.0.1", "localhost", "::1") or primary_host.startswith("127."):
+        primary_host = identity.get("local_ip") or host
+    ws_url = f"ws://{primary_host}:{port}/ws"
+
     ip = (data.get("ip") or "").strip()
     if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
         ip = ""

@@ -17,6 +17,7 @@ import base64
 import re
 import threading
 import uuid
+import time
 from io import BytesIO
 from typing import Any, Dict, Optional, Tuple
 
@@ -49,6 +50,8 @@ class RemoteEngine(MobileEngine):
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._screen_size_cache: Optional[Tuple[int, int]] = None
+        self._last_started_package: Optional[str] = None
+        self._last_started_at: float = 0.0
         if serial:
             RemoteEngine._by_sn[serial] = self
         SLog.i(TAG, f"RemoteEngine bound to {serial}")
@@ -182,17 +185,67 @@ class RemoteEngine(MobileEngine):
         return None
 
     def screen_on(self):
-        # ClawNode 通过无障碍 dispatchGesture 操作，无需 WakeUpActivity（会抢前台）。
+        # 远程节点没有 adb 兜底，直接让 ClawNode 端拉起唤醒页。
+        self._request("WAKE_UP", {})
         return None
+
+    @staticmethod
+    def _is_mostly_black_image(img, *, threshold: float = 18.0) -> bool:
+        """截图均值亮度极低时视为黑屏/息屏。"""
+        if img is None:
+            return True
+        try:
+            gray = img.convert("L")
+            hist = gray.histogram()
+            pixels = sum(hist) or 1
+            mean = sum(i * c for i, c in enumerate(hist)) / pixels
+            return mean < threshold
+        except Exception:
+            return False
 
     def ensure_screen_ready(self, node_sn=None) -> bool:
-        """纯像素节点无 adb 亮屏/解锁；手势不依赖本 App 在前台。"""
-        return True
+        """远程节点通过 WAKE_UP + 截图黑屏判断来确认屏幕可用。"""
+        for attempt in range(3):
+            shot = self.screenshot()
+            if shot is not None and not self._is_mostly_black_image(shot):
+                if attempt:
+                    SLog.i(TAG, f"screen ready after wake attempt={attempt} sn={self._serial}")
+                return True
+            SLog.i(
+                TAG,
+                f"screen not ready sn={self._serial} attempt={attempt} "
+                f"blank={self._is_mostly_black_image(shot)}",
+            )
+            self.screen_on()
+            time.sleep(0.45)
+        SLog.w(TAG, f"screen still not ready sn={self._serial}")
+        return False
 
     def start_app(self, package_name=None):
-        # 纯像素节点无法 am start；记录告警，返回 None 不中断上层
-        SLog.w(TAG, f"start_app({package_name}) unsupported on ClawNode (no UI tree / am)")
-        return None
+        pkg = (package_name or "").strip()
+        if not pkg:
+            return False
+        data = self._request("OPEN_APP", {"package": pkg})
+        ok = bool(data and data.get("status") == "success")
+        if ok:
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                current = self.current_package()
+                if current and (current == pkg or pkg in current or current in pkg):
+                    self._last_started_package = current
+                    self._last_started_at = time.time()
+                    SLog.i(TAG, f"open app ok pkg={pkg} current={current}")
+                    return True
+                time.sleep(0.45)
+            self._last_started_package = pkg
+            self._last_started_at = time.time()
+            SLog.w(TAG, f"open app launched but foreground not confirmed pkg={pkg}")
+            return True
+        msg = ""
+        if data:
+            msg = (data.get("message") or data.get("stdout") or "").strip()
+        SLog.w(TAG, f"open app failed pkg={pkg} msg={msg or 'unknown'}")
+        return False
 
     def stop_app(self, package_name=None):
         # 扩协议：STOP_APP（ClawNode 端可能仅 no-op，视权限而定）
@@ -202,7 +255,16 @@ class RemoteEngine(MobileEngine):
     # ---------------- 给不了的能力：优雅降级返回空 ----------------
 
     def current_package(self) -> str:
-        # 纯像素 VLA 节点无 UI 树/dumpsys 能力；返回空串，消费方走纯视觉
+        data = self._request("GET_FOREGROUND_APP", {})
+        if data:
+            pkg = (data.get("message") or data.get("stdout") or "").strip()
+            if pkg:
+                self._last_started_package = pkg
+                self._last_started_at = time.time()
+                return pkg
+        # 兜底：刚刚启动过的包名，避免短时切换期丢失
+        if self._last_started_package and (time.time() - self._last_started_at) < 10.0:
+            return self._last_started_package
         return ""
 
     def dump_hierarchy_xml(self) -> str:
@@ -217,10 +279,13 @@ class RemoteEngine(MobileEngine):
 
         pm_clear = re.match(r"pm clear (\S+)", command)
         if pm_clear:
-            data = self._request("CLEAR_APP_CACHE", {"package": pm_clear.group(1)})
-            if data and data.get("status") == "success":
-                return "Success"
-            return (data.get("message") or data.get("stdout") or "").strip() if data else ""
+            data = self._request("RUN_SHELL", {"command": command}, timeout=20.0)
+            if not data:
+                return ""
+            stdout = (data.get("stdout") or "").strip()
+            if stdout:
+                return stdout
+            return (data.get("message") or "").strip()
 
         data = self._request("RUN_SHELL", {"command": command}, timeout=20.0)
         if not data:

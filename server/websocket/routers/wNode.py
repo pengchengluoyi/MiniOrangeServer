@@ -166,6 +166,7 @@ async def handle_update_server_config(websocket, data: dict):
     [WS版] 更新配置 (如 External URL)
     """
     external_url = data.get("external_url")
+    clawnode_log_prefix = data.get("clawnode_log_prefix")
 
     # external_url 允许为 None 或 空字符串 (表示清除)
     if external_url is not None:
@@ -176,6 +177,10 @@ async def handle_update_server_config(websocket, data: dict):
             if not (url.startswith("ws://") or url.startswith("wss://")):
                 url = f"ws://{url}"
             SecurityManager.set_external_url(url)
+
+    if clawnode_log_prefix is not None:
+        prefix = str(clawnode_log_prefix).strip()
+        SecurityManager.set_clawnode_log_prefix(prefix)
 
     return {"code": 200, "msg": "Config updated"}
 

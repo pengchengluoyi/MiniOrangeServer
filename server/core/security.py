@@ -114,6 +114,39 @@ class SecurityManager:
             cls.save()
 
     @classmethod
+    def get_clawnode_log_prefix(cls):
+        with cls._lock:
+            if not cls._config:
+                cls.load()
+            prefix = cls._config.get("clawnode_log_prefix")
+            return str(prefix).strip() if prefix is not None else "download"
+
+    @classmethod
+    def set_clawnode_log_prefix(cls, prefix):
+        with cls._lock:
+            cls.load()
+            value = str(prefix or "").strip().strip("/")
+            cls._config["clawnode_log_prefix"] = value or "download"
+            cls.save()
+
+    @classmethod
+    def get_clawnode_logs_dir(cls) -> str:
+        """返回用户配置的 ClawNode 日志存储目录（绝对路径字符串）。为空时由调用方决定默认值（通常为 Downloads）。"""
+        with cls._lock:
+            if not cls._config:
+                cls.load()
+            val = cls._config.get("clawnode_logs_dir")
+            return str(val).strip() if val else ""
+
+    @classmethod
+    def set_clawnode_logs_dir(cls, path: str):
+        with cls._lock:
+            cls.load()
+            cls._config["clawnode_logs_dir"] = (path or "").strip()
+            cls.save()
+            SLog.i(TAG, f"clawnode_logs_dir updated -> {cls._config.get('clawnode_logs_dir')}")
+
+    @classmethod
     def clear_cluster_config(cls):
         with cls._lock:
             keys_to_clear = ["target_url", "candidate_urls", "access_token"]

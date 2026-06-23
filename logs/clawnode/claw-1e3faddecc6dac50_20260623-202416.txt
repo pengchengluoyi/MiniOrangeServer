@@ -1,0 +1,359 @@
+=== ClawNode Log Export ===
+version=1.7.24(36)
+model=motorola moto g85 5G
+android=15 sdk=35
+sn=claw-1e3faddecc6dac50
+window_minutes=5
+time=1782217456612
+===========================
+
+2026-06-23 20:19:17.342 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:19:21.229 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:19:25.641 D [WsManager] [BP:rx] {"type": "command", "command": "INSTALL_APK", "params": {"url": "https://github.com/pengchengluoyi/ClawNode_app/releases…
+2026-06-23 20:19:25.646 D [WsManager] [BP:cmd_emit] trace=srv-1782217165645 command=INSTALL_APK ok=true
+2026-06-23 20:19:25.646 D [CommandDispatcher] [BP:dispatch] trace=srv-1782217165645 command=INSTALL_APK
+2026-06-23 20:19:25.652 D [AppUpdate] [BP:download_start] url=https://github.com/pengchengluoyi/ClawNode_app/releases/download/v1.7.24/ClawNode-1.7.24.apk
+2026-06-23 20:19:30.565 D [WsManager] [BP:heartbeat] seq=39 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:19:30.588 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217170.5538409, "node_status": "offline", "code": 200}
+2026-06-23 20:19:30.590 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:19:31.330 D [AppUpdate] [BP:download_ok] size=12403818
+2026-06-23 20:19:31.333 D [AppUpdate] [BP:install_start] file=ClawNode-1.7.24.apk size=12403818
+2026-06-23 20:19:31.552 D [AppUpdate] [BP:install_session_committed] ClawNode-1.7.24.apk
+2026-06-23 20:19:31.553 D [WsManager] [BP:send_ok] trace=srv-1782217165645 type=ACTION_RESULT bytes=134
+2026-06-23 20:19:31.572 D [WsManager] [BP:rx] {"action": "ACTION_RESULT", "req_id": "srv-1782217165645", "timestamp": 1782217171.5403311, "node_status": "offline"}
+2026-06-23 20:19:31.575 D [WsManager] [BP:rx_ack] action=ACTION_RESULT code=null
+2026-06-23 20:19:31.614 D [InstallReceiver] [BP:pending_user] launch confirm UI
+2026-06-23 20:19:46.235 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:19:46.326 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:19:47.318 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:19:49.558 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 20:19:49.562 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:19:49.566 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 20:19:50.570 D [WsManager] [BP:heartbeat] seq=40 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:19:50.589 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217190.56229, "node_status": "offline", "code": 200}
+2026-06-23 20:19:50.592 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:20:10.577 D [WsManager] [BP:heartbeat] seq=41 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:20:10.640 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217210.600503, "node_status": "offline", "code": 200}
+2026-06-23 20:20:10.643 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:20:11.241 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:20:16.337 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:20:17.219 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:20:30.583 D [WsManager] [BP:heartbeat] seq=42 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:20:30.635 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217230.606215, "node_status": "offline", "code": 200}
+2026-06-23 20:20:30.637 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:20:36.247 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:20:46.345 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:20:47.218 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:20:50.589 D [WsManager] [BP:heartbeat] seq=43 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:20:50.600 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217250.573674, "node_status": "offline", "code": 200}
+2026-06-23 20:20:50.603 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:21:01.254 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:21:08.331 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 20:21:08.333 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:21:08.338 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 20:21:10.596 D [WsManager] [BP:heartbeat] seq=44 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:21:11.022 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217270.988301, "node_status": "offline", "code": 200}
+2026-06-23 20:21:11.024 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:21:16.354 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:21:17.152 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:21:26.260 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:21:30.602 D [WsManager] [BP:heartbeat] seq=45 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:21:30.611 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217290.58631, "node_status": "offline", "code": 200}
+2026-06-23 20:21:30.614 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:21:46.363 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:21:47.257 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:21:50.606 D [WsManager] [BP:heartbeat] seq=46 sn=claw-1e3faddecc6dac50 ok=true
+2026-06-23 20:21:50.636 D [WsManager] [BP:rx] {"action": "heartbeat", "req_id": null, "timestamp": 1782217310.600097, "node_status": "offline", "code": 200}
+2026-06-23 20:21:50.638 D [WsManager] [BP:rx_ack] action=heartbeat code=200
+2026-06-23 20:21:51.263 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:21:55.666 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:22:02.886 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 20:22:02.889 D [WsManager] [BP:reconnect_skip] already connected
+2026-06-23 20:22:02.892 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 20:22:05.056 D [ClawLog] [BP:init] path=/data/user/0/com.clawnode.agent/files/logs/clawnode.log v1.7.24
+2026-06-23 20:22:05.059 D [ClawNodeApp] [BP:onCreate] process start pid=2251
+2026-06-23 20:22:05.068 D [InstallReceiver] [BP:success] update installed
+2026-06-23 20:22:05.093 D [ActionExecutor] [BP:service_connected] accessibility service ready
+2026-06-23 20:22:05.098 D [NodeFgService] [BP:start] launching node foreground service
+2026-06-23 20:22:05.126 D [WsManager] [BP:device_meta] model=motorola moto g85 5G res=1080x2172
+2026-06-23 20:22:05.139 D [NetworkMonitor] [BP:start] default network callback registered
+2026-06-23 20:22:05.140 D [NodeFgService] [BP:onCreate] node foreground service created
+2026-06-23 20:22:05.141 D [NodeFgService] [BP:onStartCommand] enter foreground
+2026-06-23 20:22:05.144 D [NetworkMonitor] [BP:net_available] handle=432902426637 first=true
+2026-06-23 20:22:05.145 D [WsManager] [BP:net_change] force reconnect on network switch
+2026-06-23 20:22:05.145 D [WsManager] [BP:restart] stop then start
+2026-06-23 20:22:05.146 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=1
+2026-06-23 20:22:05.147 D [WsManager] [BP:state_change] Idle → Idle
+2026-06-23 20:22:05.149 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:05.149 D [WsManager] [BP:settings_url_change] reconnect → ws://192.168.202.36:10104/ws
+2026-06-23 20:22:05.150 D [ConnKeepAlive] [BP:acquire] partial wake lock held
+2026-06-23 20:22:05.150 D [WsManager] [BP:restart] stop then start
+2026-06-23 20:22:05.151 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=2
+2026-06-23 20:22:05.151 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:05.152 D [WsManager] [BP:state_change] Idle → Idle
+2026-06-23 20:22:05.152 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:05.153 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:05.154 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:05.155 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:05.159 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 20:22:06.025 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:22:10.088 D [AppUpdate] [BP:check_start] current=1.7.24(36)
+2026-06-23 20:22:12.177 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:12.181 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:12.184 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=3 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:12.718 D [AppUpdate] [BP:resolve_pick] v1.7.24 source=manifest
+2026-06-23 20:22:12.720 D [AppUpdate] [BP:check_result] latest=1.7.24 hasUpdate=false source=manifest asset=ClawNode-1.7.24.apk
+2026-06-23 20:22:14.576 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:14.578 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:14.580 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:14.582 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:15.082 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:15.083 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=4
+2026-06-23 20:22:15.085 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:15.086 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:15.087 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:15.089 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:15.089 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:22.107 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:22.110 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:22.111 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=5 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:22.122 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:22.123 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:22.126 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:22.127 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:22.628 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:22.629 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=6
+2026-06-23 20:22:22.631 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:22.632 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:22.634 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:22.635 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:22.636 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:29.655 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:29.658 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:29.660 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=7 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:29.672 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:29.674 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:29.676 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:29.678 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:30.159 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:30.161 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=8
+2026-06-23 20:22:30.164 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:30.165 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:30.168 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:30.169 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:30.170 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:30.178 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:30.180 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=9
+2026-06-23 20:22:30.183 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:22:30.185 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:30.187 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:30.189 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:30.190 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:35.171 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:22:35.949 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:22:37.206 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:37.208 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:37.210 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=10 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:37.223 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:37.225 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:37.227 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:37.229 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:37.731 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:37.733 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=11
+2026-06-23 20:22:37.735 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:37.736 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:37.738 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:37.740 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:37.741 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:44.758 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:44.761 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:44.763 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=12 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:44.776 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:44.777 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:44.781 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:44.782 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:45.282 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:45.284 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=13
+2026-06-23 20:22:45.286 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:45.287 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:45.289 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:45.290 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:45.291 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:52.312 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:22:52.314 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:22:52.316 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=14 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:22:52.328 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:22:52.330 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:22:52.333 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:22:52.334 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:22:52.836 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:52.838 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=15
+2026-06-23 20:22:52.839 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:22:52.840 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:52.842 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:52.844 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:52.845 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:22:55.171 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:22:55.173 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=16
+2026-06-23 20:22:55.176 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:22:55.178 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:22:55.180 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:22:55.181 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:22:55.183 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:02.197 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:02.200 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:02.201 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=17 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:02.211 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:02.213 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:02.215 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:02.216 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:02.719 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:02.721 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=18
+2026-06-23 20:23:02.723 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:02.724 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:02.726 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:02.728 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:02.729 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:05.181 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:23:06.000 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:23:09.744 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:09.746 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:09.749 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=19 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:09.759 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:09.761 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:09.762 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:09.763 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:10.265 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:10.266 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=20
+2026-06-23 20:23:10.268 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:10.269 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:10.270 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:10.271 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:10.272 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:16.963 D [MainActivity] [BP:onCreate] main activity v1.7.24
+2026-06-23 20:23:17.052 D [MainActivity] [BP:onResume] refresh states
+2026-06-23 20:23:17.054 W [SystemController] [BP:restricted_check_fail] fallback=true msg=verifyIncomingOp: uid 10360 does not have any of {MANAGE_APPOPS, GET_APP_OPS_STATS, MANAGE_APP_OPS_MODES}
+2026-06-23 20:23:17.282 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:17.282 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:17.283 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=21 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:17.287 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:17.287 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:17.290 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:17.291 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:17.791 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:17.791 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=22
+2026-06-23 20:23:17.792 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:17.793 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:17.794 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:17.794 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:17.794 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:20.183 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:20.184 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=23
+2026-06-23 20:23:20.185 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:23:20.186 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:20.186 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:20.187 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:20.188 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:23.913 D [ConnWatchdogRx] [BP:alarm] watchdog tick
+2026-06-23 20:23:23.914 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:23.915 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=24
+2026-06-23 20:23:23.917 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:23:23.920 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:23.922 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:23.923 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:23.924 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:23.926 D [ConnWatchdog] [BP:schedule] nextMs=45000
+2026-06-23 20:23:29.919 D [MediaProjectionReq] [BP:onCreate] mode=authorize trace= fps=15
+2026-06-23 20:23:30.939 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:30.942 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:30.944 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=25 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:30.954 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:30.954 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:30.955 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:30.956 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:31.456 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:31.457 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=26
+2026-06-23 20:23:31.459 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:31.460 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:31.462 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:31.463 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:31.464 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:32.986 E [MediaProjAuthStore] [BP:save_failed] Tried to marshall a Parcel that contains objects (binders or FDs). | RuntimeException: Tried to marshall a Parcel that contains objects (binders or FDs).
+2026-06-23 20:23:32.988 D [MediaProjectionReq] [BP:auth_ok] mode=authorize trace=
+2026-06-23 20:23:32.989 D [MediaProjectionReq] [BP:auth_saved] authorization stored for background capture
+2026-06-23 20:23:33.014 D [MainActivity] [BP:onResume] refresh states
+2026-06-23 20:23:33.015 W [SystemController] [BP:restricted_check_fail] fallback=true msg=verifyIncomingOp: uid 10360 does not have any of {MANAGE_APPOPS, GET_APP_OPS_STATS, MANAGE_APP_OPS_MODES}
+2026-06-23 20:23:35.190 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:23:35.977 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:23:38.480 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:38.482 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:38.482 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=27 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:38.490 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:38.490 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:38.492 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:38.492 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:38.994 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:38.996 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=28
+2026-06-23 20:23:38.998 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:38.999 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:39.001 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:39.003 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:39.004 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:45.190 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:45.192 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=29
+2026-06-23 20:23:45.195 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:23:45.197 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:45.199 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:45.200 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:45.202 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:52.219 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:52.221 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:52.223 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=30 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:52.235 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:52.237 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:52.239 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:52.241 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:23:52.745 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:23:52.747 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=31
+2026-06-23 20:23:52.749 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:23:52.751 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:23:52.753 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:23:52.754 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:23:52.756 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:23:59.771 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:23:59.774 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:23:59.776 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=32 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:23:59.787 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:23:59.789 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:23:59.791 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:23:59.793 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:24:00.294 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:24:00.296 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=33
+2026-06-23 20:24:00.298 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:24:00.300 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:24:00.302 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:24:00.304 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:24:00.306 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:24:05.202 D [NodeBeacon] [BP:unregistered] name=clawnode-claw-1e3faddecc6dac50
+2026-06-23 20:24:06.122 D [NodeBeacon] [BP:registered] name=clawnode-claw-1e3faddecc6dac50 sn=claw-1e3faddecc6dac50
+2026-06-23 20:24:07.322 D [ServerDiscovery] [BP:find_gateways] count=1
+2026-06-23 20:24:07.325 D [WsManager] [BP:state_change] Discovering → Connecting
+2026-06-23 20:24:07.327 D [WsManager] [BP:ws_open] sn=claw-1e3faddecc6dac50 epoch=34 url=ws://miniorange-changpengchengdeMacBook-Pro.local:10104/ws?token=2E14733F153E49B5BEB9A43A14C4CE1E
+2026-06-23 20:24:07.340 E [WsManager] [BP:ws_failure] http=null msg=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname | UnknownHostException: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname
+2026-06-23 20:24:07.342 D [WsManager] [BP:state_change] Connecting → Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname)
+2026-06-23 20:24:07.344 D [WsManager] [BP:state_change] Disconnected(reason=Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname) → Reconnecting(attempt=1, nextDelayMs=1137)
+2026-06-23 20:24:07.345 W [WsManager] [BP:reconnect_scheduled] reason=failure: Unable to resolve host "miniorange-changpengchengdemacbook-pro.local": No address associated with hostname attempt=1 delayMs=1137
+2026-06-23 20:24:07.847 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:24:07.849 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=35
+2026-06-23 20:24:07.851 D [WsManager] [BP:state_change] Reconnecting(attempt=1, nextDelayMs=1137) → Idle
+2026-06-23 20:24:07.852 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:24:07.854 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:24:07.855 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:24:07.856 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
+2026-06-23 20:24:10.205 D [WsManager] [BP:reconnect_interrupt] cancel backoff and restart ws
+2026-06-23 20:24:10.207 D [WsManager] [BP:stop] manualClosed=true resetAuth=false epoch=36
+2026-06-23 20:24:10.210 D [WsManager] [BP:state_change] Discovering → Idle
+2026-06-23 20:24:10.212 D [WsManager] [BP:reconnect_wake] restart ws
+2026-06-23 20:24:10.214 D [WsManager] [BP:connect_loop] entered
+2026-06-23 20:24:10.217 D [WsManager] [BP:state_change] Idle → Discovering
+2026-06-23 20:24:10.218 D [WsManager] [BP:discovery_start] reason=auto_or_paired paired=miniorange-changpengchengdeMacBook-Pro
