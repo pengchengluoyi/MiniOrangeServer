@@ -141,6 +141,13 @@ def translate_control_to_clawnode(params: dict) -> dict:
             "payload": {"package": params.get("package") or params.get("pkg") or ""},
         }
 
+    if action in ("run_shell", "shell"):
+        return {
+            "trace_id": trace_id,
+            "action_type": "RUN_SHELL",
+            "payload": {"command": params.get("command") or params.get("cmd") or ""},
+        }
+
     if action in ("export_logs", "upload_logs"):
         minutes = params.get("minutes")
         payload = {}

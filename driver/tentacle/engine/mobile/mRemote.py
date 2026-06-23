@@ -14,6 +14,7 @@ worker 线程）调用，故可安全地 event.wait() 阻塞 worker 线程；Web
 """
 
 import base64
+import re
 import threading
 import uuid
 from io import BytesIO
@@ -207,3 +208,24 @@ class RemoteEngine(MobileEngine):
     def dump_hierarchy_xml(self) -> str:
         SLog.d(TAG, "dump_hierarchy_xml unsupported on ClawNode; returning empty")
         return ""
+
+    def shell(self, cmd: str) -> str:
+        """受限 shell：供飞书前置 check_sim / clear_cache / pm path 等使用。"""
+        command = (cmd or "").strip()
+        if not command:
+            return ""
+
+        pm_clear = re.match(r"pm clear (\S+)", command)
+        if pm_clear:
+            data = self._request("CLEAR_APP_CACHE", {"package": pm_clear.group(1)})
+            if data and data.get("status") == "success":
+                return "Success"
+            return (data.get("message") or data.get("stdout") or "").strip() if data else ""
+
+        data = self._request("RUN_SHELL", {"command": command}, timeout=20.0)
+        if not data:
+            return ""
+        stdout = (data.get("stdout") or "").strip()
+        if stdout:
+            return stdout
+        return (data.get("message") or "").strip()

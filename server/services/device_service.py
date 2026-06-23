@@ -32,9 +32,27 @@ def _normalize_model(model: Optional[str]) -> str:
     if not model:
         return ""
     import re
-    text = str(model).strip().upper()
-    match = re.search(r"[A-Z0-9]{5,}", text)
-    return match.group(0) if match else text
+
+    text = re.sub(r"[^A-Z0-9]+", " ", str(model).strip().upper())
+    tokens = [t for t in text.split() if t]
+    if not tokens:
+        return ""
+
+    series: set[str] = set()
+    for tok in tokens:
+        if re.fullmatch(r"[A-Z]{1,4}\d{2,}[A-Z0-9]*", tok):
+            series.add(tok)
+        elif re.fullmatch(r"\d{5,}[A-Z0-9]*", tok):
+            series.add(tok)
+    if series:
+        return "|".join(sorted(series))
+
+    brands = {
+        "MOTOROLA", "MOTO", "XIAOMI", "REDMI", "SAMSUNG", "HUAWEI", "HONOR",
+        "GOOGLE", "ONEPLUS", "OPPO", "VIVO", "REALME", "ANDROID", "IPHONE", "APPLE",
+    }
+    rest = [t for t in tokens if t not in brands and len(t) >= 2]
+    return " ".join(rest) if rest else " ".join(tokens)
 
 
 def _is_claw_direct(device: MDevice) -> bool:
@@ -71,6 +89,47 @@ def dedupe_devices(devices: List[MDevice]) -> List[MDevice]:
             skip_sns.add(str(device.sn))
 
     return [device for device in devices if str(device.sn) not in skip_sns]
+
+
+def remove_duplicate_hubs_for_claw(
+    claw_sn: str,
+    model: Optional[str] = "",
+    ip: Optional[str] = "",
+    db=None,
+) -> List[str]:
+    """ClawNode 添加/上线时删除同机型的 USB hub 重复行。"""
+    if not claw_sn or not str(claw_sn).startswith("claw-"):
+        return []
+    model_key = _normalize_model(model)
+    device_ip = str(ip or "").strip()
+    close = db is None
+    if close:
+        db = SessionLocal()
+    removed: List[str] = []
+    try:
+        for device in db.query(MDevice).all():
+            if str(device.sn) == claw_sn:
+                continue
+            if str(device.device_type or "") != "android" or str(device.role or "") != "hub":
+                continue
+            hub_model_key = _normalize_model(device.model)
+            hub_ip = str(device.ip_address or "").strip()
+            if model_key and hub_model_key == model_key:
+                removed.append(str(device.sn))
+                db.delete(device)
+            elif device_ip and hub_ip and device_ip == hub_ip:
+                removed.append(str(device.sn))
+                db.delete(device)
+        if removed:
+            db.commit()
+    except Exception:
+        if close:
+            db.rollback()
+        raise
+    finally:
+        if close:
+            db.close()
+    return removed
 
 
 class DeviceService:

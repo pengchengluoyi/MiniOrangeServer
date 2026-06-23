@@ -201,13 +201,14 @@ async def handle_get_node_status(websocket, data: dict):
         status["sn"] = client.sn
         status["candidates"] = client.candidate_urls
 
-        # 判断逻辑保持不变
         if client.role == 'client':
             status["is_master"] = True
 
-        # 获取 DeviceClient 内部的 ws 连接状态
         client_ws = client.websocket
         status["connected"] = (client_ws is not None and getattr(client_ws, "open", False))
+    else:
+        status["role"] = "gateway"
+        status["connected"] = True
 
     return {"code": 200, "data": status}
 
