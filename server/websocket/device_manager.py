@@ -76,8 +76,10 @@ class DeviceManager:
     _last_app_heartbeat: Dict[str, float] = {}
 
     # ClawNode 后台 WS 可能因 OEM 省电短暂断连；宽限期内不因 disconnect 立即下线
-    CLAWNODE_WS_GRACE_SEC = 180  # WS 断开后仍视为在线的最长秒数（依赖最近 heartbeat）
-    CLAWNODE_HEARTBEAT_TIMEOUT_SEC = 180  # 无 WS 且无 heartbeat 时的离线阈值
+    CLAWNODE_WS_GRACE_SEC = 600  # WS 断开后仍视为在线的最长秒数（依赖最近 heartbeat）
+    # Doze 深度休眠下 setExactAndAllowWhileIdle 最快约 9 分钟才放行一次心跳，
+    # 故离线阈值放宽到 10 分钟，避免熄屏挂机被误判离线。
+    CLAWNODE_HEARTBEAT_TIMEOUT_SEC = 600  # 无 WS 且无 heartbeat 时的离线阈值
 
     def __new__(cls):
         if cls._instance is None:
