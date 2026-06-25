@@ -34,19 +34,45 @@ def _open_settings(_vars: dict | None = None) -> str:
     }, ensure_ascii=False)
 
 
-@_register_builtin("open_app_settings")
+@_register_builtin("open_app_settings", language="js")
 def _open_app_settings(vars: dict | None = None) -> str:
+    """通过 context.startActivity 打开应用详情（避免 shell am start 在 MIUI 假成功）。"""
     pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
     if not pkg:
         raise ValueError("open_app_settings requires package")
+    pkg_lit = json.dumps(pkg)
+    return f"""claw.wake();
+importClass(android.content.Intent);
+importClass(android.provider.Settings);
+importClass(android.net.Uri);
+var pkg = {pkg_lit};
+var intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+intent.setData(Uri.parse("package:" + pkg));
+intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+context.startActivity(intent);
+claw.sleep(2500);
+claw.foreground();
+"""
+
+
+@_register_builtin("open_app_settings_dsl")
+def _open_app_settings_dsl(vars: dict | None = None) -> str:
+    pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
+    if not pkg:
+        raise ValueError("open_app_settings_dsl requires package")
     return json.dumps({
         "steps": [
             {"op": "wake"},
-            {"op": "shell", "command": f"am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:{pkg}"},
-            {"op": "sleep", "ms": 2000},
-            {"op": "foreground"},
+            {"op": "open_app_details", "package": pkg},
+            {"op": "sleep", "ms": 2500},
+            {"op": "foreground", "expect": "settings"},
         ],
     }, ensure_ascii=False)
+
+
+@_register_builtin("open_app_settings_js", language="js")
+def _open_app_settings_js(vars: dict | None = None) -> str:
+    return _open_app_settings(vars)
 
 
 @_register_builtin("home")
