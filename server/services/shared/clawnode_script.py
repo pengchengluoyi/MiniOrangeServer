@@ -22,16 +22,37 @@ def _register_builtin(script_id: str, *, language: str = "dsl"):
     return deco
 
 
-@_register_builtin("open_settings")
+@_register_builtin("open_settings", language="js")
 def _open_settings(_vars: dict | None = None) -> str:
-    return json.dumps({
-        "steps": [
-            {"op": "wake"},
-            {"op": "open_app", "package": "com.android.settings"},
-            {"op": "sleep", "ms": 1500},
-            {"op": "foreground"},
-        ],
-    }, ensure_ascii=False)
+    """MIUI：与 open_app_settings 相同，走 context.startActivity。"""
+    return """claw.wake();
+importClass(android.content.Intent);
+importClass(android.provider.Settings);
+var intent = new Intent(Settings.ACTION_SETTINGS);
+intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+context.startActivity(intent);
+claw.sleep(2000);
+claw.foreground();
+"""
+
+
+@_register_builtin("launch_package", language="js")
+def _launch_package(vars: dict | None = None) -> str:
+    pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
+    if not pkg:
+        raise ValueError("launch_package requires package")
+    pkg_lit = json.dumps(pkg)
+    wait_ms = int((vars or {}).get("wait_ms") or 2000)
+    return f"""claw.wake();
+importClass(android.content.Intent);
+var pkg = {pkg_lit};
+var intent = context.getPackageManager().getLaunchIntentForPackage(pkg);
+if (intent == null) throw new Error("no launch intent for " + pkg);
+intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+context.startActivity(intent);
+claw.sleep({wait_ms});
+claw.foreground();
+"""
 
 
 @_register_builtin("open_app_settings", language="js")
@@ -55,19 +76,9 @@ claw.foreground();
 """
 
 
-@_register_builtin("open_app_settings_dsl")
+@_register_builtin("open_app_settings_dsl", language="js")
 def _open_app_settings_dsl(vars: dict | None = None) -> str:
-    pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
-    if not pkg:
-        raise ValueError("open_app_settings_dsl requires package")
-    return json.dumps({
-        "steps": [
-            {"op": "wake"},
-            {"op": "open_app_details", "package": pkg},
-            {"op": "sleep", "ms": 2500},
-            {"op": "foreground", "expect": "settings"},
-        ],
-    }, ensure_ascii=False)
+    return _open_app_settings(vars)
 
 
 @_register_builtin("open_app_settings_js", language="js")
@@ -78,25 +89,6 @@ def _open_app_settings_js(vars: dict | None = None) -> str:
 @_register_builtin("home")
 def _home(_vars: dict | None = None) -> str:
     return json.dumps({"steps": [{"op": "key", "key": "home"}]}, ensure_ascii=False)
-
-
-@_register_builtin("launch_package")
-def _launch_package(vars: dict | None = None) -> str:
-    pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
-    if not pkg:
-        raise ValueError("launch_package requires package")
-    activity = str((vars or {}).get("activity") or "").strip()
-    step: dict[str, Any] = {"op": "open_app", "package": pkg}
-    if activity:
-        step["activity"] = activity
-    return json.dumps({
-        "steps": [
-            {"op": "wake"},
-            step,
-            {"op": "sleep", "ms": int((vars or {}).get("wait_ms") or 2000)},
-            {"op": "foreground"},
-        ],
-    }, ensure_ascii=False)
 
 
 @_register_builtin("shell_raw", language="js")
