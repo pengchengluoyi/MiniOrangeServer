@@ -76,6 +76,8 @@ class DeviceManager:
     pending_pairings: Dict[str, dict] = {}
     # [ClawNode] 注册时上报的扩展元数据 { sn: {app_version, ...} }
     device_meta: Dict[str, dict] = {}
+    # 设备详情页 /device/command 等待 ACTION_RESULT
+    _cmd_waiters: Dict[str, "asyncio.Future"] = {}
     # 最近一次应用层 heartbeat 时间戳（秒）
     _last_app_heartbeat: Dict[str, float] = {}
 
@@ -541,15 +543,21 @@ class DeviceManager:
             return f"http://{lan_ip}:{port}{url}"
         return f"http://{lan_ip}:{port}/{url}"
 
-    async def send_command(self, sn: str, command: str, params: dict = None):
-        """给设备发送指令。
-        重要：对于 INSTALL_APK 等需要设备下载的场景，必须确保 params 里的 url 是设备能访问 server 的地址（LAN IP），
-        而不是前端浏览器看到的 127.0.0.1 / localhost。
-        """
+    async def send_command(
+        self,
+        sn: str,
+        command: str,
+        params: dict = None,
+        *,
+        wait_timeout: float | None = 60.0,
+    ):
+        """给设备发送指令。ClawNode 直连默认等待设备回传（最多 wait_timeout 秒）。"""
         if sn not in self.active_connections:
             SLog.w("DeviceManager", f"Device {sn} is offline")
-            return False
+            return {"sent": False, "error": "device offline"}
 
+        import uuid
+        trace_id = f"ui-{uuid.uuid4().hex[:12]}"
         params = dict(params or {})
         cmd_upper = (command or "").upper()
 
@@ -560,7 +568,7 @@ class DeviceManager:
             cmd_upper = (command or "").upper()
         except ValueError as e:
             SLog.e("DeviceManager", f"exec_script params invalid: {e}")
-            return False
+            return {"sent": False, "error": str(e)}
 
         if cmd_upper in ("INSTALL_APK", "INSTALLAPK"):
             if "url" in params:
@@ -575,19 +583,45 @@ class DeviceManager:
             "type": "command",
             "command": command,
             "params": params,
+            "trace_id": trace_id,
             "timestamp": datetime.now().isoformat()
         }
 
         msg_str = json.dumps(msg)
 
         SLog.i("DeviceManager", f"msg_str {msg_str}")
+        waiter = None
+        if wait_timeout and wait_timeout > 0 and sn in getattr(self, "direct_nodes", set()):
+            import asyncio
+            loop = asyncio.get_running_loop()
+            waiter = loop.create_future()
+            self._cmd_waiters[trace_id] = waiter
         try:
             await self.active_connections[sn].send_text(msg_str)
             self._save_log(sn, "send", "command", msg_str)
-            return True
         except Exception as e:
             SLog.e("DeviceManager", f"Send command failed: {e}")
-            return False
+            if waiter is not None:
+                self._cmd_waiters.pop(trace_id, None)
+            return {"sent": False, "trace_id": trace_id, "error": str(e)}
+
+        if waiter is None:
+            return {"sent": True, "trace_id": trace_id, "device": None}
+
+        import asyncio
+        try:
+            device_data = await asyncio.wait_for(waiter, wait_timeout)
+            return {"sent": True, "trace_id": trace_id, "device": device_data}
+        except asyncio.TimeoutError:
+            return {"sent": True, "trace_id": trace_id, "device": None, "timeout": True}
+        finally:
+            self._cmd_waiters.pop(trace_id, None)
+
+    def resolve_command_waiter(self, trace_id: str, data: dict):
+        import asyncio
+        fut = self._cmd_waiters.get(trace_id)
+        if fut is not None and not fut.done():
+            fut.set_result(data)
 
     async def handle_list_dir(self, websocket: WebSocket, data: dict):
         """

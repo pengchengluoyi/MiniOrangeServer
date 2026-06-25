@@ -25,6 +25,8 @@ class CommandReq(BaseModel):
     sn: str
     command: str
     params: Dict[str, Any] = {}
+    wait_result: bool = True
+    wait_timeout: float = 90.0
 
 class SetPasswordReq(BaseModel):
     sn: str
@@ -62,11 +64,34 @@ async def send_command(req: CommandReq):
     if req.sn not in manager.active_connections:
         return {"code": 400, "msg": "Device is offline"}
         
-    success = await manager.send_command(req.sn, req.command, req.params)
-    if success:
+    timeout = req.wait_timeout if req.wait_result else None
+    out = await manager.send_command(
+        req.sn, req.command, req.params, wait_timeout=timeout,
+    )
+    if isinstance(out, dict):
+        if not out.get("sent"):
+            return {"code": 500, "msg": out.get("error") or "Failed to send", **out}
+        device = out.get("device") or {}
+        status = str(device.get("status") or "").lower()
+        ok = status == "success" or (status == "" and not device.get("stderr"))
+        msg = device.get("message") or device.get("stdout") or out.get("error") or "Command sent"
+        if out.get("timeout"):
+            return {
+                "code": 202,
+                "msg": "sent but device response timeout",
+                "trace_id": out.get("trace_id"),
+                "timeout": True,
+            }
+        return {
+            "code": 200 if ok else 500,
+            "msg": msg,
+            "ok": ok,
+            "trace_id": out.get("trace_id"),
+            "device": device,
+        }
+    if out:
         return {"code": 200, "msg": "Command sent"}
-    else:
-        return {"code": 500, "msg": "Failed to send"}
+    return {"code": 500, "msg": "Failed to send"}
 
 @router.post("/set_password")
 def set_device_password(req: SetPasswordReq):

@@ -195,7 +195,8 @@ async def execute_scheduled_task(task_id: str):
 
     # 4. Send Command (Async)
     try:
-        success = await DeviceManager().send_command(target, "run_task", params)
+        out = await DeviceManager().send_command(target, "run_task", params, wait_timeout=None)
+        success = out.get("sent", False) if isinstance(out, dict) else bool(out)
         if success:
             SLog.i("Scheduler", f"Task {ctx['task_name']} sent to {target}")
             await loop.run_in_executor(None, _update_history_result, history_id, task_id, "dispatched",

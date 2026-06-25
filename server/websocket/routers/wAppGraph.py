@@ -770,7 +770,8 @@ async def handle_crawl_app(websocket, data: dict):
     params["target_sn"] = sn
     if not params.get("platform"):
         params["platform"] = "android"
-    ok = await dm.send_command(str(sn), "crawl_app", params)
+    out = await dm.send_command(str(sn), "crawl_app", params, wait_timeout=None)
+    ok = bool(out.get("sent")) if isinstance(out, dict) else bool(out)
     if not ok:
         return {"code": 500, "msg": "指令下发失败"}
 

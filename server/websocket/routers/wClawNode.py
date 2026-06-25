@@ -61,6 +61,7 @@ async def handle_clawnode_result(websocket: WebSocket, data: dict):
         eng = RemoteEngine._by_sn.get(sn)
         if eng:
             eng._resolve(trace_id, data)
+        DeviceManager().resolve_command_waiter(trace_id, data)
 
     # 再广播给前端观察者（stream/截图预览继续工作）
     payload = {

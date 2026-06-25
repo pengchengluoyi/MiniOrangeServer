@@ -126,7 +126,8 @@ async def handle_run_workflow(websocket, data: dict):
     if env_profile:
         params["env_profile"] = env_profile
 
-    success = await DeviceManager().send_command(sn, "run_task", params)
+    out = await DeviceManager().send_command(sn, "run_task", params, wait_timeout=None)
+    success = out.get("sent", False) if isinstance(out, dict) else bool(out)
 
     if success:
         return {"code": 200, "msg": "Command sent", "run_id": params["run_id"]}
