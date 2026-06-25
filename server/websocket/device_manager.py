@@ -553,6 +553,15 @@ class DeviceManager:
         params = dict(params or {})
         cmd_upper = (command or "").upper()
 
+        # ClawNode EXEC_SCRIPT：解析 script_id / 摊平嵌套 params（设备详情页、回归 case 共用）
+        try:
+            from server.services.shared.clawnode_script import normalize_exec_script_command
+            command, params = normalize_exec_script_command(command, params)
+            cmd_upper = (command or "").upper()
+        except ValueError as e:
+            SLog.e("DeviceManager", f"exec_script params invalid: {e}")
+            return False
+
         if cmd_upper in ("INSTALL_APK", "INSTALLAPK"):
             if "url" in params:
                 params["url"] = self._to_device_reachable_url(params.get("url"))
@@ -866,16 +875,50 @@ class DeviceManager:
         return {"code": 200, "msg": "ack"}
 
     # --- 数据库操作 ---
-    def _update_device_status(self, sn: str, status: str):
+    def _update_device_status(self, sn: str, status: str, *, remote_auth_state: str | None = None):
+        """更新设备主状态 + 同步 channels.remote 子状态。
+
+        Step 2：上层调用方只关心 status (online/offline)，channels.remote 由本方法依据
+        当前是否在 direct_nodes / active_connections 中自动判定。
+        """
+        from server.services.runtime.channels import set_remote_channel
+
         def _write():
             with SessionLocal() as db:
                 device = db.query(MDevice).filter(MDevice.sn == sn).first()
-                if device:
-                    device.status = status
-                    if status == "online":
-                        now = datetime.now()
-                        device.last_online_time = now.replace(microsecond=0)
-                    db.commit()
+                if not device:
+                    return
+                device.status = status
+                if status == "online":
+                    now = datetime.now()
+                    device.last_online_time = now.replace(microsecond=0)
+
+                # 同步 channels.remote
+                if status == "online":
+                    is_direct = sn in getattr(self, "direct_nodes", set())
+                    has_ws = sn in getattr(self, "active_connections", {})
+                    if is_direct and has_ws:
+                        set_remote_channel(
+                            device,
+                            state="connected",
+                            auth_state=remote_auth_state or "Authenticated",
+                            details="ws active & in direct_nodes",
+                        )
+                    elif has_ws:
+                        set_remote_channel(
+                            device,
+                            state="disconnected",
+                            auth_state=remote_auth_state or "Connected",
+                            details="ws active but not authenticated direct node",
+                        )
+                else:
+                    set_remote_channel(
+                        device,
+                        state="disconnected",
+                        auth_state=remote_auth_state,
+                        details=f"main status -> {status}",
+                    )
+                db.commit()
 
         try:
             _with_db_retry(_write)
@@ -894,6 +937,8 @@ class DeviceManager:
                 with SessionLocal() as db:
                     devices = db.query(MDevice).filter(MDevice.status == "online").all()
 
+                    from server.services.runtime.channels import set_remote_channel
+
                     for dev in devices:
                         sn = str(dev.sn)
                         ws = self.active_connections.get(sn)
@@ -901,6 +946,16 @@ class DeviceManager:
                             # 连接仍在：刷新 DB 在线时间，避免仅 mDNS 可达时被误判
                             dev.status = "online"
                             dev.last_online_time = datetime.now().replace(microsecond=0)
+                            if sn in self.direct_nodes:
+                                try:
+                                    set_remote_channel(
+                                        dev,
+                                        state="connected",
+                                        auth_state="Authenticated",
+                                        details="heartbeat keepalive",
+                                    )
+                                except Exception:
+                                    pass
                             continue
                         recent = self._last_app_heartbeat.get(sn, 0)
                         grace_sec = (
@@ -917,6 +972,14 @@ class DeviceManager:
                         dev.status = "offline"
                         self.active_connections.pop(sn, None)
                         self._last_app_heartbeat.pop(sn, None)
+                        try:
+                            set_remote_channel(
+                                dev,
+                                state="disconnected",
+                                details="heartbeat timeout",
+                            )
+                        except Exception:
+                            pass
 
                     db.commit()
 
@@ -1057,6 +1120,26 @@ class DeviceManager:
                 # 优化：直接去除微秒
                 now = datetime.now()
                 device.last_online_time = now.replace(microsecond=0)
+
+                # Step 2: 同步 channels.remote。直连节点（claw-* 或 register 后会被加入
+                # direct_nodes）= connected；普通节点保持默认 disconnected。
+                try:
+                    from server.services.runtime.channels import set_remote_channel
+
+                    is_direct = (
+                        sn in getattr(self, "direct_nodes", set())
+                        or str(sn).startswith("claw-")
+                    )
+                    if is_direct:
+                        set_remote_channel(
+                            device,
+                            state="connected",
+                            auth_state="Authenticated",
+                            details="register_device",
+                        )
+                except Exception as ce:
+                    SLog.w("DeviceManager", f"set_remote_channel failed for {sn}: {ce}")
+
                 db.commit()
                 SLog.i("DeviceManager", f"Device registered/updated: {sn}")
                 if str(sn).startswith("claw-"):

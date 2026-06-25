@@ -123,6 +123,44 @@ def resolve_script(
     return str(body).strip(), lang
 
 
+def flatten_capability_params(params: dict | None) -> dict[str, Any]:
+    """
+    摊平回归/设备详情页常见的嵌套格式：
+      { "capability_id": "exec_script", "params": { "script_id": "..." } }
+    → { "script_id": "..." }
+    """
+    p = dict(params or {})
+    inner = p.get("params")
+    if isinstance(inner, dict):
+        flat = dict(inner)
+        for k, v in p.items():
+            if k not in ("params", "capability_id", "event_kind"):
+                flat.setdefault(k, v)
+        return flat
+    return p
+
+
+def normalize_exec_script_command(command: str, params: dict | None) -> tuple[str, dict[str, Any]]:
+    """
+    将 exec_script / EXEC_SCRIPT 等别名转为 ClawNode 标准帧：
+      command=EXEC_SCRIPT, params={ script, language, timeout_ms }
+    """
+    cmd = (command or "").strip()
+    low = cmd.lower().replace("-", "_")
+    if low not in ("exec_script", "run_script", "exec_code", "exec"):
+        return cmd, dict(params or {})
+
+    flat = flatten_capability_params(params)
+    built = build_exec_script_command_params(
+        script=str(flat.get("script") or ""),
+        script_id=str(flat.get("script_id") or ""),
+        language=str(flat.get("language") or ""),
+        timeout_ms=int(flat.get("timeout_ms") or 60_000),
+        script_vars=flat.get("script_vars") if isinstance(flat.get("script_vars"), dict) else None,
+    )
+    return "EXEC_SCRIPT", built
+
+
 def build_exec_script_command_params(
     *,
     script: str = "",

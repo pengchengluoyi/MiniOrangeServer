@@ -125,27 +125,24 @@ def translate_control_to_clawnode(params: dict) -> dict:
         return cmd("RUN_SHELL", {"command": params.get("command") or params.get("cmd") or ""})
 
     if action in ("exec_script", "run_script", "exec_code"):
-        payload: dict = {
-            "script": params.get("script") or "",
-            "language": params.get("language") or "dsl",
-        }
-        timeout_ms = params.get("timeout_ms")
-        if timeout_ms is not None:
-            try:
-                payload["timeout_ms"] = int(timeout_ms)
-            except (TypeError, ValueError):
-                pass
-        # 支持 script_id + script_vars（由上层先 resolve，或直接传已解析 script）
-        if not payload["script"] and params.get("script_id"):
-            from server.services.shared.clawnode_script import build_exec_script_command_params
+        from server.services.shared.clawnode_script import flatten_capability_params, build_exec_script_command_params
+        flat = flatten_capability_params(params)
+        try:
             built = build_exec_script_command_params(
-                script_id=str(params.get("script_id") or ""),
-                language=str(params.get("language") or ""),
-                timeout_ms=int(timeout_ms or 60_000),
-                script_vars=params.get("script_vars") if isinstance(params.get("script_vars"), dict) else None,
+                script=str(flat.get("script") or ""),
+                script_id=str(flat.get("script_id") or ""),
+                language=str(flat.get("language") or ""),
+                timeout_ms=int(flat.get("timeout_ms") or 60_000),
+                script_vars=flat.get("script_vars") if isinstance(flat.get("script_vars"), dict) else None,
             )
-            payload.update(built)
-        return cmd("EXEC_SCRIPT", payload)
+        except ValueError:
+            built = {
+                "script": flat.get("script") or "",
+                "language": flat.get("language") or "dsl",
+            }
+            if flat.get("timeout_ms") is not None:
+                built["timeout_ms"] = flat.get("timeout_ms")
+        return cmd("EXEC_SCRIPT", built)
 
     if action in ("export_logs", "upload_logs"):
         minutes = params.get("minutes")
