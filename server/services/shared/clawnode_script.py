@@ -22,18 +22,19 @@ def _register_builtin(script_id: str, *, language: str = "dsl"):
     return deco
 
 
+_JS_ASSERT_OK = """
+var fg = claw.foreground();
+if (!ok) throw new Error("launch failed, fg=" + fg);
+fg;
+"""
+
+
 @_register_builtin("open_settings", language="js")
 def _open_settings(_vars: dict | None = None) -> str:
-    """MIUI：与 open_app_settings 相同，走 context.startActivity。"""
     return """claw.wake();
-importClass(android.content.Intent);
-importClass(android.provider.Settings);
-var intent = new Intent(Settings.ACTION_SETTINGS);
-intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-context.startActivity(intent);
-claw.sleep(2000);
-claw.foreground();
-"""
+claw.sleep(1000);
+var ok = claw.openSystemSettings();
+""" + _JS_ASSERT_OK
 
 
 @_register_builtin("launch_package", language="js")
@@ -42,38 +43,22 @@ def _launch_package(vars: dict | None = None) -> str:
     if not pkg:
         raise ValueError("launch_package requires package")
     pkg_lit = json.dumps(pkg)
-    wait_ms = int((vars or {}).get("wait_ms") or 2000)
     return f"""claw.wake();
-importClass(android.content.Intent);
-var pkg = {pkg_lit};
-var intent = context.getPackageManager().getLaunchIntentForPackage(pkg);
-if (intent == null) throw new Error("no launch intent for " + pkg);
-intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-context.startActivity(intent);
-claw.sleep({wait_ms});
-claw.foreground();
-"""
+claw.sleep(1000);
+var ok = claw.openApp({pkg_lit});
+""" + _JS_ASSERT_OK
 
 
 @_register_builtin("open_app_settings", language="js")
 def _open_app_settings(vars: dict | None = None) -> str:
-    """通过 context.startActivity 打开应用详情（避免 shell am start 在 MIUI 假成功）。"""
     pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
     if not pkg:
         raise ValueError("open_app_settings requires package")
     pkg_lit = json.dumps(pkg)
     return f"""claw.wake();
-importClass(android.content.Intent);
-importClass(android.provider.Settings);
-importClass(android.net.Uri);
-var pkg = {pkg_lit};
-var intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-intent.setData(Uri.parse("package:" + pkg));
-intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-context.startActivity(intent);
-claw.sleep(2500);
-claw.foreground();
-"""
+claw.sleep(1000);
+var ok = claw.openAppDetails({pkg_lit});
+""" + _JS_ASSERT_OK
 
 
 @_register_builtin("open_app_settings_dsl", language="js")
