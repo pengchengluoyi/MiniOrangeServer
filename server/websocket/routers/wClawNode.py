@@ -7,6 +7,8 @@ ClawNode (1.7.23+) 与 server 使用完全相同的命令格式：
   下发：{ "type": "command", "command": "TAP", "params": {...}, "trace_id": "..." }
   回传：{ "trace_id": "...", "type": "ACTION_RESULT", "data": {...} }
 
+EXEC_SCRIPT（1.8.0+）：params { script, language, timeout_ms } 或 script_id + script_vars
+
 本模块负责：
   - ClawNode 注册
   - 结果回传广播
@@ -122,6 +124,29 @@ def translate_control_to_clawnode(params: dict) -> dict:
     if action in ("run_shell", "shell"):
         return cmd("RUN_SHELL", {"command": params.get("command") or params.get("cmd") or ""})
 
+    if action in ("exec_script", "run_script", "exec_code"):
+        payload: dict = {
+            "script": params.get("script") or "",
+            "language": params.get("language") or "dsl",
+        }
+        timeout_ms = params.get("timeout_ms")
+        if timeout_ms is not None:
+            try:
+                payload["timeout_ms"] = int(timeout_ms)
+            except (TypeError, ValueError):
+                pass
+        # 支持 script_id + script_vars（由上层先 resolve，或直接传已解析 script）
+        if not payload["script"] and params.get("script_id"):
+            from server.services.shared.clawnode_script import build_exec_script_command_params
+            built = build_exec_script_command_params(
+                script_id=str(params.get("script_id") or ""),
+                language=str(params.get("language") or ""),
+                timeout_ms=int(timeout_ms or 60_000),
+                script_vars=params.get("script_vars") if isinstance(params.get("script_vars"), dict) else None,
+            )
+            payload.update(built)
+        return cmd("EXEC_SCRIPT", payload)
+
     if action in ("export_logs", "upload_logs"):
         minutes = params.get("minutes")
         p = {}
@@ -137,6 +162,24 @@ def translate_control_to_clawnode(params: dict) -> dict:
             "package": params.get("package") or params.get("pkg") or "",
             "activity": params.get("activity"),
         })
+
+    if action in ("set_clipboard", "clipboard"):
+        return cmd("SET_CLIPBOARD", {"text": params.get("text") or ""})
+
+    if action in ("input_text", "type_text", "type"):
+        payload = {"text": params.get("text") or ""}
+        if params.get("x") is not None:
+            payload["x"] = params.get("x")
+        if params.get("y") is not None:
+            payload["y"] = params.get("y")
+        return cmd("INPUT_TEXT", payload)
+
+    if action in ("install_apk", "install"):
+        p = {"url": params.get("url") or ""}
+        file_name = params.get("fileName") or params.get("file_name")
+        if file_name:
+            p["file_name"] = file_name
+        return cmd("INSTALL_APK", p)
 
     return None
 

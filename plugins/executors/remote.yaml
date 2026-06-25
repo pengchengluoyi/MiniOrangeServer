@@ -1,0 +1,32 @@
+id: remote
+display_name: Remote (ClawNode App)
+description: |
+  部署在被测设备上的 ClawNode App，通过 WebSocket 与 Server 通信。提供拟人化操作能力
+  （点击/滑动/输入），更接近真实用户路径。不依赖 USB 调试，是生产手机的主要执行通道。
+
+available_when: connectivity.remote
+
+provides:
+  - ui_native_input          # TAP / SWIPE
+  - ui_input_text            # 文本输入（依赖输入法或 clipboard）
+  - ui_screenshot            # GET_SCREENSHOT
+  - ui_stream                # START_STREAM (Remote 独有，adb 没有真流)
+  - app_launch_native        # OPEN_APP
+  # 强停/清数据走 ai_persona（设置 UI），不再直连 STOP_APP / CLEAR_APP_CACHE
+  - clipboard_set            # SET_CLIPBOARD
+  - key_event                # KEY_EVENT (back/home/paste)
+  - system_pkg_install       # INSTALL_APK（需用户在 UI 上点"允许安装"，配合 ai_persona）
+  - read_system_data         # RUN_SHELL getprop / dumpsys（受限）
+  - exec_script              # EXEC_SCRIPT DSL/JS（ClawNode >= 1.8.0，Server 维护脚本库）
+
+# 视设备授予的运行时权限而定（device_owner / accessibility 等）
+conditional_provides:
+  - cap: system_pkg_clear
+    requires_remote_caps: [device_owner]   # 生产机多数没有；默认走 ai_persona 设置清存储
+
+platforms: [android, ios]
+
+probe:
+  type: websocket_ping
+  expect_state: Authenticated     # 仅 Authenticated 视为可用
+  timeout_sec: 5

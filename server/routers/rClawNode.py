@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from server.core.database import APP_DATA_DIR
 from server.core.gateway_beacon import build_gateway_identity
@@ -23,6 +24,56 @@ from script.log import SLog
 
 router = APIRouter(prefix="/api/clawnode", tags=["ClawNode"])
 TAG = "ClawNode"
+
+
+class ExecScriptRequest(BaseModel):
+    sn: str = Field(..., description="ClawNode 设备 SN（claw- 开头）")
+    script: str = Field("", description="内联 DSL JSON 或 JS 源码")
+    script_id: str = Field("", description="预置脚本 ID（见 clawnode_script.list_script_ids）")
+    language: str = Field("dsl", description="dsl | js")
+    timeout_ms: int = Field(60_000, ge=1_000, le=300_000)
+    script_vars: dict | None = Field(None, description="script_id 模板变量，如 package")
+
+
+@router.get("/scripts")
+def list_clawnode_scripts():
+    from server.services.shared.clawnode_script import list_script_ids
+    return {"code": 200, "data": list_script_ids()}
+
+
+@router.post("/exec-script")
+async def exec_script_on_device(body: ExecScriptRequest):
+    """直接向在线 ClawNode 下发 EXEC_SCRIPT 并等待设备回传。"""
+    sn = (body.sn or "").strip()
+    if not sn:
+        return {"code": 400, "msg": "missing sn"}
+    if not (body.script or "").strip() and not (body.script_id or "").strip():
+        return {"code": 400, "msg": "requires script or script_id"}
+
+    from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+    from driver.tentacle.engine.mobile.mRemote import RemoteEngine
+
+    try:
+        engine, _ = bootstrap_mobile_engine(sn, "android", reuse=True)
+    except Exception as e:
+        return {"code": 500, "msg": f"bootstrap failed: {e}"}
+    if not isinstance(engine, RemoteEngine):
+        return {"code": 400, "msg": f"device {sn} is not ClawNode remote"}
+
+    ok, stdout, stderr = engine.exec_script(
+        body.script,
+        script_id=body.script_id,
+        language=body.language,
+        timeout_ms=body.timeout_ms,
+        script_vars=body.script_vars,
+    )
+    return {
+        "code": 200 if ok else 500,
+        "msg": "ok" if ok else (stderr or stdout or "exec failed"),
+        "ok": ok,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
 
 
 def _default_clawnode_logs_dir() -> Path:

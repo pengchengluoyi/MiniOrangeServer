@@ -1,0 +1,45 @@
+id: exec_script
+display_name: 远程脚本执行
+event_kind: exec_script
+category: system
+description: |
+  在 ClawNode 设备上执行 Server 下发的 DSL/JS 脚本（EXEC_SCRIPT，需 ClawNode >= 1.8.0）。
+  新自动化能力优先在 Server 脚本库维护，无需频繁发版 APK。
+  DSL 示例：{"steps":[{"op":"wake"},{"op":"open_app","package":"com.android.settings"}]}
+  JS 示例：claw.openApp("com.android.settings"); claw.foreground();
+platforms: [android]
+trigger_phrases: [执行脚本, 远程脚本, exec script, run script]
+needs_vlm: false
+
+implementations:
+  - id: remote_exec_script
+    display_name: Remote EXEC_SCRIPT
+    executor: remote
+    requires_caps: [exec_script]
+    needs_vlm: false
+    low_level:
+      command: EXEC_SCRIPT
+      params:
+        script: "{script}"
+        language: "{language}"
+        timeout_ms: "{timeout_ms}"
+    cost: 3
+
+  - id: remote_exec_script_builtin
+    display_name: Remote 预置脚本 (script_id)
+    executor: remote
+    requires_caps: [exec_script]
+    needs_vlm: false
+    low_level:
+      command: EXEC_SCRIPT
+      params:
+        script_id: "{script_id}"
+        script_vars: "{script_vars}"
+    cost: 3
+
+ui:
+  shown_in_settings: true
+  examples:
+    - "script_id=open_settings"
+    - "script_id=open_app_settings package=com.example.app"
+    - "language=js script=claw.shell('am start -a android.settings.SETTINGS')"

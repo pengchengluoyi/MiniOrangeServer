@@ -86,7 +86,13 @@ class RemoteEngine(MobileEngine):
             return None
 
         trace_id = f"eng-{uuid.uuid4().hex[:12]}"
-        frame = {"trace_id": trace_id, "action_type": action_type, "payload": payload}
+        # 与 wClawNode.translate_* / send_command 对齐的标准帧；ClawNode 端仍兼容 action_type 旧格式
+        frame = {
+            "type": "command",
+            "command": action_type,
+            "params": payload or {},
+            "trace_id": trace_id,
+        }
 
         event = threading.Event()
         with self._lock:
@@ -120,7 +126,14 @@ class RemoteEngine(MobileEngine):
             return None
         b64 = data.get("base64_image") or data.get("base64")
         if not b64:
-            SLog.e(TAG, f"screenshot missing base64_image; keys={list(data.keys())}")
+            msg = str(data.get("message") or "").strip()
+            rtype = str(data.get("type") or "")
+            status = str(data.get("status") or "")
+            SLog.e(
+                TAG,
+                f"screenshot missing base64 type={rtype} status={status} "
+                f"msg={msg[:240] or list(data.keys())}",
+            )
             return None
         try:
             img = Image.open(BytesIO(base64.b64decode(b64)))
@@ -203,9 +216,31 @@ class RemoteEngine(MobileEngine):
         except Exception:
             return False
 
+    @staticmethod
+    def _is_shell_foreground(pkg: str) -> bool:
+        """锁屏/桌面壳层包名，不能视为被测应用已在前台。"""
+        p = (pkg or "").strip().lower()
+        if not p:
+            return True
+        if p in {"com.android.systemui", "android", "com.miui.home", "com.mi.android.launcher"}:
+            return True
+        if "launcher" in p or p.endswith(".launcher") or p.endswith(".home"):
+            return True
+        return False
+
+    @classmethod
+    def _foreground_matches_target(cls, current: str, target: str) -> bool:
+        current = (current or "").strip()
+        target = (target or "").strip()
+        if not current or not target or cls._is_shell_foreground(current):
+            return False
+        return current == target or target in current or current in target
+
     def ensure_screen_ready(self, node_sn=None) -> bool:
-        """远程节点通过 WAKE_UP + 截图黑屏判断来确认屏幕可用。"""
-        for attempt in range(3):
+        """远程节点：先 WAKE_UP 点亮，再截图判断是否仍为黑屏/息屏。"""
+        for attempt in range(5):
+            self.screen_on()
+            time.sleep(0.55)
             shot = self.screenshot()
             if shot is not None and not self._is_mostly_black_image(shot):
                 if attempt:
@@ -216,41 +251,125 @@ class RemoteEngine(MobileEngine):
                 f"screen not ready sn={self._serial} attempt={attempt} "
                 f"blank={self._is_mostly_black_image(shot)}",
             )
-            self.screen_on()
-            time.sleep(0.45)
         SLog.w(TAG, f"screen still not ready sn={self._serial}")
         return False
 
-    def start_app(self, package_name=None):
+    def start_app(self, package_name=None, *, activity: str = ""):
         pkg = (package_name or "").strip()
         if not pkg:
             return False
-        data = self._request("OPEN_APP", {"package": pkg})
-        ok = bool(data and data.get("status") == "success")
-        if ok:
-            deadline = time.time() + 8.0
-            while time.time() < deadline:
-                current = self.current_package()
-                if current and (current == pkg or pkg in current or current in pkg):
-                    self._last_started_package = current
-                    self._last_started_at = time.time()
-                    SLog.i(TAG, f"open app ok pkg={pkg} current={current}")
-                    return True
-                time.sleep(0.45)
+        if not self.ensure_screen_ready():
+            SLog.w(TAG, f"open app: screen not ready sn={self._serial} pkg={pkg}, still sending OPEN_APP")
+        payload: dict = {"package": pkg}
+        act = (activity or "").strip()
+        if act:
+            payload["activity"] = act
+        data = self._request("OPEN_APP", payload, timeout=30.0)
+        ok = bool(data and str(data.get("status") or "").lower() == "success")
+        if not ok:
+            msg = ""
+            if data:
+                msg = (data.get("message") or data.get("stderr") or "").strip()
+            SLog.w(TAG, f"OPEN_APP failed pkg={pkg} msg={msg or 'unknown'}")
+            return False
+
+        # ClawNode OPEN_APP 成功时 message 已是设备端读到的前台包名（或目标包名）
+        open_msg = ""
+        if data:
+            open_msg = (data.get("message") or data.get("stdout") or "").strip()
+        if open_msg and self._foreground_matches_target(open_msg, pkg):
+            self._last_started_package = open_msg
+            self._last_started_at = time.time()
+            SLog.i(TAG, f"OPEN_APP ok pkg={pkg} foreground={open_msg} (device confirmed)")
+            return True
+
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            current = self.current_package()
+            if self._foreground_matches_target(current, pkg):
+                self._last_started_package = current
+                self._last_started_at = time.time()
+                SLog.i(TAG, f"OPEN_APP ok pkg={pkg} foreground={current}")
+                return True
+            time.sleep(0.45)
+        fg = self.current_package()
+        SLog.w(
+            TAG,
+            f"OPEN_APP sent but foreground not confirmed pkg={pkg} current={fg or 'unknown'}, trying VLM",
+        )
+        if self._confirm_launch_visually(pkg):
             self._last_started_package = pkg
             self._last_started_at = time.time()
-            SLog.w(TAG, f"open app launched but foreground not confirmed pkg={pkg}")
             return True
-        msg = ""
-        if data:
-            msg = (data.get("message") or data.get("stdout") or "").strip()
-        SLog.w(TAG, f"open app failed pkg={pkg} msg={msg or 'unknown'}")
+        return False
+
+    def _confirm_launch_visually(self, pkg: str) -> bool:
+        """包名轮询失败时，用 VLM 判断当前屏是否为目标应用（非桌面/设置）。"""
+        time.sleep(0.6)
+        shot = self.screenshot()
+        if shot is None or self._is_mostly_black_image(shot):
+            return False
+        try:
+            buf = BytesIO()
+            shot.convert("RGB").save(buf, format="JPEG", quality=80)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            SLog.w(TAG, f"VLM launch confirm encode failed pkg={pkg}: {e}")
+            return False
+        try:
+            from server.services.ai.regression.planner import assert_visual
+
+            result = assert_visual(
+                expectation=(
+                    f"当前手机屏幕显示的是包名为 {pkg} 的应用主界面或启动页，"
+                    "不是手机桌面、不是系统设置页、不是应用列表。"
+                ),
+                image_base64=b64,
+                timeout_sec=45,
+            )
+            if result.passed:
+                SLog.i(
+                    TAG,
+                    f"VLM confirmed app launched pkg={pkg} confidence={result.confidence}",
+                )
+                return True
+            SLog.w(
+                TAG,
+                f"VLM launch confirm failed pkg={pkg}: {(result.ai_reasoning or '')[:200]}",
+            )
+        except Exception as e:
+            SLog.w(TAG, f"VLM launch confirm exception pkg={pkg}: {e}")
         return False
 
     def stop_app(self, package_name=None):
-        # 扩协议：STOP_APP（ClawNode 端可能仅 no-op，视权限而定）
-        data = self._request("STOP_APP", {"package": package_name or ""})
-        return bool(data and (data.get("status") == "success"))
+        """Remote：设置 → 应用信息 → 强制停止（拟人化）。"""
+        pkg = (package_name or "").strip()
+        if not pkg:
+            return False
+        from server.services.regression.persona_remote_lifecycle import force_stop_app_via_persona
+
+        ok, msg, _detail = force_stop_app_via_persona(self._serial, pkg)
+        if not ok:
+            SLog.w(TAG, f"persona force_stop failed pkg={pkg} sn={self._serial}: {msg}")
+        return ok
+
+    def clear_app_cache(self, package_name=None, *, app_name: str = ""):
+        """Remote：设置 → 应用信息 → 存储空间和缓存 → 清空存储空间（拟人化）。"""
+        pkg = (package_name or "").strip()
+        if not pkg:
+            return False
+        from server.services.regression.persona_remote_lifecycle import clear_app_storage_via_persona
+
+        ok, msg, _detail = clear_app_storage_via_persona(
+            self._serial, pkg, app_name=app_name or "",
+        )
+        if not ok:
+            SLog.w(TAG, f"persona clear_storage failed pkg={pkg} sn={self._serial}: {msg}")
+        return ok
+
+    def clear_app(self, package_name=None, *, app_name: str = ""):
+        """别名 → clear_app_cache。"""
+        return self.clear_app_cache(package_name, app_name=app_name)
 
     # ---------------- 给不了的能力：优雅降级返回空 ----------------
 
@@ -259,12 +378,10 @@ class RemoteEngine(MobileEngine):
         if data:
             pkg = (data.get("message") or data.get("stdout") or "").strip()
             if pkg:
-                self._last_started_package = pkg
-                self._last_started_at = time.time()
+                if not self._is_shell_foreground(pkg):
+                    self._last_started_package = pkg
+                    self._last_started_at = time.time()
                 return pkg
-        # 兜底：刚刚启动过的包名，避免短时切换期丢失
-        if self._last_started_package and (time.time() - self._last_started_at) < 10.0:
-            return self._last_started_package
         return ""
 
     def dump_hierarchy_xml(self) -> str:
@@ -294,3 +411,43 @@ class RemoteEngine(MobileEngine):
         if stdout:
             return stdout
         return (data.get("message") or "").strip()
+
+    def exec_script(
+        self,
+        script: str = "",
+        *,
+        script_id: str = "",
+        language: str = "dsl",
+        timeout_ms: int = 60_000,
+        script_vars: dict | None = None,
+    ) -> Tuple[bool, str, str]:
+        """
+        在设备上执行 EXEC_SCRIPT（ClawNode >= 1.8.0）。
+        返回 (ok, stdout, stderr)。
+        """
+        from server.services.shared.clawnode_script import (
+            build_exec_script_command_params,
+            parse_exec_script_response,
+        )
+
+        try:
+            payload = build_exec_script_command_params(
+                script=script,
+                script_id=script_id,
+                language=language,
+                timeout_ms=timeout_ms,
+                script_vars=script_vars,
+            )
+        except ValueError as e:
+            return False, "", str(e)
+
+        wait_sec = max(30.0, min(int(payload.get("timeout_ms") or timeout_ms) / 1000.0 + 15.0, 305.0))
+        data = self._request("EXEC_SCRIPT", payload, timeout=wait_sec)
+        ok, stdout, stderr = parse_exec_script_response(data)
+        if ok:
+            try:
+                from server.services.regression.screen import invalidate_remote_capture_cache
+                invalidate_remote_capture_cache(self._serial)
+            except Exception:
+                pass
+        return ok, stdout, stderr
