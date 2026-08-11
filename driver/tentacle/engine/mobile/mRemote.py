@@ -354,11 +354,22 @@ class RemoteEngine(MobileEngine):
         return ok
 
     def clear_app_cache(self, package_name=None, *, app_name: str = ""):
-        """Remote：设置 → 应用信息 → 存储空间和缓存 → 清空存储空间（拟人化）。"""
+        """Remote：EXEC_SCRIPT 打开应用详情页 → persona 按当前屏分步清存储。"""
         pkg = (package_name or "").strip()
         if not pkg:
             return False
-        from server.services.regression.persona_remote_lifecycle import clear_app_storage_via_persona
+        from server.services.regression.persona_remote_lifecycle import (
+            clear_app_storage_via_persona,
+            open_app_details_via_exec_script,
+        )
+
+        ok_boot, boot_msg = open_app_details_via_exec_script(self._serial, pkg)
+        if not ok_boot:
+            SLog.w(
+                TAG,
+                f"open_app_details failed pkg={pkg} sn={self._serial}: {boot_msg}",
+            )
+            return False
 
         ok, msg, _detail = clear_app_storage_via_persona(
             self._serial, pkg, app_name=app_name or "",

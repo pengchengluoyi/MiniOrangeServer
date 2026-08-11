@@ -110,29 +110,35 @@ def get_screen_frame(engine, *, force: bool = False) -> Dict[str, Any]:
             setattr(engine, _SNAP_ATTR, frame)
         return frame
 
-    hierarchy_lines: List[str] = []
-    try:
-        from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
+    from server.services.shared.clawnode_engine import is_clawnode_remote_engine
 
-        for t in discover_clickables_from_hierarchy(engine, w, h, max_items=80):
-            if t.label:
-                hierarchy_lines.append(t.label)
-    except Exception as e:
-        SLog.w(TAG, f"hierarchy collect failed: {e}")
+    skip_local_vision = is_clawnode_remote_engine(engine)
+
+    hierarchy_lines: List[str] = []
+    if not skip_local_vision:
+        try:
+            from driver.agent.Crawl.ui_discovery import discover_clickables_from_hierarchy
+
+            for t in discover_clickables_from_hierarchy(engine, w, h, max_items=80):
+                if t.label:
+                    hierarchy_lines.append(t.label)
+        except Exception as e:
+            SLog.w(TAG, f"hierarchy collect failed: {e}")
 
     ocr_lines: List[str] = []
     ocr_items: List[Dict[str, Any]] = []
-    try:
-        if shot is not None:
-            from driver.agent.Crawl.ui_discovery import _ocr_analyze_shot
+    if not skip_local_vision:
+        try:
+            if shot is not None:
+                from driver.agent.Crawl.ui_discovery import _ocr_analyze_shot
 
-            ocr_items = list(_ocr_analyze_shot(shot) or [])
-            for it in ocr_items:
-                t = (it.get("text") or "").strip()
-                if t:
-                    ocr_lines.append(t)
-    except Exception as e:
-        SLog.w(TAG, f"screen ocr failed: {e}")
+                ocr_items = list(_ocr_analyze_shot(shot) or [])
+                for it in ocr_items:
+                    t = (it.get("text") or "").strip()
+                    if t:
+                        ocr_lines.append(t)
+        except Exception as e:
+            SLog.w(TAG, f"screen ocr failed: {e}")
 
     ocr_text = "\n".join(ocr_lines)
     parts: List[str] = []

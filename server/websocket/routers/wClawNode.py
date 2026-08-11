@@ -44,6 +44,26 @@ async def handle_clawnode_register(websocket: WebSocket, data: dict):
     return {"code": 200, "msg": "clawnode registered"}
 
 
+async def handle_clawnode_capabilities(websocket: WebSocket, data: dict):
+    """
+    接收 ClawNode 主动上报或 GET_CAPABILITIES 应答的 CAPABILITIES 帧。
+    data 已拍平，含 version_name / version_code / capabilities 等。
+    """
+    sn = DeviceManager()._get_sn_by_ws(websocket)
+    if not sn:
+        return None
+    trace_id = data.get("trace_id")
+    manifest = DeviceManager().ingest_capability_payload(sn, data)
+    if trace_id:
+        DeviceManager().resolve_command_waiter(trace_id, data)
+    SLog.i(
+        TAG,
+        f"capabilities sn={sn} version={manifest.get('version_name') if manifest else '?'} "
+        f"count={len((manifest or {}).get('capabilities') or [])}",
+    )
+    return None
+
+
 async def handle_clawnode_result(websocket: WebSocket, data: dict):
     """
     接收 ClawNode 回传的 SCREENSHOT_RESULT / ACTION_RESULT / STREAM_* 等。

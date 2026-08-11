@@ -43,6 +43,16 @@ def resolve_locate_target(
 ) -> LocateResult:
     """多通道定位；失败时仍返回 debug 供回放展示。"""
     empty = LocateResult(method="none", detail="locate arbitrator disabled")
+    try:
+        from server.services.shared.clawnode_engine import is_clawnode_remote_engine
+
+        if is_clawnode_remote_engine(engine):
+            empty.detail = "clawnode remote: local multi-channel locate disabled"
+            return empty
+    except Exception:
+        if type(engine).__name__ == "RemoteEngine":
+            empty.detail = "clawnode remote: local multi-channel locate disabled"
+            return empty
     if not label or not _locate_arbitrator_enabled():
         empty.detail = "locate arbitrator disabled" if not _locate_arbitrator_enabled() else "empty label"
         return empty

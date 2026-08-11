@@ -74,6 +74,14 @@ def discover_clickables_from_hierarchy(
     """解析 Android UIAutomator dump，提取 clickable 节点。"""
     targets: List[ClickTarget] = []
     try:
+        from server.services.shared.clawnode_engine import is_clawnode_remote_engine
+
+        if is_clawnode_remote_engine(engine):
+            return targets
+    except Exception:
+        if type(engine).__name__ == "RemoteEngine":
+            return targets
+    try:
         xml_data = ""
         if hasattr(engine, "dump_hierarchy_xml"):
             xml_data = engine.dump_hierarchy_xml() or ""

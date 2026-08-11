@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 
-from sqlalchemy import Column, String, Integer, DateTime, Text
+from sqlalchemy import Column, String, Integer, DateTime, Text, JSON
 from sqlalchemy.sql import func
 from server.core.database import Base
 
@@ -28,9 +28,19 @@ class MDevice(Base):
     password = Column(String, nullable=True, comment="设备解锁密码")
     
     # 状态管理
-    status = Column(String, default="offline", comment="状态: online, offline, busy, error")
+    status = Column(String, default="offline", comment="主状态: online, offline, busy, error")
     owner = Column(String, nullable=True, comment="当前占用者/任务ID")
-    
+
+    # 子通道状态 (Step 2)：以 JSON 持久化，供 Capability Router / 设备列表 UI 使用。
+    # 结构见 server/services/runtime/channels.py DEFAULT_CHANNELS。
+    #   {
+    #     "remote": { "state": connected|disconnected|auth_failed|unpaired,
+    #                 "last_heartbeat_at": iso, "auth_state": str, "details": str },
+    #     "adb":    { "state": connected|disconnected|unauthorized|not_applicable,
+    #                 "last_probe_at": iso, "transport": usb|tcp, "serial": str }
+    #   }
+    channels = Column(JSON, default=dict, comment="子通道状态: { remote: {...}, adb: {...} }")
+
     # 时间戳
     last_online_time = Column(DateTime(timezone=True), onupdate=func.now(), comment="最后在线时间")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

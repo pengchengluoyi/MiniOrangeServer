@@ -282,6 +282,28 @@ def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, 
     }
 
 
+def find_case_execution_provider_id() -> str:
+    """从大模型 Key 配置里找「可用=true 且 用例=true」的 provider id。
+
+    与 KeysPage 单选「用例」逻辑一致；优先 usage.case_execution_provider_id，
+    再扫描各 provider 行的 case_execution_use 标记。
+    """
+    usage = get_ai_usage_settings()
+    usage_pid = (usage.get("case_execution_provider_id") or "").strip().lower()
+    if usage_pid:
+        cred = get_ai_provider_credentials(usage_pid)
+        if cred.get("configured") and cred.get("enabled") and cred.get("case_execution_use"):
+            return usage_pid
+    ai = _ai_root()
+    for pid, raw in ai.items():
+        if pid.startswith("_") or not isinstance(raw, dict):
+            continue
+        cred = get_ai_provider_credentials(pid)
+        if cred.get("configured") and cred.get("enabled") and cred.get("case_execution_use"):
+            return pid
+    return usage_pid
+
+
 def should_use_ai_planning(channel: str, provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return whether a planning channel may call the configured LLM."""
     usage = get_ai_usage_settings()
@@ -295,7 +317,7 @@ def should_use_ai_planning(channel: str, provider_id: Optional[str] = None) -> D
         scope_enabled = usage["copilot_enabled"]
     selected_provider_id = provider_id
     if normalized in {"case", "case_execution", "regression", "feishu"} and not selected_provider_id:
-        selected_provider_id = usage.get("case_execution_provider_id") or None
+        selected_provider_id = find_case_execution_provider_id() or None
     provider = get_ai_provider_credentials(selected_provider_id)
     ok = bool(
         scope_enabled
@@ -305,13 +327,13 @@ def should_use_ai_planning(channel: str, provider_id: Optional[str] = None) -> D
     )
     reason = ""
     if not scope_enabled:
-        reason = f"AI planning disabled for {normalized}"
+        reason = "未开启「使用大模型能力」（请到密钥配置 → 大模型 Key）"
     elif not provider.get("configured"):
         reason = f"AI provider key missing: {provider.get('id')}"
     elif not provider.get("enabled"):
         reason = f"AI provider disabled: {provider.get('id')}"
     elif not provider.get("case_execution_use"):
-        reason = f"AI provider not selected for case execution: {provider.get('id')}"
+        reason = "未找到「可用 + 用例」的大模型（请到密钥配置 → 大模型 Key 设置）"
     return {
         "enabled": ok,
         "reason": reason,

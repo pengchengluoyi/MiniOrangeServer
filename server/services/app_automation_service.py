@@ -435,6 +435,18 @@ def ensure_app_foreground(
         if not hasattr(engine, "start_app"):
             return {"ok": False, "msg": "引擎不支持 start_app", "hard_fail": True}
 
+        if hasattr(engine, "ensure_screen_ready"):
+            try:
+                engine.ensure_screen_ready()
+            except Exception as e:
+                SLog.w(TAG, f"ensure_screen_ready before launch failed: {e}")
+        elif hasattr(engine, "screen_on"):
+            try:
+                engine.screen_on()
+                mSleep(0.55)
+            except Exception:
+                pass
+
         before = _engine_current_package(engine)
         SLog.i(TAG, f"Launch app sn={mobile_sn} package={package} before={before or '-'}")
 

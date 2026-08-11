@@ -42,11 +42,14 @@ from server.routers import rDevice as device_router
 from server.routers import rAbility as ability_router
 from server.routers import rSchedule as schedule_router
 from server.routers import rFeishuRegression as feishu_router
+from server.routers import rCaseRunner as case_runner_router
 from server.routers import rAppAutomation as app_automation_router
 from server.routers import rSettings as settings_router
 from server.routers import rClawNode as clawnode_router
+from server.routers import rHitl as hitl_router
 import server.models.app_regression_run  # noqa: F401 — register ORM table
 import server.models.app_icon_target  # noqa: F401 — register ORM table
+import server.models.case_baseline  # noqa: F401 — Step 6: case baseline / run trace
 
 # Windows COM Init (仅在 Windows 下执行)
 if platform.system() == "Windows":
@@ -232,6 +235,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         SLog.w(TAG, f"--- [CLIP] warmup failed: {e} ---")
 
+    # HITL Transport: 把 FastAPI 主 event loop 注入到 WebSocketHitlTransport，
+    # 让 HitlExecutor（运行在 worker 线程）可以反向通过 run_coroutine_threadsafe 推送 hitl_request。
+    try:
+        from server.services.regression.hitl import (
+            WebSocketHitlTransport,
+            set_transport,
+        )
+
+        hitl_transport = WebSocketHitlTransport()
+        hitl_transport.set_app_loop(asyncio.get_running_loop())
+        set_transport(hitl_transport)
+        SLog.i(TAG, "--- [HITL] WebSocketHitlTransport bound to app loop ---")
+    except Exception as e:
+        SLog.w(TAG, f"--- [HITL] bind transport failed: {e} ---")
+
     # 只有主进程才打印这个 Ready
     SLog.i(TAG, "--- [LifeSpan] Backend services & Database ready ---")
 
@@ -240,6 +258,14 @@ async def lifespan(app: FastAPI):
     SLog.i(TAG, "--- [LifeSpan] Shutting down... ---")
     from server.core.gateway_beacon import unregister_gateway_beacons
     await unregister_gateway_beacons(getattr(app.state, "gateway_beacon", None))
+
+    try:
+        from server.services.regression.hitl import get_session_manager
+        revoked = get_session_manager().revoke_all(reason="server_shutdown")
+        if revoked:
+            SLog.i(TAG, f"--- [HITL] revoked {revoked} pending sessions on shutdown ---")
+    except Exception as e:
+        SLog.w(TAG, f"--- [HITL] shutdown revoke failed: {e} ---")
     
     if app.state.device_client_task:
         app.state.device_client_task.cancel()
@@ -273,6 +299,8 @@ app.include_router(feishu_router.router)
 app.include_router(app_automation_router.router)
 app.include_router(settings_router.router)
 app.include_router(clawnode_router.router)
+app.include_router(hitl_router.router)
+app.include_router(case_runner_router.router)
 
 
 @app.get("/")

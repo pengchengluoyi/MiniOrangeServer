@@ -14,6 +14,7 @@ from server.websocket.ws_handlers import handle_run_workflow, handle_get_device_
     handle_get_run_context, handle_adopt_clawnode, handle_fetch_clawnode_logs, handle_unbind_clawnode
 from server.websocket.routers.wCopilot import handle_copilot_chat, handle_copilot_execute
 from server.websocket.routers.wClawNode import (
+    handle_clawnode_capabilities,
     handle_clawnode_register,
     handle_clawnode_result,
 )
@@ -107,6 +108,7 @@ HANDLERS = {
 
     # [ClawNode] 直连节点：注册 + 结果回传（截图/动作结果）
     "register_clawnode": handle_clawnode_register,
+    "CAPABILITIES": handle_clawnode_capabilities,
     "SCREENSHOT_RESULT": handle_clawnode_result,
     "ACTION_RESULT": handle_clawnode_result,
     "STREAM_STATUS": handle_clawnode_result,

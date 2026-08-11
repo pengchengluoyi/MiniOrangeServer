@@ -156,14 +156,64 @@ def _cache_engine(mobile_sn: str, platform: str, engine: object, size: Tuple[int
         pass
 
 
+def _engine_bound_sn(engine: object) -> str:
+    return str(
+        getattr(engine, "_serial", None)
+        or getattr(engine, "_test_subject", None)
+        or ""
+    ).strip()
+
+
+def _purge_stale_engine_cache(engine: object, bound_sn: str) -> None:
+    """Singleton RemoteEngine 会被多个 SN 缓存条目引用；换绑后清掉其它 SN 的过期条目。"""
+    bound_sn = str(bound_sn or "").strip()
+    if not engine or not bound_sn:
+        return
+    stale = [
+        key
+        for key, entry in list(_ENGINE_CACHE.items())
+        if entry.get("engine") is engine and not key.startswith(f"{bound_sn}:")
+    ]
+    for key in stale:
+        _ENGINE_CACHE.pop(key, None)
+
+
+def _ensure_engine_bound(engine: object, mobile_sn: str) -> bool:
+    """复用缓存前确保 engine 仍绑定到目标 SN（RemoteEngine 为进程内单例）。"""
+    mobile_sn = str(mobile_sn or "").strip()
+    if not engine or not mobile_sn:
+        return False
+    if _engine_bound_sn(engine) == mobile_sn:
+        builtins.TARGET_DEVICE_SN = mobile_sn
+        return True
+    if not hasattr(engine, "init_driver"):
+        return False
+    # claw- 设备只能由 RemoteEngine 承载；adb 引擎不能 init claw SN
+    if _is_clawnode(mobile_sn) and type(engine).__name__ != "RemoteEngine":
+        return False
+    if not _is_clawnode(mobile_sn) and type(engine).__name__ == "RemoteEngine":
+        return False
+    engine.init_driver(mobile_sn)
+    builtins.TARGET_DEVICE_SN = mobile_sn
+    if _engine_bound_sn(engine) != mobile_sn:
+        return False
+    _purge_stale_engine_cache(engine, mobile_sn)
+    return True
+
+
 def _try_reuse_engine(mobile_sn: str, platform: str) -> Optional[Tuple[object, Tuple[int, int]]]:
+    mobile_sn = str(mobile_sn or "").strip()
+    if not mobile_sn:
+        return None
     try:
         from server.services.shared.run_context.regression_run_context import get_ctx
 
         ctx = get_ctx()
         if ctx and ctx.get("engine_sn") == mobile_sn and ctx.get("engine"):
-            size = ctx.get("screen_size") or [1080, 1920]
-            return ctx["engine"], (int(size[0]), int(size[1]))
+            eng = ctx["engine"]
+            if _ensure_engine_bound(eng, mobile_sn):
+                size = ctx.get("screen_size") or [1080, 1920]
+                return eng, (int(size[0]), int(size[1]))
     except Exception:
         pass
 
@@ -178,7 +228,9 @@ def _try_reuse_engine(mobile_sn: str, platform: str) -> Optional[Tuple[object, T
     size = entry.get("size")
     if not eng or not size:
         return None
-    builtins.TARGET_DEVICE_SN = mobile_sn
+    if not _ensure_engine_bound(eng, mobile_sn):
+        _ENGINE_CACHE.pop(key, None)
+        return None
     return eng, tuple(size)
 
 
@@ -250,16 +302,17 @@ def bootstrap_mobile_engine(
     })
 
     mgr = Manager()
-    # [ClawNode] 直连设备跳过此处的就地复用，交由 manager.apply_engine 的类型守卫
-    # 统一处理（避免对 stale 的 MAdbEngine 误调 init_driver("claw-...")）。
-    if mgr.MobileEngine and not _is_clawnode(mobile_sn):
+    if mgr.MobileEngine:
         prev = getattr(mgr.MobileEngine, "_serial", None) or getattr(
             mgr.MobileEngine, "_test_subject", None
         )
-        if prev != mobile_sn:
+        want_remote = _is_clawnode(mobile_sn)
+        is_remote = type(mgr.MobileEngine).__name__ == "RemoteEngine"
+        if prev != mobile_sn and want_remote == is_remote:
             mgr.MobileEngine._test_subject = mobile_sn
             if hasattr(mgr.MobileEngine, "init_driver"):
                 mgr.MobileEngine.init_driver(mobile_sn)
+                _purge_stale_engine_cache(mgr.MobileEngine, mobile_sn)
     mgr.online(info)
     engine = mgr.MobileEngine
     if engine is None:

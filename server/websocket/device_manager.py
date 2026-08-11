@@ -152,6 +152,46 @@ class DeviceManager:
             await self._send_pair_config(websocket, sn, pending)
             self.pending_pairings.pop(sn, None)
         await self.notify_device_list_changed("register", sn)
+        await self.ensure_clawnode_capabilities(sn)
+
+    def ingest_capability_payload(self, sn: str, data: dict) -> dict:
+        """从 CAPABILITIES 帧拍平后的 data 提取并缓存能力清单。"""
+        if not sn or not isinstance(data, dict):
+            return {}
+        caps = data.get("capabilities")
+        if not isinstance(caps, list):
+            return self.get_capability_manifest(sn) or {}
+        manifest = {
+            "version_name": data.get("version_name") or "",
+            "version_code": int(data.get("version_code") or 0),
+            "protocol": data.get("protocol") or "",
+            "capabilities": caps,
+        }
+        self.device_meta[sn] = {
+            **self.device_meta.get(sn, {}),
+            "capability_manifest": manifest,
+        }
+        return manifest
+
+    def get_capability_manifest(self, sn: str) -> Optional[dict]:
+        manifest = (self.device_meta.get(sn) or {}).get("capability_manifest")
+        return manifest if isinstance(manifest, dict) else None
+
+    async def ensure_clawnode_capabilities(self, sn: str) -> Optional[dict]:
+        """等待节点主动上报；若超时仍无清单则下发 GET_CAPABILITIES 拉取。"""
+        if sn not in self.direct_nodes:
+            return None
+        await asyncio.sleep(0.8)
+        if self.get_capability_manifest(sn):
+            return self.get_capability_manifest(sn)
+        try:
+            result = await self.send_command(sn, "GET_CAPABILITIES", {}, wait_timeout=12.0)
+            device = (result or {}).get("device") or {}
+            if isinstance(device, dict) and device.get("capabilities"):
+                return self.ingest_capability_payload(sn, device)
+        except Exception as e:
+            SLog.w("DeviceManager", f"GET_CAPABILITIES failed sn={sn}: {e}")
+        return self.get_capability_manifest(sn)
 
     async def _send_pair_config(self, websocket: WebSocket, sn: str, config: dict):
         payload = {

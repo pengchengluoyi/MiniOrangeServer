@@ -170,6 +170,15 @@ def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
 def _clear_app_data(engine, package: str) -> Tuple[bool, str]:
     if not package:
         return False, "未配置应用包名，无法清除缓存"
+    from server.services.shared.clawnode_engine import is_clawnode_remote_engine
+
+    if is_clawnode_remote_engine(engine):
+        if hasattr(engine, "clear_app_cache"):
+            ok = engine.clear_app_cache(package)
+            if ok:
+                return True, f"已清缓存（{package}）：打开应用详情后分步完成存储清理"
+            return False, f"清缓存失败（{package}）"
+
     out = (engine.shell(f"pm clear {package}") or "").strip()
     if "Success" in out:
         return True, f"已清除应用数据（{package}）"

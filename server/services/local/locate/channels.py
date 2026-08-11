@@ -459,6 +459,14 @@ def gather_all_candidates(
     clip_region: str = "full",
     enable_icon_row: bool = True,
 ) -> List[LocateCandidate]:
+    try:
+        from server.services.shared.clawnode_engine import is_clawnode_remote_engine
+
+        if is_clawnode_remote_engine(engine):
+            return []
+    except Exception:
+        if type(engine).__name__ == "RemoteEngine":
+            return []
     all_c: List[LocateCandidate] = []
     label_raw = instruction_label or query
     text_query = (ocr_query or "").strip() or query

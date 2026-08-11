@@ -182,3 +182,9 @@ def list_feishu_runs(app_id: str, limit: int = 30, db: Session = Depends(get_db)
 
     _get_app(db, app_id)
     return {"code": 200, "data": {"runs": aas.list_runs_for_app(db, app_id, limit=limit)}}
+
+
+# ============================================================
+# AI-led 回归端点已迁移到 server.routers.rCaseRunner（/case-runner/*）
+# 旧客户端如果还在调 /feishu/run-ai-led 之类，请改成 /case-runner/run。
+# ============================================================

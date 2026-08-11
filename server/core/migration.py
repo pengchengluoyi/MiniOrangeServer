@@ -80,7 +80,8 @@ def _check_and_migrate(db_path):
             ],
             'm_device': [
                 ('role', 'TEXT', 'node'),
-                ('password', 'TEXT', None)
+                ('password', 'TEXT', None),
+                ('channels', 'JSON', '{}'),  # Step 2: 子通道状态 { remote: {...}, adb: {...} }
             ],
             'scheduled_tasks': [
                 ('app_id', 'TEXT', None),

@@ -49,8 +49,27 @@ var ok = claw.openApp({pkg_lit});
 """ + _JS_ASSERT_OK
 
 
-@_register_builtin("open_app_settings", language="js")
+@_register_builtin("open_app_settings", language="dsl")
 def _open_app_settings(vars: dict | None = None) -> str:
+    """打开指定包名的应用信息页（DSL，不依赖 params.language=js）。"""
+    pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
+    if not pkg:
+        raise ValueError("open_app_settings requires package")
+    return json.dumps(
+        {
+            "steps": [
+                {"op": "wake"},
+                {"op": "sleep", "ms": 1000},
+                {"op": "open_app_details", "package": pkg},
+                {"op": "sleep", "ms": 800},
+                {"op": "foreground", "expect": "com.android.settings"},
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _open_app_settings_js_body(vars: dict | None = None) -> str:
     pkg = str((vars or {}).get("package") or (vars or {}).get("pkg") or "").strip()
     if not pkg:
         raise ValueError("open_app_settings requires package")
@@ -61,14 +80,14 @@ var ok = claw.openAppDetails({pkg_lit});
 """ + _JS_ASSERT_OK
 
 
-@_register_builtin("open_app_settings_dsl", language="js")
+@_register_builtin("open_app_settings_dsl", language="dsl")
 def _open_app_settings_dsl(vars: dict | None = None) -> str:
     return _open_app_settings(vars)
 
 
 @_register_builtin("open_app_settings_js", language="js")
 def _open_app_settings_js(vars: dict | None = None) -> str:
-    return _open_app_settings(vars)
+    return _open_app_settings_js_body(vars)
 
 
 @_register_builtin("home")

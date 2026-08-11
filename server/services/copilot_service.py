@@ -3872,6 +3872,12 @@ def _plan_message_ai(
     known_apps = _ai_known_apps_context(platform)
     if known_apps:
         ctx["known_apps"] = known_apps
+    if sn:
+        from server.websocket.device_manager import DeviceManager
+
+        manifest = DeviceManager().get_capability_manifest(sn)
+        if manifest:
+            ctx["remote_node_capabilities"] = manifest
     llm_ctx = {k: v for k, v in ctx.items() if k != "icon_targets"}
     provider = ss.get_ai_provider_credentials(provider_id)
     screen = _build_ai_screen_context(

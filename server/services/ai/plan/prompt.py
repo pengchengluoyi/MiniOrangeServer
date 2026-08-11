@@ -3,13 +3,125 @@
 """Prompt templates for LLM-based Plan generation."""
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
+
+# ClawNode 设备指令 → MiniOrange Plan step kind（仅规划相关）
+_CLAWNODE_COMMAND_STEP_KINDS: dict[str, list[str]] = {
+    "TAP": ["click"],
+    "SWIPE": ["swipe"],
+    "INPUT_TEXT": ["input"],
+    "OPEN_APP": ["open_app"],
+    "CLOSE_APP": ["close_app"],
+    "KEY_EVENT": ["system_key", "back"],
+    "EXEC_SCRIPT": ["ability"],
+}
 
 CASE_CHANNELS = frozenset({"case", "case_execution", "regression", "feishu"})
 
 
 def _is_case_channel(channel: str) -> bool:
     return (channel or "copilot").strip().lower() in CASE_CHANNELS
+
+
+def _extract_remote_capabilities_from_context(context: str) -> Optional[dict[str, Any]]:
+    if not context or context == "无":
+        return None
+    try:
+        ctx = json.loads(context)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(ctx, dict):
+        return None
+    manifest = ctx.get("remote_node_capabilities")
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _allowed_step_kinds_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    kinds: list[str] = []
+    seen: set[str] = set()
+    for item in manifest.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        cmd = str(item.get("command") or "").strip().upper()
+        for kind in _CLAWNODE_COMMAND_STEP_KINDS.get(cmd, []):
+            if kind not in seen:
+                seen.add(kind)
+                kinds.append(kind)
+    return kinds
+
+
+def _format_param_specs(params: list[Any]) -> str:
+    parts: list[str] = []
+    for p in params or []:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "").strip()
+        if not name:
+            continue
+        ptype = str(p.get("type") or "string")
+        required = "必填" if p.get("required") else "可选"
+        desc = str(p.get("description") or "").strip()
+        default = p.get("default")
+        example = p.get("example")
+        extra = []
+        if default is not None:
+            extra.append(f"默认={default}")
+        if example is not None:
+            extra.append(f"示例={example}")
+        tail = f" ({'，'.join(extra)})" if extra else ""
+        parts.append(f"{name}:{ptype} {required}{('，' + desc) if desc else ''}{tail}")
+    return "；".join(parts) if parts else "无参数"
+
+
+def build_remote_node_capabilities_hint(manifest: Optional[dict[str, Any]]) -> str:
+    """把 ClawNode CAPABILITIES 清单格式化为 Plan 提示（仅 remote 节点）。"""
+    if not manifest or not isinstance(manifest.get("capabilities"), list):
+        return ""
+    version_name = str(manifest.get("version_name") or "").strip()
+    version_code = manifest.get("version_code")
+    allowed_kinds = _allowed_step_kinds_from_manifest(manifest)
+    if not allowed_kinds:
+        return ""
+    lines = [
+        "【Remote 节点能力范围（来自 ClawNode CAPABILITIES）】",
+        f"节点版本：{version_name or 'unknown'}"
+        + (f" (version_code={version_code})" if version_code else ""),
+        f"本次 Plan 仅可输出以下 step kind：{', '.join(allowed_kinds)}。",
+        "禁止规划清单未覆盖的动作（如清单无 RUN_SHELL/INSTALL_APK/KILL_APP 则不可生成对应步骤）。",
+        "设备指令与参数说明：",
+    ]
+    for item in manifest.get("capabilities") or []:
+        if not isinstance(item, dict):
+            continue
+        cmd = str(item.get("command") or "").strip().upper()
+        step_kinds = _CLAWNODE_COMMAND_STEP_KINDS.get(cmd)
+        if not step_kinds:
+            continue
+        title = str(item.get("title") or cmd).strip()
+        category = str(item.get("category") or "").strip()
+        desc = str(item.get("description") or "").strip()
+        params_text = _format_param_specs(item.get("params") or [])
+        example = item.get("example")
+        example_text = ""
+        if isinstance(example, dict) and example:
+            example_text = f"；示例 params={json.dumps(example, ensure_ascii=False)}"
+        flags = []
+        if item.get("requires_accessibility"):
+            flags.append("需无障碍")
+        if item.get("requires_shizuku"):
+            flags.append("需Shizuku")
+        flag_text = f"（{'，'.join(flags)}）" if flags else ""
+        lines.append(
+            f"- {cmd} / {title}"
+            + (f" [{category}]" if category else "")
+            + f" → step kind: {', '.join(step_kinds)}"
+            + flag_text
+            + (f"；{desc}" if desc else "")
+            + f"；参数：{params_text}"
+            + example_text
+        )
+    return "\n".join(lines)
 
 
 def _ai_plan_request_timeout(channel: str) -> int:
@@ -330,7 +442,17 @@ def build_ai_plan_messages(
 ) -> list[dict[str, str]]:
     """Return OpenAI/Anthropic-style messages excluding the tools payload."""
     is_case = _is_case_channel(channel)
+    remote_manifest = _extract_remote_capabilities_from_context(context)
+    remote_cap_hint = build_remote_node_capabilities_hint(remote_manifest)
+    allowed_remote_kinds = _allowed_step_kinds_from_manifest(remote_manifest) if remote_manifest else []
     system_prompt = AI_CASE_PLAN_SYSTEM_PROMPT if is_case else AI_PLAN_SYSTEM_PROMPT
+    if allowed_remote_kinds:
+        kinds_text = "、".join(allowed_remote_kinds)
+        system_prompt += (
+            f"\n\n【Remote 节点约束】当前设备为 ClawNode 直连节点，"
+            f"仅可规划以下 step kind：{kinds_text}。"
+            "不得输出清单外的 kind（例如清单无 ability 则禁止 ability 步骤）。"
+        )
     if _is_volcengine_doubao_provider(provider_id, model):
         system_prompt = system_prompt + VOLCENGINE_DOUBAO_COORD_PRECISION_APPEND
         if _is_doubao_seed2_or_thinking_model(model):
@@ -384,6 +506,8 @@ def build_ai_plan_messages(
     user_content = _append_preview_coord_guidance(
         user_content, screen, provider_id=provider_id, model=model
     )
+    if remote_cap_hint:
+        user_content = f"{user_content}\n\n{remote_cap_hint}"
     replan_note = build_foreground_drift_replan_note(drift_replan)
     if replan_note:
         user_content = f"{user_content}\n\n{replan_note}"
