@@ -1,0 +1,32 @@
+id: launch_app
+display_name: 启动应用
+event_kind: launch_app
+category: app_lifecycle
+description: 启动或切换至目标应用
+platforms: [android, ios]
+trigger_phrases: [打开, 启动, 进入, open, launch, start]
+needs_vlm: false
+
+implementations:
+  - id: adb_am_start
+    display_name: ADB am start
+    executor: adb
+    requires_caps: [app_launch_native]
+    needs_vlm: false
+    low_level:
+      shell: "monkey -p {package} -c android.intent.category.LAUNCHER 1"
+    cost: 1
+
+  - id: remote_open_app
+    display_name: Remote OPEN_APP
+    executor: remote
+    requires_caps: [app_launch_native]
+    needs_vlm: false
+    low_level:
+      command: OPEN_APP
+      params: { package: "{package}", activity: "{activity}" }
+    cost: 2
+
+ui:
+  shown_in_settings: true
+  examples: ["打开 造物相机", "打开 com.mathmagic.zaohaowu"]

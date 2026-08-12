@@ -1,0 +1,26 @@
+id: human_choice_multiple
+display_name: 人工多选
+event_kind: human_choice_multiple
+category: hitl
+description: 让人在多个候选项中选多个（如勾选多项权限、多个测试场景）
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [请勾选, 多选]
+needs_vlm: false
+
+implementations:
+  - id: hitl_choice_multiple
+    display_name: 前端多选列表
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: checkbox_list
+      response_schema:
+        type: array
+        items: { type: string }
+        enum_from: choices
+      default_timeout_sec: 180
+    cost: 55
+
+ui:
+  shown_in_settings: true

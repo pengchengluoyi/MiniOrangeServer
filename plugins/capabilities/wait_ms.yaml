@@ -1,0 +1,23 @@
+id: wait_ms
+display_name: 等待
+event_kind: wait_ms
+category: control
+description: 固定时长等待，AI 在不确定页面就绪时可插入
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [等待, 等, 暂停, wait, sleep]
+needs_vlm: false
+
+implementations:
+  - id: noop_sleep
+    display_name: 内置 sleep
+    executor: internal
+    requires_caps: []
+    needs_vlm: false
+    low_level:
+      type: sleep
+      duration_ms: "{duration_ms}"
+    cost: 0
+
+ui:
+  shown_in_settings: true
+  examples: ["等待 2 秒"]

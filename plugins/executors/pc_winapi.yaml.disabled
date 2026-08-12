@@ -1,0 +1,17 @@
+# 未来执行器占位
+id: pc_winapi
+display_name: PC WinAPI / AutoHotkey
+description: 通过 Windows API / AHK 控制桌面应用
+available_when: connectivity.pc
+
+provides:
+  - system_shell
+  - ui_native_input
+  - ui_input_text
+  - ui_screenshot
+  - read_system_data
+  - app_launch_native
+  - key_event
+  - clipboard_set
+
+platforms: [windows]

@@ -1,0 +1,32 @@
+id: human_input_text
+display_name: 人工输入文本
+event_kind: human_input_text
+category: hitl
+description: |
+  让人在前端输入一段文本（验证码、密码、人工填字段）。AI 通过 HITL_PROMPT_COMPOSER
+  生成场景化问句，并可携带 constraint（如长度、正则）让前端做基本校验。
+  人工答案会作为下一步事件的 params 参数。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [请输入, 告诉我, 验证码]
+needs_vlm: false
+
+implementations:
+  - id: hitl_input_text
+    display_name: 前端文本输入框
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: text_input
+      response_schema:
+        type: string
+        constraints:
+          min_len: 0
+          max_len: 1024
+          regex: ".*"
+      default_timeout_sec: 300
+    cost: 60
+
+ui:
+  shown_in_settings: true
+  examples: ["请把手机 13800138000 收到的 6 位验证码告诉我"]

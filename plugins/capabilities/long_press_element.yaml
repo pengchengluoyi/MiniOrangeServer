@@ -1,0 +1,34 @@
+id: long_press_element
+display_name: 长按元素
+event_kind: long_press_element
+category: ui_interaction
+description: 长按屏幕上的元素（如长按图标弹出菜单、长按消息撤回）
+platforms: [android, ios]
+trigger_phrases: [长按, 按住, 持续按]
+needs_vlm: true
+
+implementations:
+  - id: vlm_locate_remote_long_press
+    display_name: VLM 定位 + Remote 长按
+    executor: remote
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      command: TAP
+      params: { x: "{x}", y: "{y}", duration_ms: 800 }
+    cost: 5
+
+  - id: vlm_locate_adb_long_press
+    display_name: VLM 定位 + ADB 长按
+    executor: adb
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      shell: "input swipe {x} {y} {x} {y} 800"
+    cost: 4
+
+ui:
+  shown_in_settings: true
+  examples: ["长按造物相机图标", "长按消息撤回"]

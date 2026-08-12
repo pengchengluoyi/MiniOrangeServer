@@ -12,6 +12,31 @@ trigger_phrases: [执行脚本, 远程脚本, exec script, run script]
 needs_vlm: false
 
 implementations:
+  - id: adb_exec_script
+    display_name: ADB EXEC_SCRIPT
+    executor: adb
+    requires_caps: [system_shell]
+    needs_vlm: false
+    low_level:
+      command: EXEC_SCRIPT
+      params:
+        script: "{script}"
+        language: "{language}"
+        timeout_ms: "{timeout_ms}"
+    cost: 2
+
+  - id: adb_exec_script_builtin
+    display_name: ADB 预置脚本 (script_id)
+    executor: adb
+    requires_caps: [system_shell]
+    needs_vlm: false
+    low_level:
+      command: EXEC_SCRIPT
+      params:
+        script_id: "{script_id}"
+        script_vars: "{script_vars}"
+    cost: 2
+
   - id: remote_exec_script
     display_name: Remote EXEC_SCRIPT
     executor: remote

@@ -1,0 +1,15 @@
+# 未来执行器占位（.disabled 后缀，加载器跳过）
+# 启用时改名为 web_cdp.yaml 并补全 probe 实现
+
+id: web_cdp
+display_name: Web CDP (Chrome DevTools)
+description: 通过 Chrome DevTools Protocol 控制浏览器
+available_when: connectivity.web
+
+provides:
+  - ui_native_input
+  - ui_input_text
+  - ui_screenshot
+  - key_event
+
+platforms: [web]

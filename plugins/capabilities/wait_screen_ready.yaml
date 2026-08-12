@@ -1,0 +1,23 @@
+id: wait_screen_ready
+display_name: 等待页面就绪
+event_kind: wait_screen_ready
+category: control
+description: |
+  让 VLM 判断当前页面是否进入稳定可交互状态（loading 消失、动画停止、关键元素出现）。
+  比固定 wait_ms 更智能，避免无谓等待和提前点击。
+platforms: [android, ios, web]
+trigger_phrases: [等待页面, 等加载, 等出现]
+needs_vlm: true
+
+implementations:
+  - id: vlm_readiness_check
+    display_name: VLM 就绪判断
+    executor: vlm
+    requires_caps: [vision_readiness, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: READINESS_CHECK_VISION
+    cost: 6
+
+ui:
+  shown_in_settings: true
+  examples: ["等待首页加载完成"]

@@ -68,6 +68,10 @@ class DeviceManager:
     # 使 control/stream 指令走翻译分支而非 PC Node 分支。是“连接对象身份”的载体。
     direct_nodes: set = set()
 
+    # [ADB] 经 adb（USB/TCP）直连、无 WS 的设备连接句柄集合。由 ADB 发现器维护，
+    # 其在线/离线不走 WS 心跳，故 monitor_heartbeats 需跳过它们（否则会误判离线）。
+    adb_nodes: set = set()
+
     # [ClawNode] 主 event loop 引用，供 RemoteEngine 从 worker 线程 run_coroutine_threadsafe。
     # 在 main.py lifespan 启动时赋值。
     loop = None
@@ -80,6 +84,10 @@ class DeviceManager:
     _cmd_waiters: Dict[str, "asyncio.Future"] = {}
     # 最近一次应用层 heartbeat 时间戳（秒）
     _last_app_heartbeat: Dict[str, float] = {}
+    # 最近一次已知 IP（用于动态 IP 变更去抖，避免每次心跳都写库）
+    _last_known_ip: Dict[str, str] = {}
+    # 正在进行序列号回填的 claw sn，避免频繁重连时并发回填
+    _serial_backfill_inflight: set = set()
 
     # ClawNode 后台 WS 可能因 OEM 省电短暂断连；宽限期内不因 disconnect 立即下线
     CLAWNODE_WS_GRACE_SEC = 600  # WS 断开后仍视为在线的最长秒数（依赖最近 heartbeat）
@@ -153,6 +161,85 @@ class DeviceManager:
             self.pending_pairings.pop(sn, None)
         await self.notify_device_list_changed("register", sn)
         await self.ensure_clawnode_capabilities(sn)
+        # 指纹回填：注册帧的 serial 若为空/unknown（Android10+ getSerial 读不到、或 App 启动时
+        # Shizuku 尚未绑定），服务端主动经 RUN_SHELL getprop ro.serialno 补齐 hw_uid，
+        # 与 adb 连接按指纹合并。不依赖 App 端时序，且兼容旧版 App。
+        asyncio.create_task(self._backfill_clawnode_serial(sn))
+
+    async def _backfill_clawnode_serial(self, sn: str, *, attempts: int = 3, delay: float = 4.0):
+        """claw 设备缺 hw_uid 时，经 RUN_SHELL 读 ro.serialno 回填指纹并触发合并。"""
+        if not sn or not str(sn).startswith("claw-"):
+            return
+        from server.services.device_service import DeviceService
+
+        dev = DeviceService.get_by_sn(sn)
+        cur = str(getattr(dev, "hw_uid", "") or "").strip() if dev else ""
+        if cur and cur.lower() != "unknown":
+            return  # 已有有效序列号，无需回填
+        if sn in self._serial_backfill_inflight:
+            return
+        self._serial_backfill_inflight.add(sn)
+        try:
+            await asyncio.sleep(2.0)  # 给 Shizuku binder 一点绑定时间
+            for _ in range(max(1, attempts)):
+                if sn not in self.active_connections:
+                    return
+                try:
+                    res = await self.send_command(
+                        sn, "RUN_SHELL", {"command": "getprop ro.serialno"}, wait_timeout=15
+                    )
+                except Exception as e:
+                    SLog.w("DeviceManager", f"serial backfill RUN_SHELL error {sn}: {e}")
+                    res = None
+                serial = self._extract_serial(res)
+                if serial:
+                    self._apply_clawnode_serial(sn, serial)
+                    await self.notify_device_list_changed("serial_backfill", sn)
+                    SLog.i("DeviceManager", f"clawnode serial backfilled sn={sn} serial={serial}")
+                    return
+                await asyncio.sleep(delay)
+            SLog.w("DeviceManager", f"clawnode serial backfill gave up sn={sn}（Shizuku 未就绪或 ro.serialno 不可读）")
+        finally:
+            self._serial_backfill_inflight.discard(sn)
+
+    @staticmethod
+    def _extract_serial(res: dict | None) -> str:
+        """从 RUN_SHELL 回传中提取 ro.serialno 值。"""
+        if not isinstance(res, dict):
+            return ""
+        dev = res.get("device") or {}
+        raw = str(dev.get("stdout") or dev.get("message") or dev.get("result") or "").strip()
+        # 取最后一行非空（避免夹带日志/提示）
+        for line in reversed(raw.splitlines()):
+            s = line.strip()
+            if s:
+                raw = s
+                break
+        if not raw or raw.lower() == "unknown":
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{4,64}", raw):
+            return ""
+        return raw
+
+    def _apply_clawnode_serial(self, sn: str, serial: str):
+        from server.services.runtime.device_identity import compute_fingerprint
+
+        def _write():
+            with SessionLocal() as db:
+                d = db.query(MDevice).filter(MDevice.sn == sn).first()
+                if not d:
+                    return
+                d.hw_uid = serial
+                fp = compute_fingerprint(d.device_type or "android", serial)
+                if fp:
+                    d.fingerprint_id = fp
+                d.clawnode_id = sn
+                db.commit()
+
+        try:
+            _with_db_retry(_write)
+        except Exception as e:
+            SLog.e("DeviceManager", f"_apply_clawnode_serial {sn} failed: {e}")
 
     def ingest_capability_payload(self, sn: str, data: dict) -> dict:
         """从 CAPABILITIES 帧拍平后的 data 提取并缓存能力清单。"""
@@ -360,10 +447,12 @@ class DeviceManager:
 
     async def notify_device_list_changed(self, event: str, sn: str = ""):
         from server.services.device_service import DeviceService
+        from server.services.runtime.channels import read_channels, channels_to_brief, resolve_control_channel
 
         devices = []
         for d in DeviceService.list_all():
             meta = self.device_meta.get(d.sn, {})
+            ch = read_channels(d)
             devices.append({
                 "sn": d.sn,
                 "type": d.device_type,
@@ -373,6 +462,12 @@ class DeviceManager:
                 "status": d.status,
                 "app_version": meta.get("app_version"),
                 "last_online": str(d.last_online_time) if d.last_online_time else None,
+                # v3: 通道 / 指纹信息，供前端展示 App/USB 徽标、待授权提示、指纹聚合
+                "channels": channels_to_brief(ch),
+                "control_channel": resolve_control_channel(d).get("channel"),
+                "fingerprint_id": getattr(d, "fingerprint_id", None),
+                "clawnode_id": getattr(d, "clawnode_id", None),
+                "adb_sn": getattr(d, "adb_sn", None),
             })
         payload = {
             "type": "device_list_update",
@@ -463,7 +558,29 @@ class DeviceManager:
                 SLog.i("DeviceManager", f"Active connection updated for {sn} via heartbeat")
             self._last_app_heartbeat[sn] = time.time()
             self._update_device_status(sn, "online")
+            # 动态 IP：心跳若携带 ip 且变化则刷新（换网段/重连 WiFi 但 WS 未断的场景）
+            ip = data.get("ip") or (data.get("data") or {}).get("ip")
+            if ip:
+                self._refresh_ip_if_changed(sn, str(ip))
         return {"code": 200}
+
+    def _refresh_ip_if_changed(self, sn: str, ip: str) -> None:
+        if not ip or self._last_known_ip.get(sn) == ip:
+            return
+        self._last_known_ip[sn] = ip
+
+        def _write():
+            with SessionLocal() as db:
+                dev = db.query(MDevice).filter(MDevice.sn == sn).first()
+                if dev and str(dev.ip_address or "") != ip:
+                    dev.ip_address = ip
+                    db.commit()
+                    SLog.i("DeviceManager", f"dynamic ip updated {sn} -> {ip}")
+
+        try:
+            _with_db_retry(_write)
+        except Exception as e:
+            SLog.w("DeviceManager", f"_refresh_ip_if_changed {sn} failed: {e}")
 
     async def disconnect(self, websocket: WebSocket, data: dict):
         # 找出断开的连接对应的 SN
@@ -583,6 +700,26 @@ class DeviceManager:
             return f"http://{lan_ip}:{port}{url}"
         return f"http://{lan_ip}:{port}/{url}"
 
+    def _adb_serial_for(self, sn: str) -> str:
+        """若目标设备当前应走 adb 渠道，返回其 adb serial；否则返回 ""。
+
+        WS 在线的设备一律优先走原 WS 链路（不抢 adb），保证 ClawNode 零回归。
+        """
+        if not sn or sn in self.active_connections:
+            return ""
+        try:
+            from server.services.device_service import DeviceService
+            from server.services.runtime.channels import resolve_control_channel
+
+            dev = DeviceService.get_by_sn(sn)
+            if not dev:
+                return ""
+            res = resolve_control_channel(dev)
+            return res.get("adb_serial", "") if res.get("channel") == "adb" else ""
+        except Exception as e:
+            SLog.w("DeviceManager", f"_adb_serial_for({sn}) failed: {e}")
+            return ""
+
     async def send_command(
         self,
         sn: str,
@@ -591,12 +728,30 @@ class DeviceManager:
         *,
         wait_timeout: float | None = 60.0,
     ):
-        """给设备发送指令。ClawNode 直连默认等待设备回传（最多 wait_timeout 秒）。"""
+        """给设备发送指令。ClawNode 直连默认等待设备回传（最多 wait_timeout 秒）。
+
+        渠道分叉（v3）：目标为 adb 直连设备(无 WS)时，走本地命令级执行器 run_adb_command，
+        同步返回与 ClawNode 相同结构的结果；否则维持原 WS→ClawNode 链路不变。
+        """
+        import uuid
+
+        # [ADB] adb 直连设备：本地执行，契约与 ClawNode 一致
+        adb_serial = self._adb_serial_for(sn)
+        if adb_serial:
+            import asyncio
+            from server.services.local.adb_command import run_adb_command
+
+            trace_id = f"adb-{uuid.uuid4().hex[:12]}"
+            device_data = await asyncio.to_thread(
+                run_adb_command, adb_serial, command, dict(params or {})
+            )
+            self._save_log(sn, "send", "command", json.dumps({"command": command, "params": params, "channel": "adb"}))
+            return {"sent": True, "trace_id": trace_id, "device": device_data}
+
         if sn not in self.active_connections:
             SLog.w("DeviceManager", f"Device {sn} is offline")
             return {"sent": False, "error": "device offline"}
 
-        import uuid
         trace_id = f"ui-{uuid.uuid4().hex[:12]}"
         params = dict(params or {})
         cmd_upper = (command or "").upper()
@@ -1015,6 +1170,9 @@ class DeviceManager:
 
                     for dev in devices:
                         sn = str(dev.sn)
+                        # [ADB] adb 直连设备无 WS，其在线/离线由 ADB 发现器管理，此处跳过避免误判
+                        if sn in getattr(self, "adb_nodes", set()):
+                            continue
                         ws = self.active_connections.get(sn)
                         if ws is not None:
                             # 连接仍在：刷新 DB 在线时间，避免仅 mDNS 可达时被误判
@@ -1191,6 +1349,20 @@ class DeviceManager:
                 if info.get("password"):
                     device.password = info.get("password")
                 device.status = "online"
+
+                # v3 设备指纹：ClawNode 上报的真实序列号(Build.getSerial())作为跨连接合并键 hw_uid，
+                # 与 adb 侧 ro.serialno 同值即同一物理设备 → 派生同一 fingerprint_id。
+                serial = info.get("serial") or info.get("hw_uid")
+                if serial and str(serial).strip().lower() not in ("", "unknown"):
+                    from server.services.runtime.device_identity import compute_fingerprint
+
+                    device.hw_uid = str(serial).strip()
+                    fp = compute_fingerprint(device.device_type or "android", device.hw_uid)
+                    if fp:
+                        device.fingerprint_id = fp
+                if str(sn).startswith("claw-"):
+                    device.clawnode_id = sn
+
                 # 优化：直接去除微秒
                 now = datetime.now()
                 device.last_online_time = now.replace(microsecond=0)
@@ -1229,6 +1401,111 @@ class DeviceManager:
                         SLog.i("DeviceManager", f"Merged duplicate hub(s) {removed} into {sn}")
         except Exception as e:
             SLog.e("DeviceManager", f"DB Error register: {e}")
+
+    # --- [ADB] USB/TCP 直连设备注册与下线（由 ADB 发现器调用，无 WS） ---
+    def register_adb_device(
+        self,
+        serial: str,
+        *,
+        transport: str = "usb",
+        state: str = "connected",
+        hw_uid: str = "",
+        model: str = "",
+        resolution: str = "",
+        os_version: str = "",
+        ip_address: str = "",
+        reason: str = "",
+    ) -> bool:
+        """注册/更新一台 adb 直连设备（连接句柄 sn=serial）。
+
+        state ∈ connected | unauthorized | disconnected。connected 时置为 online，
+        unauthorized 进列表但不可下发（前端提示"待授权"）。写 channels.adb 与指纹字段。
+        """
+        from server.services.device_service import is_valid_sn
+        from server.services.runtime.channels import set_adb_channel, read_channels, derive_main_status
+        from server.services.runtime.device_identity import compute_fingerprint
+
+        if not is_valid_sn(serial):
+            SLog.d("DeviceManager", f"skip invalid adb serial={serial!r}")
+            return False
+
+        fingerprint_id = compute_fingerprint("android", hw_uid) if hw_uid else ""
+
+        def _write():
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == serial).first()
+                if not device:
+                    device = MDevice(sn=serial)
+                    db.add(device)
+                # adb 设备默认 android/node；不覆盖 claw 直连已有的类型
+                if not device.device_type:
+                    device.device_type = "android"
+                if not device.role:
+                    device.role = "node"
+                if model:
+                    device.model = model
+                if resolution:
+                    device.resolution = resolution
+                if os_version:
+                    device.os_version = os_version
+                if ip_address:
+                    device.ip_address = ip_address
+                device.adb_sn = serial
+                if hw_uid:
+                    device.hw_uid = hw_uid
+                if fingerprint_id:
+                    device.fingerprint_id = fingerprint_id
+                set_adb_channel(
+                    device,
+                    state=state,
+                    serial=serial,
+                    transport=transport,
+                    reason=reason,
+                )
+                # 主状态由 channels 推导（adb=connected → online；否则依赖 remote/ws）
+                has_ws = serial in getattr(self, "active_connections", {})
+                device.status = derive_main_status(
+                    read_channels(device), has_active_ws=has_ws
+                )
+                if device.status == "online":
+                    device.last_online_time = datetime.now().replace(microsecond=0)
+                db.commit()
+
+        try:
+            _with_db_retry(_write)
+        except Exception as e:
+            SLog.e("DeviceManager", f"register_adb_device db error {serial}: {e}")
+            return False
+
+        if state == "connected":
+            self.adb_nodes.add(serial)
+        else:
+            # unauthorized / disconnected 不算可下发的活跃 adb 节点
+            self.adb_nodes.discard(serial)
+        return True
+
+    def mark_adb_offline(self, serial: str) -> None:
+        """adb 设备消失（拔线/断连）：置 channels.adb=disconnected，主状态按 channels 推导。"""
+        from server.services.runtime.channels import set_adb_channel, read_channels, derive_main_status
+
+        self.adb_nodes.discard(serial)
+
+        def _write():
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == serial).first()
+                if not device:
+                    return
+                set_adb_channel(device, state="disconnected", reason="adb device gone")
+                has_ws = serial in getattr(self, "active_connections", {})
+                device.status = derive_main_status(
+                    read_channels(device), has_active_ws=has_ws
+                )
+                db.commit()
+
+        try:
+            _with_db_retry(_write)
+        except Exception as e:
+            SLog.e("DeviceManager", f"mark_adb_offline db error {serial}: {e}")
 
     def _save_log(self, sn: str, direction: str, msg_type: str, content: str):
         try:

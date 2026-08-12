@@ -1,0 +1,15 @@
+# 未来执行器占位
+id: ios_wda
+display_name: iOS WebDriverAgent
+description: 通过 WDA 控制 iOS 设备
+available_when: connectivity.ios_wda
+
+provides:
+  - ui_native_input
+  - ui_input_text
+  - ui_screenshot
+  - app_launch_native
+  - app_force_stop
+  - key_event
+
+platforms: [ios]

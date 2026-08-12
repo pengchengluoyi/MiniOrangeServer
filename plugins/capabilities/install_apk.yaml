@@ -1,0 +1,46 @@
+id: install_apk
+display_name: 安装应用包
+event_kind: install_apk
+category: app_lifecycle
+description: 安装 APK / IPA 到设备
+platforms: [android, ios]
+trigger_phrases: [安装, install]
+needs_vlm: false
+
+implementations:
+  - id: adb_pm_install
+    display_name: ADB pm install
+    executor: adb
+    requires_caps: [system_pkg_install]
+    needs_vlm: false
+    low_level:
+      shell: "pm install -r {apk_path}"
+    cost: 2
+
+  - id: remote_install_apk
+    display_name: Remote INSTALL_APK
+    executor: remote
+    requires_caps: [system_pkg_install]
+    needs_vlm: false
+    low_level:
+      command: INSTALL_APK
+      params: { url: "{url}", file_name: "{file_name}" }
+    cost: 5
+    description: 由 ClawNode 下载并触发安装；多数情况需弹窗确认（见下条 fallback）
+
+  - id: persona_allow_install
+    display_name: 拟人化点"允许安装"
+    executor: ai_persona
+    requires_caps: [system_pkg_install]
+    needs_vlm: true
+    prompt_template: PERSONA_ALLOW_INSTALL
+    expands_to_events: true
+    cost: 12
+    description: |
+      装包系统弹窗（"允许此来源安装"/"信任开发者"/"安装"）需要人工或拟人确认；
+      此实现自动驱动 Remote 完成弹窗交互。
+      通常与 remote_install_apk 串联使用，而非替代。
+
+ui:
+  shown_in_settings: true
+  examples: ["安装最新版 APK"]

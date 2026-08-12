@@ -20,6 +20,12 @@ class DeviceInfo(BaseModel):
     password: Optional[str] = None
     app_version: Optional[str] = None
     last_online: Optional[str] = None
+    # v3: 通道/指纹信息（与 WS device_list_update 广播对齐）
+    channels: Optional[Dict[str, Any]] = None
+    control_channel: Optional[str] = None
+    fingerprint_id: Optional[str] = None
+    clawnode_id: Optional[str] = None
+    adb_sn: Optional[str] = None
 
 class CommandReq(BaseModel):
     sn: str
@@ -38,6 +44,7 @@ def get_device_list():
     try:
         result = []
         dm = DeviceManager()
+        from server.services.runtime.channels import read_channels, channels_to_brief, resolve_control_channel
         for d in DeviceService.list_all():
             meta = dm.device_meta.get(d.sn, {})
             result.append({
@@ -49,7 +56,12 @@ def get_device_list():
                 "role": d.role,
                 "password": d.password,
                 "app_version": meta.get("app_version"),
-                "last_online": str(d.last_online_time) if d.last_online_time else None
+                "last_online": str(d.last_online_time) if d.last_online_time else None,
+                "channels": channels_to_brief(read_channels(d)),
+                "control_channel": resolve_control_channel(d).get("channel"),
+                "fingerprint_id": getattr(d, "fingerprint_id", None),
+                "clawnode_id": getattr(d, "clawnode_id", None),
+                "adb_sn": getattr(d, "adb_sn", None),
             })
         return result
     except Exception as e:

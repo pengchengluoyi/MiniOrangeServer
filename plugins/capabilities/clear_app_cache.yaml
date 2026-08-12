@@ -1,0 +1,34 @@
+id: clear_app_cache
+display_name: 清理应用数据
+event_kind: clear_app_cache
+category: app_lifecycle
+description: |
+  清除应用的本地数据。adb 通时直走 pm clear；ClawNode 走设置 → 应用信息 → 存储 → 清空存储空间。
+platforms: [android]
+trigger_phrases: [清缓存, 清除应用数据, 应用无缓存, 重置应用, 清除数据]
+needs_vlm: false
+
+implementations:
+  - id: adb_pm_clear
+    display_name: ADB pm clear（特权直清）
+    executor: adb
+    requires_caps: [system_pkg_clear]
+    needs_vlm: false
+    low_level:
+      shell: "pm clear {package}"
+    cost: 1
+
+  - id: persona_via_settings
+    display_name: 拟人化（设置→应用信息→清空存储）
+    executor: ai_persona
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    prompt_template: PERSONA_CLEAR_CACHE_VIA_SETTINGS
+    expands_to_events: true
+    cost: 12
+    description: |
+      设置 → 应用 → 应用信息 → 存储空间和缓存 → 清空存储空间 → 确认。
+
+ui:
+  shown_in_settings: true
+  examples: ["前置: 1. 应用无缓存"]

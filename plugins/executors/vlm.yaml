@@ -1,0 +1,23 @@
+id: vlm
+display_name: VLM (大模型视觉)
+description: |
+  调用配置的大模型视觉能力（Doubao / Claude / GPT-4V / 其他）。负责"看屏"类任务：
+  元素定位、视觉断言、页面就绪判断、视觉差异分析。本身不操作设备，输出由 Router 转化为
+  其它执行器的调用。
+
+available_when: provider.vlm.available
+
+provides:
+  - vision_locate
+  - vision_assert
+  - vision_readiness
+  - vision_diff
+
+platforms: [android, ios, web, mac, windows]
+
+probe:
+  type: provider_health
+  endpoint: chat_completion
+  timeout_sec: 10
+
+# 不同 provider 的差异（如 Doubao 0-1000 归一化）在 adapter 层处理，不污染插件 yaml

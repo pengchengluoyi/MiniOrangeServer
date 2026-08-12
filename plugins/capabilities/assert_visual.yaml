@@ -1,0 +1,28 @@
+id: assert_visual
+display_name: 视觉断言
+event_kind: assert_visual
+category: assertion
+description: |
+  统一的视觉断言能力：覆盖文字匹配、颜色判断、元素计数、元素存在性、语义校验。
+  所有"需要看屏才能判断的预期"都走这个能力，由 VLM 给出 passed + reason。
+  历史成功截图（如有）会作为对比基线一并传给 VLM。
+platforms: [android, ios, web]
+trigger_phrases: [验证, 确认, 应该, 预期, 校验, 检查]
+needs_vlm: true
+
+implementations:
+  - id: vlm_assert
+    display_name: VLM 视觉断言
+    executor: vlm
+    requires_caps: [vision_assert, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: ASSERTOR_VISION
+    cost: 8
+
+ui:
+  shown_in_settings: true
+  examples:
+    - "登录成功，定位到想要 tab 页"
+    - "底部 tab 出现 首页/造物秀/消息/我的"
+    - "按钮颜色变为绿色"
+    - "未读数字为 1"

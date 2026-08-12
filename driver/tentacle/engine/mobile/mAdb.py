@@ -170,12 +170,18 @@ class MAdbEngine(MobileEngine):
                 "3. 关闭「权限监控」后重试跑图"
             )
 
-    def shell(self, cmd):
+    def shell(self, cmd, timeout=30):
+        # 用 run(capture_output) 而非 check_output：后者遇非零退出会抛异常→吞掉输出返回空，
+        # 导致 pm clear/am 等失败命令的真实原因(如 "Failed")丢失，上层只能显示 "unknown"。
+        # 成功返回 stdout；stdout 为空时回退 stderr，保证失败也带诊断信息。
         full_cmd = f"{self.adb_base} shell {cmd}"
         try:
-            return subprocess.check_output(full_cmd, shell=True).decode(
-                "utf-8", errors="ignore"
-            ).strip()
+            proc = subprocess.run(
+                full_cmd, shell=True, capture_output=True, timeout=timeout
+            )
+            out = (proc.stdout or b"").decode("utf-8", errors="ignore").strip()
+            err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
+            return out if out else err
         except Exception:
             return ""
 

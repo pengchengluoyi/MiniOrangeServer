@@ -1,0 +1,29 @@
+# 未来扩展占位（.disabled 后缀，加载器跳过）
+# 启用时改名为 call_api.yaml 并补全实现
+
+id: call_api
+display_name: 调用 HTTP API
+event_kind: call_api
+category: future
+description: |
+  在测试流程中主动调用外部 HTTP API（如清除服务端缓存、Mock 数据、查询订单状态、
+  触发服务端 webhook 等）。AI 可在 plan 阶段决定何时插入。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [调用接口, 请求 api, http]
+needs_vlm: false
+
+implementations:
+  - id: internal_http_client
+    display_name: 内置 HTTP 客户端
+    executor: internal
+    requires_caps: [network_http]
+    needs_vlm: false
+    low_level:
+      method: "{method}"     # GET/POST/PUT/DELETE
+      url: "{url}"
+      headers: "{headers}"
+      body: "{body}"
+    cost: 3
+
+ui:
+  shown_in_settings: false   # 未启用，不展示

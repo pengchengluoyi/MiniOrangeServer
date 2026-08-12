@@ -1,0 +1,27 @@
+id: persona_subtask
+display_name: 拟人化子任务
+event_kind: persona_subtask
+category: app_lifecycle
+description: |
+  当某项系统能力（清缓存、装包许可等）无法通过原生执行器完成时，由 ai_persona 把它分解为
+  多步拟人化 UI 操作（点击、滑动），通过 Remote 执行。本能力本身就是个"meta 事件"——
+  执行时会展开为多个子事件，插回事件队列继续走。
+platforms: [android, ios]
+trigger_phrases: []   # 不直接被用例命中，由其它 capability fallback 触发
+needs_vlm: true
+
+implementations:
+  - id: ai_persona_expand
+    display_name: AI 拟人化展开
+    executor: ai_persona
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    prompt_template: PERSONA_TASK
+    expands_to_events: true
+    cost: 15
+
+ui:
+  shown_in_settings: true
+  examples:
+    - "清缓存的拟人化路径：长按图标 → 应用信息 → 存储 → 清除数据"
+    - "装包的允许安装弹窗处理"

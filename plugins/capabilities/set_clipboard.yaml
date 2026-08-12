@@ -1,0 +1,31 @@
+id: set_clipboard
+display_name: 设置剪贴板
+event_kind: set_clipboard
+category: system
+description: 设置设备剪贴板内容，常用于中文文本输入兜底
+platforms: [android, ios]
+trigger_phrases: [剪贴板, clipboard]
+needs_vlm: false
+
+implementations:
+  - id: remote_set_clipboard
+    display_name: Remote SET_CLIPBOARD
+    executor: remote
+    requires_caps: [clipboard_set]
+    needs_vlm: false
+    low_level:
+      command: SET_CLIPBOARD
+      params: { text: "{text}" }
+    cost: 2
+
+  - id: adb_clipboard_broadcast
+    display_name: ADB clipboard broadcast
+    executor: adb
+    requires_caps: [clipboard_set]
+    needs_vlm: false
+    low_level:
+      shell: "am broadcast -a clipper.set -e text '{text}'"
+    cost: 3
+
+ui:
+  shown_in_settings: true

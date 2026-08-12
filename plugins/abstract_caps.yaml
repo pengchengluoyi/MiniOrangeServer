@@ -1,0 +1,91 @@
+# MiniOrange 抽象能力（abstract capabilities）全集
+#
+# 每个执行器在 `executors/*.yaml` 的 `provides:` 中声明自己实现了哪些抽象能力。
+# 每个 capability 在 `implementations.*.requires_caps:` 中声明自己需要哪些抽象能力。
+#
+# 添加新抽象能力 → 在这里登记 → 在执行器 yaml 加 provides → 在能力 yaml 加 requires_caps。
+
+version: 1
+
+caps:
+  # ============== 系统级 / 特权 ==============
+  - id: system_shell
+    description: 执行任意 shell 命令（adb shell / pc PowerShell / mac AppleScript）
+    note: 强特权，AI 不直接调用，由 Router 翻译
+
+  - id: system_pkg_install
+    description: 静默或半自动安装应用包（apk / ipa / msi / pkg）
+    note: 不同执行器需求差异大：adb 静默；remote 需"允许安装"弹窗；mac 需用户授权
+
+  - id: system_pkg_clear
+    description: 清除应用本地数据（cache + databases + shared_prefs）
+    note: adb=pm clear；remote 需 device owner；persona=拟人化走设置
+
+  - id: read_system_data
+    description: 读取设备底层数据（SIM/IMEI/prop/dumpsys/registry）
+    note: 屏幕看不到的数据，只能 adb 或对应平台 API
+
+  # ============== UI 交互 ==============
+  - id: ui_native_input
+    description: 原生点击/长按/滑动手势
+    note: Android=Accessibility/u2/input tap; iOS=WDA; web=CDP dispatchMouseEvent; pc=WinAPI
+
+  - id: ui_input_text
+    description: 文本输入（中英文、emoji），通常含 IME / clipboard 兜底
+    note: 中文输入复杂，常借助剪贴板
+
+  - id: ui_screenshot
+    description: 抓取当前屏幕图像（用于 VLM / 断言 / 落 trace）
+    note: 全平台基本都有
+
+  - id: ui_stream
+    description: 实时屏幕流（用于 UI 调试 / 实时观察）
+    note: remote=START_STREAM；adb 只能轮询截图，不算真流
+
+  # ============== 应用生命周期 ==============
+  - id: app_launch_native
+    description: 启动应用（按包名 / bundle ID / 应用名）
+    note: adb=am start；remote=OPEN_APP；mac=osascript
+
+  - id: app_force_stop
+    description: 强制停止应用（结束进程）
+    note: adb=am force-stop；remote=KILL_APP（依赖系统权限）
+
+  # ============== 系统辅助 ==============
+  - id: key_event
+    description: 系统按键（Back / Home / Menu / Power / 音量）
+    note: 不同平台 keycode 不同
+
+  - id: clipboard_set
+    description: 设置剪贴板内容
+
+  # ============== AI 视觉 / 大模型 ==============
+  - id: vision_locate
+    description: 基于截图给出元素坐标
+    note: VLM 能力
+
+  - id: vision_assert
+    description: 基于截图判断预期是否达成
+    note: VLM 能力
+
+  - id: vision_readiness
+    description: 基于截图判断页面是否就绪（动画停止/loading 消失）
+    note: VLM 能力
+
+  - id: vision_diff
+    description: 对比两张截图差异（视觉回归判定）
+    note: VLM 能力
+
+  # ============== 人工介入 ==============
+  - id: human_input
+    description: 通过前端 WebSocket 阻塞等待用户输入
+    note: HITL 通道
+
+  # ============== 未来扩展 ==============
+  - id: network_http
+    description: 主动发起 HTTP/HTTPS 调用（call_api 插件用）
+    note: 未来扩展
+
+  - id: network_mock
+    description: 拦截 / Mock 网络请求
+    note: 未来扩展（mitmproxy 等）

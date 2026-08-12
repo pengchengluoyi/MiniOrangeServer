@@ -1,0 +1,28 @@
+id: adb
+display_name: ADB (Server 端)
+description: |
+  通过 USB 或 TCP adb 直连 Android 设备。具备 shell 特权，能做 Remote 做不到的事
+  （清缓存、读 SIM、静默装包、解锁辅助）。需要设备开启 USB 调试且与 Server 联通。
+
+available_when: connectivity.adb
+
+provides:
+  - system_shell
+  - system_pkg_install
+  - system_pkg_clear
+  - read_system_data
+  - ui_native_input          # input tap / input swipe
+  - ui_input_text            # input text + clipboard
+  - ui_screenshot            # screencap
+  - app_launch_native        # am start
+  - app_force_stop           # am force-stop
+  - clipboard_set            # am broadcast clipboard
+  - key_event                # input keyevent
+
+platforms: [android]
+
+probe:
+  type: shell_command
+  command: "adb -s {sn} shell echo ok"
+  expect_contains: "ok"
+  timeout_sec: 8

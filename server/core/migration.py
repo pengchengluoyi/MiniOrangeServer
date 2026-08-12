@@ -82,6 +82,11 @@ def _check_and_migrate(db_path):
                 ('role', 'TEXT', 'node'),
                 ('password', 'TEXT', None),
                 ('channels', 'JSON', '{}'),  # Step 2: 子通道状态 { remote: {...}, adb: {...} }
+                # 设备指纹绑定 (v3)
+                ('fingerprint_id', 'TEXT', None),
+                ('hw_uid', 'TEXT', None),
+                ('clawnode_id', 'TEXT', None),
+                ('adb_sn', 'TEXT', None),
             ],
             'scheduled_tasks': [
                 ('app_id', 'TEXT', None),

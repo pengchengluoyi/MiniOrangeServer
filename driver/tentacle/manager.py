@@ -140,7 +140,11 @@ class Manager(metaclass=SingletonMeta):
 
             # [ClawNode] 类型守卫：claw- 设备需用 RemoteEngine，与 adb 引擎互斥。
             # 从 adb 切到 claw-（或反向）时强制重建，避免用错引擎 init_driver。
-            want_remote = bool(test_subject) and str(test_subject).startswith("claw-")
+            try:
+                from server.services.runtime.device_identity import is_clawnode_sn
+                want_remote = bool(test_subject) and is_clawnode_sn(test_subject)
+            except Exception:
+                want_remote = bool(test_subject) and str(test_subject).startswith("claw-")
             if self.MobileEngine is not None:
                 is_remote = type(self.MobileEngine).__name__ == "RemoteEngine"
                 if want_remote != is_remote:

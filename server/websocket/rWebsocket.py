@@ -179,14 +179,27 @@ async def websocket_endpoint(
             async with send_lock:
                 await websocket.send_text(json.dumps(response))
                 
+        except WebSocketDisconnect:
+            SLog.d(TAG, f"client disconnected while processing {action}")
         except Exception as e:
+            # 连接已关闭时的发送失败是良性竞态（如设备收到 PAIR_CONFIG 后立即断开 WS，
+            # 服务端此时才回 ack）→ 降级为 debug，避免当作真错误刷屏。
+            from starlette.websockets import WebSocketState
+
+            disconnected = (
+                getattr(websocket, "application_state", None) == WebSocketState.DISCONNECTED
+                or getattr(websocket, "client_state", None) == WebSocketState.DISCONNECTED
+            )
+            if disconnected:
+                SLog.d(TAG, f"skip response for {action}: connection closed ({type(e).__name__})")
+                return
             SLog.e(TAG, f"Error processing {action}: {e}")
             # 发生异常时尝试返回错误信息，防止前端超时
             try:
                 response.update({"code": 500, "msg": str(e)})
                 async with send_lock:
                     await websocket.send_text(json.dumps(response))
-            except:
+            except Exception:
                 pass
 
     try:

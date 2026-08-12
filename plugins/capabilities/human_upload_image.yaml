@@ -1,0 +1,28 @@
+id: human_upload_image
+display_name: 人工上传图片
+event_kind: human_upload_image
+category: hitl
+description: |
+  让人上传一张图片作为基线或证据。常用于首次执行某用例时让人工提供"成功状态参考图"，
+  或对比线上的实际页面。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [上传截图, 上传图片, 给我图]
+needs_vlm: false
+
+implementations:
+  - id: hitl_upload_image
+    display_name: 前端图片上传
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: image_uploader
+      response_schema:
+        type: string   # url / file_path
+        format: image_url
+      default_timeout_sec: 600
+    cost: 80
+
+ui:
+  shown_in_settings: true
+  examples: ["请上传一张『登录成功』的参考截图作为基线"]

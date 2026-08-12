@@ -1,0 +1,41 @@
+id: input_text
+display_name: 文本输入
+event_kind: input_text
+category: ui_interaction
+description: |
+  在指定输入框输入文本。VLM 先定位输入框，然后通过执行器输入。
+  中文/emoji 通常走 clipboard 兜底（先 set_clipboard 再粘贴）。
+platforms: [android, ios, web]
+trigger_phrases: [输入, 填写, 填, 键入, type, input]
+needs_vlm: true
+
+implementations:
+  - id: vlm_locate_remote_input
+    display_name: VLM 定位 + Remote 点击+输入
+    executor: remote
+    requires_caps: [ui_input_text, ui_screenshot, ui_native_input]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      sequence:
+        - { command: TAP, params: { x: "{x}", y: "{y}" } }
+        - { command: SET_CLIPBOARD, params: { text: "{text}" } }
+        - { command: KEY_EVENT, params: { keyevent: "paste" } }
+    cost: 7
+
+  - id: vlm_locate_adb_input
+    display_name: VLM 定位 + ADB input text
+    executor: adb
+    requires_caps: [ui_input_text, ui_screenshot, ui_native_input]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      sequence:
+        - { shell: "input tap {x} {y}" }
+        - { shell: "input text '{text_escaped}'" }
+    cost: 6
+    description: adb input text 不支持中文，中文走 clipboard 路径
+
+ui:
+  shown_in_settings: true
+  examples: ["输入手机号 13800138000", "点击密码输入框,输入：123456"]

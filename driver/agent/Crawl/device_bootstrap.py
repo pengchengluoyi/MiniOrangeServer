@@ -23,12 +23,21 @@ class DeviceOfflineError(RuntimeError):
 
 
 def _is_clawnode(sn: Optional[str]) -> bool:
-    """ClawNode 直连设备：SN 以 claw- 开头，不经 adb。"""
-    return bool(sn) and str(sn).startswith("claw-")
+    """ClawNode 直连设备：SN 以 claw- 开头，不经 adb。统一走 device_identity 权威判定。"""
+    try:
+        from server.services.runtime.device_identity import is_clawnode_sn
+
+        return is_clawnode_sn(sn)
+    except Exception:
+        return bool(sn) and str(sn).startswith("claw-")
 
 
 def list_connected_adb_serials() -> list:
-    """本机 adb devices 中 state=device 的序列号。"""
+    """本机 adb devices 中 state=device 的序列号。
+
+    优先用 adbutils；未安装时回退 `adb devices` subprocess，保证无 adbutils 环境
+    下 adb 直连设备仍可被发现/驱动。
+    """
     try:
         import adbutils
 
@@ -39,7 +48,25 @@ def list_connected_adb_serials() -> list:
                 serials.append(str(info.serial))
         return serials
     except Exception as e:
-        SLog.w(TAG, f"adbutils list devices failed: {e}")
+        SLog.d(TAG, f"adbutils unavailable ({e}), fallback to `adb devices`")
+
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["adb", "devices"], capture_output=True, text=True, timeout=6.0
+        )
+        serials = []
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("list of devices"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                serials.append(parts[0])
+        return serials
+    except Exception as e:
+        SLog.w(TAG, f"`adb devices` fallback failed: {e}")
         return []
 
 

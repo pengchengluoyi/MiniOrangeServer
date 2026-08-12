@@ -1,0 +1,28 @@
+id: human_choice_single
+display_name: 人工单选
+event_kind: human_choice_single
+category: hitl
+description: |
+  让人在多个候选项中选一个。常用于 AI 在屏上找到多个看起来都对的目标时求助
+  （"我看到 3 个『登录』按钮，你要点哪个？"）。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [请选择, 你要哪个]
+needs_vlm: false
+
+implementations:
+  - id: hitl_choice_single
+    display_name: 前端单选列表
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: radio_list
+      response_schema:
+        type: string
+        enum_from: choices       # 从 event.params.choices 取
+      default_timeout_sec: 180
+    cost: 55
+
+ui:
+  shown_in_settings: true
+  examples: ["屏上发现 3 个『登录』按钮，请选择目标"]

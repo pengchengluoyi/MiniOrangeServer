@@ -1,0 +1,15 @@
+# 未来执行器占位
+id: mac_apple_script
+display_name: macOS AppleScript / accessibility
+description: 通过 AppleScript / Accessibility API 控制 macOS 应用
+available_when: connectivity.mac
+
+provides:
+  - system_shell
+  - ui_native_input
+  - ui_screenshot
+  - app_launch_native
+  - key_event
+  - clipboard_set
+
+platforms: [mac]

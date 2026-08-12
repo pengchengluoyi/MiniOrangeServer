@@ -1,0 +1,32 @@
+id: close_app
+display_name: 关闭应用
+event_kind: close_app
+category: app_lifecycle
+description: 关闭指定应用（Remote 走设置强停，与 kill_app 拟人路径一致）
+platforms: [android, ios]
+trigger_phrases: [关闭, 退出, close, quit]
+needs_vlm: false
+
+implementations:
+  - id: adb_am_finish
+    display_name: ADB am force-stop
+    executor: adb
+    requires_caps: [app_force_stop]
+    needs_vlm: false
+    low_level:
+      shell: "am force-stop {package}"
+    cost: 1
+
+  - id: persona_close_via_settings
+    display_name: 拟人化（设置→应用信息→强制停止）
+    executor: ai_persona
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    prompt_template: PERSONA_FORCE_STOP_VIA_SETTINGS
+    expands_to_events: true
+    cost: 12
+    description: Remote 关闭应用 = 设置内强制停止，不是仅按 Home。
+
+ui:
+  shown_in_settings: true
+  examples: ["关闭 微信"]

@@ -1,0 +1,28 @@
+id: human_acknowledge
+display_name: 人工知会
+event_kind: human_acknowledge
+category: hitl
+description: |
+  仅通知用户某个事件需要关注，要求点"知道了"才继续。不需要用户提供数据，仅作为
+  里程碑或风险提示（如"接下来要清除应用所有数据"）。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [请确认知晓, 风险提示]
+needs_vlm: false
+
+implementations:
+  - id: hitl_acknowledge
+    display_name: 前端通知 + 确认
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: notice_with_ack
+      response_schema:
+        type: string
+        const: "ack"
+      default_timeout_sec: 300
+    cost: 40
+
+ui:
+  shown_in_settings: true
+  examples: ["接下来将清除应用全部数据，请确认"]

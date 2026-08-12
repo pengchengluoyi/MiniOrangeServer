@@ -1,0 +1,38 @@
+id: swipe_element_to_element
+display_name: 元素拖拽
+event_kind: swipe_element_to_element
+category: ui_interaction
+description: 把一个元素拖拽到另一个元素（如调整列表顺序、拖到回收站）
+platforms: [android, ios]
+trigger_phrases: [拖动, 拖拽, 拖到, drag]
+needs_vlm: true
+
+implementations:
+  - id: vlm_locate_remote_drag
+    display_name: VLM 定位 + Remote SWIPE
+    executor: remote
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      command: SWIPE
+      params:
+        x: "{start_x}"
+        y: "{start_y}"
+        x2: "{end_x}"
+        y2: "{end_y}"
+        duration_ms: 500
+    cost: 7
+
+  - id: vlm_locate_adb_drag
+    display_name: VLM 定位 + ADB swipe
+    executor: adb
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    low_level:
+      shell: "input swipe {start_x} {start_y} {end_x} {end_y} 500"
+    cost: 6
+
+ui:
+  shown_in_settings: true

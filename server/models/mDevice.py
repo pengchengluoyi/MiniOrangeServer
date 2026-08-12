@@ -41,6 +41,16 @@ class MDevice(Base):
     #   }
     channels = Column(JSON, default=dict, comment="子通道状态: { remote: {...}, adb: {...} }")
 
+    # 设备指纹绑定 (v3)：跨连接方式(ClawNode / adb)标识同一物理设备。
+    #   - hw_uid       设备真实唯一标识：安卓=SN(ro.serialno)、iOS=DID(UDID)，是合并键
+    #   - fingerprint_id 由 hw_uid 按平台派生的稳定指纹，逻辑设备身份锚点
+    #   - clawnode_id  绑定的 ClawNode 连接句柄 (claw-xxx)
+    #   - adb_sn       绑定的 adb 连接句柄 (adb serial 或 ip:port)
+    fingerprint_id = Column(String, nullable=True, index=True, comment="物理设备指纹(跨连接合并锚点)")
+    hw_uid = Column(String, nullable=True, index=True, comment="设备真实唯一标识: 安卓SN / iOS DID")
+    clawnode_id = Column(String, nullable=True, comment="绑定的ClawNode连接句柄 claw-xxx")
+    adb_sn = Column(String, nullable=True, comment="绑定的adb连接句柄 serial/ip:port")
+
     # 时间戳
     last_online_time = Column(DateTime(timezone=True), onupdate=func.now(), comment="最后在线时间")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

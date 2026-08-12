@@ -1,0 +1,34 @@
+id: swipe_direction
+display_name: 方向滑动
+event_kind: swipe_direction
+category: ui_interaction
+description: 沿四向滑动（不依赖具体目标），按屏幕比例计算坐标
+platforms: [android, ios, web]
+trigger_phrases: [上滑, 下滑, 左滑, 右滑, 上拉, 下拉]
+needs_vlm: false
+
+implementations:
+  - id: remote_swipe_norm
+    display_name: Remote 比例滑动
+    executor: remote
+    requires_caps: [ui_native_input]
+    needs_vlm: false
+    low_level:
+      command: SWIPE
+      params:
+        direction: "{direction}"
+        duration_ms: "{duration_ms}"
+    cost: 2
+
+  - id: adb_swipe
+    display_name: ADB input swipe
+    executor: adb
+    requires_caps: [ui_native_input]
+    needs_vlm: false
+    low_level:
+      shell: "input swipe {x1} {y1} {x2} {y2} {duration_ms}"
+    cost: 3
+
+ui:
+  shown_in_settings: true
+  examples: ["上滑", "下拉刷新"]

@@ -175,6 +175,10 @@ async def lifespan(app: FastAPI):
     DeviceManager().loop = asyncio.get_running_loop()
     asyncio.create_task(DeviceManager().monitor_heartbeats())
 
+    # [ADB] 启动 adb (USB/TCP) 设备发现器，与 ClawNode 心跳监控并列，互不干扰
+    from server.services.runtime.adb_discovery import run_adb_discovery
+    asyncio.create_task(run_adb_discovery())
+
     from server.core.scheduler import SchedulerService
     SchedulerService().start()
 
@@ -313,7 +317,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.99",
+        "version": "0.0.100",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

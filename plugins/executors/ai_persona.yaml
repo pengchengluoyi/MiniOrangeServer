@@ -1,0 +1,22 @@
+id: ai_persona
+display_name: AI 拟人化执行
+description: |
+  当某项系统能力（清缓存、装包许可）在 adb 和 remote 都不可用时，AI 通过分析当前屏幕，
+  把系统任务拆解成多步拟人化 UI 操作（如：长按图标 → 应用信息 → 存储 → 清除数据），
+  然后通过 Remote 的 ui_native_input 执行。本质上是借用 Remote 的 UI 能力实现系统能力。
+
+available_when: connectivity.remote     # 依赖 Remote 通道实际执行
+
+provides:
+  - system_pkg_install       # 通过点击系统弹窗"允许安装"
+  - system_pkg_clear         # 通过设置→应用→清除数据
+  - app_force_stop           # 通过设置→应用→结束运行
+  # 注意：拟人化无法 read_system_data（屏幕看不到底层数据）
+
+platforms: [android, ios]
+
+# 拟人路径成功率视设备 OEM 而定，runtime 由 Capability Router 透传给 PERSONA_TASK prompt
+prompt_inputs_required:
+  - device_signature         # 如 "Xiaomi 14 / Android 14 / MIUI 15"
+  - current_screenshot
+  - task_description

@@ -60,11 +60,70 @@ def _is_claw_direct(device: MDevice) -> bool:
     return sn.startswith("claw-") or str(device.device_type or "") == "android_direct"
 
 
+def _merge_fingerprint_groups(devices: List[MDevice]) -> List[MDevice]:
+    """按 fingerprint_id 聚合同一物理设备的多条连接(ClawNode + adb)为一个逻辑设备。
+
+    方案A：保留一个代表行（优先 online、其次 claw 直连以带更全元数据），把另一连接的
+    通道状态/句柄合并到代表行的 channels 与 clawnode_id/adb_sn 上，使列表显示为一台设备
+    且同时暴露 remote/adb 两个通道。仅改内存视图，不落库（list_all 不 commit）。
+    """
+    from server.services.runtime.channels import read_channels
+
+    groups: dict[str, List[MDevice]] = {}
+    singles: List[MDevice] = []
+    order: List[str] = []
+    for d in devices:
+        fp = str(getattr(d, "fingerprint_id", "") or "").strip()
+        if not fp:
+            singles.append(d)
+            continue
+        if fp not in groups:
+            groups[fp] = []
+            order.append(fp)
+        groups[fp].append(d)
+
+    def _rank(d: MDevice) -> tuple:
+        online = 1 if str(d.status or "") == "online" else 0
+        is_claw = 1 if _is_claw_direct(d) else 0
+        return (online, is_claw)
+
+    merged: dict[str, MDevice] = {}
+    for fp in order:
+        members = groups[fp]
+        if len(members) == 1:
+            merged[fp] = members[0]
+            continue
+        rep = max(members, key=_rank)
+        rep_ch = read_channels(rep)
+        for m in members:
+            if m is rep:
+                continue
+            mch = read_channels(m)
+            # 合并对方更"连接"的通道状态
+            for chan in ("remote", "adb"):
+                if (mch.get(chan) or {}).get("state") in ("connected", "unauthorized"):
+                    rep_ch[chan] = mch[chan]
+            if getattr(m, "clawnode_id", None) and not getattr(rep, "clawnode_id", None):
+                rep.clawnode_id = m.clawnode_id
+            if getattr(m, "adb_sn", None) and not getattr(rep, "adb_sn", None):
+                rep.adb_sn = m.adb_sn
+            if str(m.status or "") == "online":
+                rep.status = "online"
+        rep.channels = rep_ch
+        merged[fp] = rep
+
+    return singles + [merged[fp] for fp in order]
+
+
 def dedupe_devices(devices: List[MDevice]) -> List[MDevice]:
     """
     同一台手机可能同时以 USB hub（adb serial）和 ClawNode WS（claw-*）注册。
-    展示时保留 ClawNode 直连，隐藏重复的 hub 条目。
+    v3：优先按 fingerprint_id 聚合合并；无指纹的行回退旧 model+ip 启发式（灰度过渡）。
     """
+    # 1) 指纹聚合（有 hw_uid/serial 的可靠合并）
+    devices = _merge_fingerprint_groups(devices)
+
+    # 2) 旧启发式：仅对仍无指纹的行生效，隐藏与 claw 重复的 hub 条目
     claws_by_model: dict[str, MDevice] = {}
     claws_by_ip: dict[str, MDevice] = {}
     for device in devices:
@@ -81,6 +140,8 @@ def dedupe_devices(devices: List[MDevice]) -> List[MDevice]:
     for device in devices:
         if str(device.device_type or "") != "android" or str(device.role or "") != "hub":
             continue
+        if str(getattr(device, "fingerprint_id", "") or "").strip():
+            continue  # 有指纹的已在第1步聚合，勿再用脆弱启发式误删
         model_key = _normalize_model(device.model)
         ip = str(device.ip_address or "").strip()
         if model_key and model_key in claws_by_model:

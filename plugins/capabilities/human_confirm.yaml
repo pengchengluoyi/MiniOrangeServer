@@ -1,0 +1,26 @@
+id: human_confirm
+display_name: 人工确认（是/否）
+event_kind: human_confirm
+category: hitl
+description: |
+  让人在前端弹窗回答"是/否"。AI 会通过 HITL_PROMPT_COMPOSER 生成场景化问句
+  （含当前事件上下文），不是死板的 "请确认"。
+platforms: [android, ios, web, mac, windows]
+trigger_phrases: [是否, 请确认, 你看对吗]
+needs_vlm: false
+
+implementations:
+  - id: hitl_confirm
+    display_name: 前端确认对话框
+    executor: hitl
+    requires_caps: [human_input]
+    needs_vlm: false
+    low_level:
+      ui_kind: yes_no_buttons
+      response_schema: { type: boolean }
+      default_timeout_sec: 300
+    cost: 50    # 人工耗时高，AI 优先不调
+
+ui:
+  shown_in_settings: true
+  examples: ["你看这个『同意』按钮是不是绿色的？"]

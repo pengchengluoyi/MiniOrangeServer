@@ -1,0 +1,17 @@
+id: hitl
+display_name: 人工介入 (HITL)
+description: |
+  通过前端 WebSocket 阻塞通道，弹出对话框等待用户响应。AI 在 plan 阶段预判需要 HITL 的
+  事件（如短信验证码、不确定的多候选项），或执行阶段临时插入。所有 HITL 文案由
+  HITL_PROMPT_COMPOSER prompt 场景化生成。
+
+available_when: connectivity.frontend
+
+provides:
+  - human_input
+
+platforms: [android, ios, web, mac, windows]
+
+probe:
+  type: frontend_ws_alive
+  timeout_sec: 3
