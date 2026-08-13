@@ -148,6 +148,7 @@ def run_cases(
     use_persisted_baseline: bool = True,
     use_cache: bool = True,
     options: Optional[OrchestratorOptions] = None,
+    execution_mode: str = "auto",
 ) -> dict[str, Any]:
     """启动一次 AI-led 回归。
 
@@ -252,6 +253,7 @@ def run_cases(
                 provider_id=provider_id,
                 model_name=model_name,
                 options=options,
+                execution_mode=execution_mode,
             )
         except Exception as exc:  # pragma: no cover
             SLog.e(TAG, f"run {run_id} worker crashed: {exc}")
@@ -282,6 +284,7 @@ def _execute(
     provider_id: str = "",
     model_name: str = "",
     options: OrchestratorOptions,
+    execution_mode: str = "auto",
 ) -> None:
     """同步逐 case 跑；中途更新 _RUNS。"""
     run_id = run_doc["run_id"]
@@ -414,6 +417,7 @@ def _execute(
                 run_id=f"{run_id}::{spec.case_id}",
                 use_persisted_baseline=use_persisted_baseline,
                 app_cache_cleared=app_cache_cleared,
+                execution_mode=execution_mode,
             )
         except Exception as exc:  # pragma: no cover
             SLog.e(TAG, f"run_case crashed case={spec.case_id}: {exc}")

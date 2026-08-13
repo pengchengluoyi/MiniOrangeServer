@@ -301,3 +301,53 @@ class RunReport(BaseModel):
 
     decline_reason: str = ""
     blocked_reason: str = ""
+
+
+# ============== Agent 执行态（D1–D6 改造：目标导向闭环） ==============
+
+
+class CaseCheckpoint(BaseModel):
+    """用例的一个可观测里程碑（软锚点，用于判进度/成功，不是硬脚本）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="稳定短 id，如 cp1")
+    description: str = Field(..., description="可在屏幕上观测的状态，如『进入一键登录页』")
+    done: bool = Field(False, description="运行时标记是否已达成")
+
+
+class CaseGoal(BaseModel):
+    """用例 → 目标 + 检查点（D1：替代固定事件序列）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    case_id: str = ""
+    goal: str = Field(..., description="整条用例要达成的总体目标（自然语言）")
+    checkpoints: list[CaseCheckpoint] = Field(default_factory=list)
+    success_criteria: str = Field("", description="最终成功判定标准，供 VLM 断言")
+    ai_reasoning: str = Field("", description="抽取思路")
+    raw_llm: dict[str, Any] = Field(default_factory=dict)
+    parse_warnings: list[str] = Field(default_factory=list)
+
+
+class AgentAction(BaseModel):
+    """agent 单步要执行的一个能力动作。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    capability_id: str = Field("", description="必须来自 capability_menu")
+    params: dict[str, Any] = Field(default_factory=dict, description="含绝对像素坐标等")
+
+
+class AgentDecision(BaseModel):
+    """decide_next_action 的单步决策（D2：看图直接出坐标；D3：每步）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    thought: str = Field("", description="当前屏幕分析 + 为什么选这一步")
+    action: Optional[AgentAction] = Field(None, description="status=continue/ask_human 时必填")
+    expected_after: str = Field("", description="执行后预期出现的状态，供下一步自检")
+    status: Literal["continue", "done", "give_up", "ask_human"] = "continue"
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    raw_llm: dict[str, Any] = Field(default_factory=dict)
+    parse_warnings: list[str] = Field(default_factory=list)

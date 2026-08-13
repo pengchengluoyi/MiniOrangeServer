@@ -49,6 +49,8 @@ class RunRequest(BaseModel):
     async_exec: bool = True
     use_persisted_baseline: bool = True
     use_cache: bool = True
+    # 执行引擎：auto(adb设备→agent, 其余→plan) | agent | plan
+    execution_mode: str = "auto"
 
 
 class PromoteBaselineRequest(BaseModel):
@@ -74,11 +76,29 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
             async_exec=body.async_exec,
             use_persisted_baseline=body.use_persisted_baseline,
             use_cache=body.use_cache,
+            execution_mode=(body.execution_mode or "auto").lower(),
         )
         return {"code": 200, "msg": "AI-led 回归任务已启动", "data": snapshot}
     except Exception as e:
         SLog.e(TAG, f"/run failed app={body.app_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/agent/runs")
+def agent_runs():
+    """Agent 流式执行：最近若干 run 的摘要（供 AgentRun 页面列表/历史回填）。"""
+    from server.services.regression import agent_stream
+    return {"code": 200, "data": {"runs": agent_stream.list_recent_runs()}}
+
+
+@router.get("/agent/steps/{run_id:path}")
+def agent_steps(run_id: str):
+    """Agent 流式执行：某次 run 的全部步骤事件（含缩略图/思考/动作/结果），随时可看。"""
+    from server.services.regression import agent_stream
+    data = agent_stream.get_run_events(run_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"agent run not found: {run_id}")
+    return {"code": 200, "data": data}
 
 
 @router.get("/run/{run_id}")

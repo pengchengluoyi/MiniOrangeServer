@@ -381,13 +381,35 @@ def run_case(
     run_id: str = "",
     use_persisted_baseline: bool = True,
     app_cache_cleared: bool = False,
+    execution_mode: str = "auto",
 ) -> RunReport:
     """端到端跑一条 case：generate_overview → orchestrate。
 
-    适合上层（Step 9 飞书回归服务）直接调。
-    use_persisted_baseline=True 时会自动从 case_memory 拉上次的 baseline overview
-    （Step 6 默认开启）；显式 baseline 参数优先级最高。
+    execution_mode（D1–D6 改造）：
+      - "agent"：目标导向闭环引擎（每步看图决策），仅支持 adb 通道
+      - "plan" ：旧的整体规划 + 逐事件 + replan（默认兼容）
+      - "auto" ：adb 直连设备(非 claw)自动走 agent，其余走 plan
     """
+    mode = (execution_mode or "auto").strip().lower()
+    adb_ok = (run_context.adb.get("state") == "connected") if run_context else False
+    is_claw = str(run_context.sn or "").startswith("claw-") if run_context else False
+    use_agent = mode == "agent" or (mode == "auto" and adb_ok and not is_claw)
+    if use_agent:
+        if not adb_ok:
+            SLog.w(TAG, f"execution_mode=agent 但 adb 未连通，回退 plan 模式 case={case_spec.case_id}")
+        else:
+            from server.services.regression.agent_executor import run_agent_case
+
+            agent_router = router or CapabilityRouter(run_context)
+            SLog.i(TAG, f"[{run_id}] execution_mode=agent (adb) case={case_spec.case_id}")
+            return run_agent_case(
+                case_spec,
+                run_context=run_context,
+                router=agent_router,
+                provider_id=provider_id,
+                run_id=run_id,
+            )
+
     baseline_overview_text = ""
     if use_persisted_baseline and case_spec and case_spec.case_id:
         try:

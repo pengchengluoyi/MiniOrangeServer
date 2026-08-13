@@ -26,7 +26,11 @@ from server.services.ai.regression.llm_client import (
 )
 from server.services.ai.regression.schemas import (
     AssertResult,
+    AgentDecision,
+    AgentAction,
     BaselineContext,
+    CaseGoal,
+    CaseCheckpoint,
     CaseSpec,
     HitlComposerResult,
     LocateResult,
@@ -743,3 +747,144 @@ def expand_persona_task(
         raw_llm=raw,
         parse_warnings=warnings,
     )
+
+
+# ============== Agent 执行引擎（目标导向闭环，仅 adb 通道） ==============
+
+
+def extract_goal(
+    case_spec: CaseSpec,
+    *,
+    run_context: Optional[RunContext] = None,
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 60,
+) -> CaseGoal:
+    """把用例抽成 目标 + 有序检查点（D1）。失败时给一个兜底 goal（用例名/预期）。"""
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        return CaseGoal(
+            case_id=case_spec.case_id,
+            goal=(case_spec.expected or case_spec.name or "完成用例").strip(),
+            ai_reasoning=f"未启用 AI：{gate.get('reason')}（用兜底 goal）",
+            parse_warnings=["provider unavailable"],
+        )
+    messages = P.build_goal_extract_messages(case_spec=case_spec)
+    raw, meta = call_chat_text(
+        provider=provider, messages=messages,
+        temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
+    )
+    if raw is None:
+        SLog.w(TAG, f"extract_goal LLM failed case={case_spec.case_id} err={meta.get('error')!r}")
+        return CaseGoal(
+            case_id=case_spec.case_id,
+            goal=(case_spec.expected or case_spec.name or "完成用例").strip(),
+            ai_reasoning="LLM 返回空/解析失败，用兜底 goal",
+            raw_llm={"meta": meta},
+            parse_warnings=["llm failed"],
+        )
+    cps: list[CaseCheckpoint] = []
+    for idx, cp in enumerate(raw.get("checkpoints") or [], start=1):
+        if isinstance(cp, dict) and (cp.get("description") or "").strip():
+            cps.append(CaseCheckpoint(
+                id=str(cp.get("id") or f"cp{idx}"),
+                description=str(cp.get("description")).strip(),
+            ))
+    goal_text = str(raw.get("goal") or "").strip() or (case_spec.expected or case_spec.name or "完成用例").strip()
+    return CaseGoal(
+        case_id=case_spec.case_id,
+        goal=goal_text,
+        checkpoints=cps,
+        success_criteria=str(raw.get("success_criteria") or "").strip() or goal_text,
+        ai_reasoning=str(raw.get("ai_reasoning") or "").strip() or "（模型未给出 reasoning）",
+        raw_llm=raw,
+    )
+
+
+def _parse_agent_decision(raw: dict[str, Any], width: int, height: int) -> AgentDecision:
+    warnings: list[str] = []
+    status = (raw.get("status") or "continue").strip().lower()
+    if status not in {"continue", "done", "give_up", "ask_human"}:
+        warnings.append(f"unknown status={status!r} → continue")
+        status = "continue"
+    action: Optional[AgentAction] = None
+    raw_action = raw.get("action")
+    if isinstance(raw_action, dict) and raw_action.get("capability_id"):
+        params = raw_action.get("params") if isinstance(raw_action.get("params"), dict) else {}
+
+        def _to_px(v, dim):
+            # 约定 0-1000 归一化；>1000 视为模型误给的绝对像素（兜底）
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return v
+            px = fv if fv > 1000 else (fv / 1000.0 * dim)
+            return max(0, min(dim, int(round(px))))
+
+        for kx, ky in (("x", "y"), ("from_x", "from_y"), ("to_x", "to_y")):
+            if kx in params and width > 0:
+                params[kx] = _to_px(params[kx], width)
+            if ky in params and height > 0:
+                params[ky] = _to_px(params[ky], height)
+        action = AgentAction(capability_id=str(raw_action.get("capability_id")), params=params)
+    if status in {"continue", "ask_human"} and action is None:
+        warnings.append(f"status={status} 但无有效 action")
+    return AgentDecision(
+        thought=str(raw.get("thought") or "").strip(),
+        action=action,
+        expected_after=str(raw.get("expected_after") or "").strip(),
+        status=status,  # type: ignore[arg-type]
+        confidence=max(0.0, min(1.0, float(raw.get("confidence") or 0.0))),
+        raw_llm=raw,
+        parse_warnings=warnings,
+    )
+
+
+def decide_next_action(
+    *,
+    goal: str,
+    checkpoints_block: str,
+    run_context: RunContext,
+    history_block: str,
+    width: int,
+    height: int,
+    image_base64: str,
+    image_mime: str = "image/png",
+    hierarchy_text: str = "",
+    baseline_hint: str = "",
+    success_criteria: str = "",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 90,
+) -> AgentDecision:
+    """看图决定下一步一个动作（D2 直接出坐标 / D3 每步看图）。永远返回 AgentDecision。"""
+    menu = available_menu_brief(run_context)
+    if not menu:
+        return AgentDecision(status="give_up", thought="capability_menu 为空（连通性丢失）",
+                             parse_warnings=["empty menu"])
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        return AgentDecision(status="ask_human", thought=f"未启用 AI 视觉：{gate.get('reason')}",
+                             parse_warnings=["provider unavailable"])
+    messages = P.build_agent_decide_messages(
+        goal=goal,
+        checkpoints_block=checkpoints_block,
+        device_brief=run_context.to_prompt_brief(),
+        menu=menu,
+        history_block=history_block,
+        width=width,
+        height=height,
+        image_base64=image_base64,
+        image_mime=image_mime,
+        hierarchy_text=hierarchy_text,
+        baseline_hint=baseline_hint,
+        target_package=str(getattr(run_context, "target_package", "") or ""),
+        success_criteria=success_criteria,
+    )
+    raw, meta = call_chat_text(
+        provider=provider, messages=messages,
+        temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
+    )
+    if raw is None:
+        SLog.w(TAG, f"decide_next_action LLM failed err={meta.get('error')!r}")
+        return AgentDecision(status="give_up", thought="LLM 返回空/解析失败",
+                             raw_llm={"meta": meta}, parse_warnings=["llm failed"])
+    return _parse_agent_decision(raw, width, height)

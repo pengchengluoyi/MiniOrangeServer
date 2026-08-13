@@ -784,3 +784,153 @@ def build_single_step_replan_messages(
 def estimate_message_size(messages: list[dict[str, str]]) -> int:
     """粗算 prompt 字节数（UTF-8 大约 1 字符 ≈ 3 字节中文）。"""
     return sum(len((m.get("content") or "").encode("utf-8")) for m in messages)
+
+
+# ============================================================================
+# Agent 执行引擎（目标导向闭环，仅 adb 通道）—— GOAL_EXTRACT + AGENT_DECIDE
+# ============================================================================
+
+GOAL_EXTRACT_SYSTEM_PROMPT = """你是资深移动端测试分析师。把一条测试用例转成【目标 + 有序检查点】，供 agent 逐步执行时判断进度与成功。
+
+只返回一个 JSON 对象：
+{
+  "goal": "整条用例要达成的总体目标（自然语言，一句话）",
+  "checkpoints": [
+    {"id": "cp1", "description": "可在屏幕上直接观测到的里程碑，如『进入一键登录页』"},
+    {"id": "cp2", "description": "..."}
+  ],
+  "success_criteria": "最终判定用例成功的可视化标准（供 VLM 看最后一屏判断）",
+  "ai_reasoning": "你的抽取思路"
+}
+
+要求：
+- checkpoint 必须是"能在某一屏上看出来"的客观状态，不要写成动作（写"已进入登录页"而非"点击登录"）。
+- checkpoint 有序，覆盖从起点到目标的关键节点，一般 2~6 个。
+- 忽略"清缓存/启动应用"等前置（由系统前置条件处理），聚焦用例主体目标。
+- 禁止 Markdown、禁止多个 JSON。"""
+
+GOAL_EXTRACT_USER_TEMPLATE = """==== 用例 ====
+{case_block}
+
+请抽取 goal + checkpoints + success_criteria，只返回一个 JSON。"""
+
+
+def build_goal_extract_messages(*, case_spec: "CaseSpec") -> list[dict[str, Any]]:
+    user_text = GOAL_EXTRACT_USER_TEMPLATE.format(case_block=_case_block(case_spec))
+    return [
+        {"role": "system", "content": GOAL_EXTRACT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+
+
+AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 agent（通过 adb 执行）。你会看到【当前屏幕截图】，要朝着【目标】推进，每次只决定并输出【下一步一个动作】。
+
+只返回一个 JSON 对象：
+{
+  "thought": "先描述当前这屏是什么，再说为什么选下面这一步",
+  "status": "continue | done | give_up | ask_human",
+  "action": {"capability_id": "菜单里的能力", "params": { ... }},
+  "expected_after": "执行后预期出现的状态（供下一步自检）",
+  "confidence": 0.0~1.0
+}
+
+铁律：
+1. capability_id 必须来自 capability_menu，禁止臆造。
+2. 坐标一律用【0-1000 归一化整数】：x=横向千分比、y=纵向千分比（与分辨率无关，系统会按真实屏幕尺寸换算成像素）。例如屏幕正中央 = x:500,y:500；右下角 ≈ x:950,y:950。
+   - tap_element: params={"x":0-1000,"y":0-1000}
+   - swipe_element_to_element: params={"from_x","from_y","to_x","to_y"（均 0-1000）,"duration_ms"}
+   - input_text: params={"text":str,"x":0-1000,"y":0-1000}(先点输入框再输入)
+   - launch_app/close_app: params={"package":str}
+   - press_key: params={"key":"back|home|..."}
+   - wait_ms: params={"ms":int}
+3. 你能看图，所以【自己判断当前页面】：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动决定如何越过它（点同意/允许/关闭/稍后），不要卡住。
+★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名，禁止凭屏幕图标或记忆猜其它包名。目标应用已在前置步骤启动时，通常无需再 launch。
+4. 目标已达成 → status="done"（此时可不带 action）。**只有当【成功标准】确实在当前这一屏上可见时才可判 done**；只是"走到相关流程"但成功标准尚未出现时，继续操作，不要提前 done。若历史里出现 [校验未通过]，说明你上次判 done 但系统校验没过、其实没完成，请继续操作或改用 give_up/ask_human。
+5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。
+6. 需要人来决定或提供信息（如不确定点哪个、需要账号/验证码）→ status="ask_human"，action 用 human_* 能力：
+   - human_confirm: params={"question": "..."}
+   - human_choice_single: params={"question":"...","choices":["A","B"]}
+   - human_input_text: params={"question":"..."}
+7. 操作纪律：不要连续多次点同一位置无效动作；能一步到位就别绕；不要盲目连按返回键退出应用。
+8. 已执行动作历史会给你，避免重复无效循环。
+禁止 Markdown、禁止思考链、禁止多个 JSON。"""
+
+AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
+{goal}
+
+==== 成功标准（只有它在当前屏幕上可见，才可判 done）====
+{success_criteria}
+
+==== 目标应用（launch/open 必须用此包名）====
+{target_app}
+
+==== 检查点（有序，[x]=已达成 [ ]=未达成）====
+{checkpoints_block}
+
+==== 设备/通道 ====
+{device_brief_json}
+
+==== 当前屏幕 screen_size ====
+width={width}, height={height}
+
+==== 可用能力 capability_menu ====
+{menu_json}
+
+==== 已执行动作历史（最近在后）====
+{history_block}
+{baseline_hint_block}{hierarchy_block}
+请看【下方截图】决定下一步一个动作，只返回一个 JSON 对象。"""
+
+
+def build_agent_decide_messages(
+    *,
+    goal: str,
+    checkpoints_block: str,
+    device_brief: dict[str, Any],
+    menu: list[dict[str, Any]],
+    history_block: str,
+    width: int,
+    height: int,
+    image_base64: str,
+    image_mime: str = "image/png",
+    hierarchy_text: str = "",
+    baseline_hint: str = "",
+    target_package: str = "",
+    target_app_name: str = "",
+    success_criteria: str = "",
+) -> list[dict[str, Any]]:
+    hierarchy_block = ""
+    if hierarchy_text and hierarchy_text.strip():
+        hierarchy_block = (
+            "\n==== 可点元素（adb UI 层级摘要，辅助定位）====\n"
+            f"{hierarchy_text.strip()[:4000]}\n"
+        )
+    baseline_hint_block = ""
+    if baseline_hint and baseline_hint.strip():
+        baseline_hint_block = (
+            "\n==== 上次成功路径（仅供参考，不是脚本；以当前真实屏幕为准）====\n"
+            f"{baseline_hint.strip()[:1500]}\n"
+        )
+    user_text = AGENT_DECIDE_USER_TEMPLATE.format(
+        goal=(goal or "").strip() or "（未提供目标）",
+        success_criteria=(success_criteria or "").strip() or "（未提供，凭目标自行判断）",
+        target_app=(f"{target_app_name}（{target_package}）" if target_package else "（未指定，谨慎启动应用）"),
+        checkpoints_block=checkpoints_block or "（无）",
+        device_brief_json=json.dumps(device_brief, ensure_ascii=False, indent=2, default=str),
+        width=width,
+        height=height,
+        menu_json=json.dumps(menu, ensure_ascii=False, indent=2, default=str),
+        history_block=history_block or "（这是第一步）",
+        baseline_hint_block=baseline_hint_block,
+        hierarchy_block=hierarchy_block,
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+    if image_base64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
+        })
+    return [
+        {"role": "system", "content": AGENT_DECIDE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
