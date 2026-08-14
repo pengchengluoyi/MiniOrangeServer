@@ -67,13 +67,16 @@ def get_run_events(run_id: str) -> dict[str, Any] | None:
 
 
 def make_thumb(png_b64: str, *, width: int = 360, quality: int = 70) -> str:
-    """PNG base64 → 缩略 JPEG base64（不含 data: 前缀）。失败返回空串。"""
+    """PNG/JPEG base64 → 缩略 JPEG base64（不含 data: 前缀）。失败返回空串。"""
     if not png_b64:
         return ""
     try:
         from PIL import Image
 
-        raw = base64.b64decode(png_b64)
+        raw_b64 = png_b64.strip()
+        if raw_b64.startswith("data:") and "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        raw = base64.b64decode(raw_b64)
         img = Image.open(BytesIO(raw)).convert("RGB")
         w, h = img.size
         if w > width:

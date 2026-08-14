@@ -49,6 +49,28 @@ def _snapshot(run_doc: dict[str, Any]) -> dict[str, Any]:
             for k, v in run_doc.items()}
 
 
+def _upsert_case(run_doc: dict[str, Any], entry: dict[str, Any]) -> None:
+    """按 case_id 更新 cases 列表项；不存在则追加。调用方需已持 _LOCK。"""
+    cid = str(entry.get("case_id") or "")
+    rows = run_doc.setdefault("cases", [])
+    for i, row in enumerate(rows):
+        if str(row.get("case_id") or "") == cid:
+            rows[i] = {**row, **entry}
+            return
+    rows.append(entry)
+
+
+def _mark_case_running(run_doc: dict[str, Any], case_id: str, *, name: str = "") -> None:
+    """把某用例标为 running（进入执行）。调用方需已持 _LOCK。"""
+    _upsert_case(run_doc, {
+        "case_id": case_id,
+        "name": name,
+        "status": "running",
+        "report_run_id": f"{run_doc.get('run_id')}::{case_id}",
+        "summary": "执行中",
+    })
+
+
 # ---------- case spec 映射 ----------
 
 
@@ -186,6 +208,18 @@ def run_cases(
     app_name = getattr(app, "name", "") or ""
 
     run_id = f"cr-{uuid.uuid4().hex[:12]}"
+    # 启动即预置全部用例为 pending，前端可立刻展示待执行 / 执行中 / 已完成
+    seeded_cases = [
+        {
+            "case_id": str(c.get("case_id") or "").strip() or f"case-{i}",
+            "name": str(c.get("name") or c.get("title") or "").strip(),
+            "status": "pending",
+            "report_run_id": f"{run_id}::{str(c.get('case_id') or '').strip() or f'case-{i}'}",
+            "summary": "",
+            "elapsed_ms": 0,
+        }
+        for i, c in enumerate(cases)
+    ]
     run_doc: dict[str, Any] = {
         "run_id": run_id,
         "engine": "ai_led",
@@ -207,7 +241,7 @@ def run_cases(
         "status": "running",
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
-        "cases": [],   # per-case 摘要
+        "cases": seeded_cases,
         "error": "",
         "connectivity": {},
     }
@@ -305,6 +339,10 @@ def _execute(
             run_doc["status"] = "failed"
             run_doc["error"] = f"build_run_context: {exc}"
             run_doc["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            for row in run_doc.get("cases") or []:
+                if row.get("status") in ("pending", "running"):
+                    row["status"] = "fail"
+                    row["summary"] = run_doc["error"]
         return
 
     flags = ctx.connectivity_flags
@@ -333,6 +371,10 @@ def _execute(
             run_doc["status"] = "failed"
             run_doc["error"] = msg
             run_doc["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            for row in run_doc.get("cases") or []:
+                if row.get("status") in ("pending", "running"):
+                    row["status"] = "fail"
+                    row["summary"] = msg
         return
 
     router = CapabilityRouter(
@@ -354,11 +396,12 @@ def _execute(
         except Exception as exc:
             SLog.e(TAG, f"to_case_spec failed: {exc}")
             with _LOCK:
-                run_doc["cases"].append({
-                    "case_id": raw_case.get("case_id") or "(unknown)",
+                cid = raw_case.get("case_id") or "(unknown)"
+                _upsert_case(run_doc, {
+                    "case_id": cid,
                     "name": raw_case.get("name") or "",
                     "status": "fail",
-                    "report_run_id": "",
+                    "report_run_id": f"{run_id}::{cid}" if cid != "(unknown)" else "",
                     "summary": f"to_case_spec error: {exc}",
                     "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                 })
@@ -367,6 +410,8 @@ def _execute(
             continue
 
         SLog.i(TAG, f"[{run_id}] >>> running case={spec.case_id} ({spec.name}) sn={sn}")
+        with _LOCK:
+            _mark_case_running(run_doc, spec.case_id, name=spec.name)
 
         raw_pre = str(raw_case.get("precondition") or "").strip()
         app_cache_cleared = False
@@ -387,11 +432,11 @@ def _execute(
                 )
                 if not before_res.get("ok"):
                     with _LOCK:
-                        run_doc["cases"].append({
+                        _upsert_case(run_doc, {
                             "case_id": spec.case_id,
                             "name": spec.name,
                             "status": "fail",
-                            "report_run_id": "",
+                            "report_run_id": f"{run_id}::{spec.case_id}",
                             "summary": before_res.get("msg") or "前置条件不满足",
                             "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                         })
@@ -422,11 +467,11 @@ def _execute(
         except Exception as exc:  # pragma: no cover
             SLog.e(TAG, f"run_case crashed case={spec.case_id}: {exc}")
             with _LOCK:
-                run_doc["cases"].append({
+                _upsert_case(run_doc, {
                     "case_id": spec.case_id,
                     "name": spec.name,
                     "status": "fail",
-                    "report_run_id": "",
+                    "report_run_id": f"{run_id}::{spec.case_id}",
                     "summary": f"run_case crashed: {exc}",
                     "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                 })
@@ -452,7 +497,7 @@ def _execute(
                 "replan_count": report.replan_count,
                 "elapsed_ms": report.elapsed_ms,
             }
-            run_doc["cases"].append(entry)
+            _upsert_case(run_doc, entry)
             run_doc["completed"] += 1
             ostatus = report.overall_status
             if ostatus == "pass":

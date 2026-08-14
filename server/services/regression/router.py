@@ -28,6 +28,7 @@ from script.log import SLog
 from server.services.ai.regression.planner import locate_element
 from server.services.ai.regression.schemas import EventResult, EventStatus, PlanEvent
 from server.services.plugins import registry as plugin_registry
+from server.services.regression.agent_stream import make_thumb
 from server.services.regression.executors import (
     Executor,
     ExecutorContext,
@@ -119,10 +120,13 @@ class CapabilityRouter:
                 return locate_err  # 无图无坐标 → 直接 fail
             prepared_event = self._inject_locate_coords(event, screen, ctx)
             if prepared_event is None:
-                return self._synthetic_fail(
-                    event,
-                    f"router: VLM locate 未能在截图上找到目标 '{(event.params or {}).get('description') or event.label}'",
-                    screenshot_path=screen.image_path if screen else "",
+                return self._with_thumb(
+                    self._synthetic_fail(
+                        event,
+                        f"router: VLM locate 未能在截图上找到目标 '{(event.params or {}).get('description') or event.label}'",
+                        screenshot_path=screen.image_path if screen else "",
+                    ),
+                    screen,
                 )
 
         # 若是纯 VLM 看图事件（assert_visual / wait_screen_ready），也要抓图
@@ -145,10 +149,10 @@ class CapabilityRouter:
             # 把"本次选用的 Implementation"传给 executor（持 prompt_template / expands_to_events 等）
             ctx.selected_impl = self._impl_index.get((prepared_event.capability_id, ex_id))
             result = executor.execute(prepared_event, ctx)
-            last_result = result
+            last_result = self._with_thumb(result, ctx.screen)
             # PASS / BLOCKED / DECLINED 立即返回（DECLINED 也走 fallback）
             if result.status == EventStatus.PASS or result.status == EventStatus.BLOCKED:
-                return result
+                return last_result
             if result.status == EventStatus.DECLINED:
                 # DECLINED = 这个 executor 主动让位，尝试下一个 fallback
                 SLog.i(
@@ -163,6 +167,23 @@ class CapabilityRouter:
             )
         # 全部尝试完仍未 PASS
         return last_result or self._synthetic_fail(event, "router: 所有可用 executor 都拒绝执行")
+
+    @staticmethod
+    def _with_thumb(result: Optional[EventResult], screen) -> Optional[EventResult]:
+        """把当前屏缩略图挂到 EventResult，供前端时间线展示（落库后历史可回放）。"""
+        if result is None:
+            return None
+        if getattr(result, "thumb", None):
+            return result
+        if screen is None or not getattr(screen, "has_image", lambda: False)():
+            return result
+        try:
+            thumb = make_thumb(screen.image_base64)
+            if thumb:
+                return result.model_copy(update={"thumb": thumb})
+        except Exception as e:  # pragma: no cover
+            SLog.d(TAG, f"_with_thumb failed: {e}")
+        return result
 
     # ---------- internal ----------
 

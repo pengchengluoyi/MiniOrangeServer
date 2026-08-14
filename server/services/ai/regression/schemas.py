@@ -257,6 +257,7 @@ class EventResult(BaseModel):
     # 视觉子流程附产物
     vlm_meta: dict[str, Any] = Field(default_factory=dict, description="LOCATE/ASSERT 的细节，含坐标/证据")
     screenshot_path: str = Field("", description="若抓了截图，本地路径")
+    thumb: str = Field("", description="步骤缩略图 JPEG base64（无 data: 前缀），供时间线展示")
 
     # 执行器原始返回（保留 debug 用）
     raw_response: dict[str, Any] = Field(default_factory=dict)

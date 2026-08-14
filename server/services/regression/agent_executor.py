@@ -144,7 +144,8 @@ class AgentExecutor:
 
     def _emit(self, phase: str, *, step: int = 0, thumb: str = "", decision=None,
               result_status: str = "", summary: str = "", overall: str = "",
-              failure_category: str = "", failure_label: str = ""):
+              failure_category: str = "", failure_label: str = "",
+              elapsed_ms: int | None = None, capability_id: str = ""):
         data: dict[str, Any] = {
             "run_id": self.run_id, "case_id": self.case_id, "sn": self.ctx.sn or "",
             "phase": phase, "step": step, "goal": self.goal.goal,
@@ -171,6 +172,10 @@ class AgentExecutor:
             data["failure_category"] = failure_category
         if failure_label:
             data["failure_label"] = failure_label
+        if elapsed_ms is not None:
+            data["elapsed_ms"] = int(elapsed_ms)
+        if capability_id:
+            data["capability_id"] = capability_id
         agent_stream.emit_agent_event(data)
 
     # ---------- 主循环 ----------
@@ -281,11 +286,21 @@ class AgentExecutor:
                 event, run_id=self.run_id, case_id=self.case_id,
                 case_brief=self.case_brief, shared=self.shared,
             )
+            if thumb and not getattr(result, "thumb", None):
+                try:
+                    result = result.model_copy(update={"thumb": thumb})
+                except Exception:
+                    pass
             self.results.append(result)
             self._push_step(step_idx, decision, result_status=str(result.status.value),
                             summary=result.summary or result.error, screen_hash=shot_hash)
-            self._emit("result", step=step_idx, result_status=str(result.status.value),
-                       summary=result.summary or result.error)
+            self._emit(
+                "result",
+                step=step_idx,
+                result_status=str(result.status.value),
+                summary=result.summary or result.error,
+                elapsed_ms=int(getattr(result, "elapsed_ms", 0) or 0),
+            )
             # 有实际动作推进 → 清掉上次的 done 反馈
             self._assert_feedback = ""
 
@@ -315,19 +330,37 @@ class AgentExecutor:
     # ---------- 子过程 ----------
 
     def _assert_goal(self, screen, step_idx: int) -> tuple[bool, str]:
+        t0 = time.time()
+        started_at = _now_iso()
         res = planner.assert_visual(
             expectation=self.goal.success_criteria or self.goal.goal,
             image_base64=screen.image_base64, image_mime=screen.image_mime,
             provider_id=self.provider_id, timeout_sec=self.opts.step_timeout_sec,
         )
+        elapsed_ms = int((time.time() - t0) * 1000)
+        thumb = agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else ""
+        status = EventStatus.PASS if res.passed else EventStatus.FAIL
+        summary = res.evidence or res.ai_reasoning[:120]
         self.results.append(EventResult(
             seq=step_idx, capability_id="assert_goal", event_kind="assert_visual",
-            status=EventStatus.PASS if res.passed else EventStatus.FAIL,
-            executor_used="vlm", summary=res.evidence or res.ai_reasoning[:120],
+            status=status,
+            executor_used="vlm", summary=summary,
             error="" if res.passed else res.ai_reasoning[:240],
-            vlm_meta={"confidence": res.confidence}, started_at=_now_iso(), finished_at=_now_iso(),
+            vlm_meta={"confidence": res.confidence}, thumb=thumb,
+            elapsed_ms=elapsed_ms,
+            started_at=started_at, finished_at=_now_iso(),
         ))
-        SLog.i(TAG, f"[{self.run_id}] 成功断言 passed={res.passed} conf={res.confidence} {res.ai_reasoning[:80]!r}")
+        self._emit(
+            "result",
+            step=step_idx,
+            thumb=thumb,
+            result_status=str(status.value),
+            summary=summary,
+            elapsed_ms=elapsed_ms,
+            capability_id="assert_goal",
+        )
+        SLog.i(TAG, f"[{self.run_id}] 成功断言 passed={res.passed} conf={res.confidence} "
+                    f"elapsed={elapsed_ms}ms {res.ai_reasoning[:80]!r}")
         return res.passed, (res.ai_reasoning or res.evidence or "成功标准未满足")
 
     def _ask_human(self, decision, step_idx: int, shot_hash: str) -> str:
