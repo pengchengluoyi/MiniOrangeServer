@@ -29,6 +29,14 @@ implementations:
       shell: "input swipe {x} {y} {x} {y} 800"
     cost: 4
 
+  - id: vlm_locate_ios_wda_long_press
+    display_name: VLM 定位 + WDA 长按
+    executor: ios_wda
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    cost: 4
+
 ui:
   shown_in_settings: true
   examples: ["长按造物相机图标", "长按消息撤回"]

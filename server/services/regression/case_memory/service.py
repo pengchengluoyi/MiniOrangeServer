@@ -140,6 +140,9 @@ def record_run_finished(
                 db,
                 run_id=report.run_id,
                 case_id=case_id or report.case_id or "",
+                app_id=getattr(run_context, "app_id", "") if run_context else "",
+                batch_id=(getattr(run_context, "batch_id", "") if run_context else "")
+                or repo.split_batch_id(report.run_id),
                 device_signature=device_sig,
                 sn=sn,
                 platform=platform,

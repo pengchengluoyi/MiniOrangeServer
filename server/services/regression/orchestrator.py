@@ -135,6 +135,13 @@ class Orchestrator:
         if (self.run_context.target_package or "").strip():
             shared_kv["target_package"] = self.run_context.target_package.strip()
 
+        if self._task_cancelled():
+            return self._build_report(
+                state, events, results,
+                overall_status="fail",
+                decline_reason="任务已取消",
+            )
+
         if self.plan.mode == "decline":
             return self._build_report(
                 state, events, results,
@@ -151,6 +158,12 @@ class Orchestrator:
 
         i = 0
         while i < len(events):
+            if self._task_cancelled():
+                return self._build_report(
+                    state, events, results,
+                    overall_status="fail",
+                    decline_reason="任务已取消",
+                )
             ev = events[i]
             SLog.i(
                 TAG,
@@ -300,6 +313,14 @@ class Orchestrator:
             remaining_events=remaining,
             baseline=baseline_ctx,
         )
+
+    def _task_cancelled(self) -> bool:
+        try:
+            from server.services.regression.case_runner import is_task_cancelled
+
+            return is_task_cancelled(self.run_id)
+        except Exception:
+            return False
 
     def _compute_overall(self, results: list[EventResult]) -> str:
         if not results:

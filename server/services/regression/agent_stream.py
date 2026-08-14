@@ -105,3 +105,26 @@ def emit_agent_event(data: dict[str, Any]) -> None:
         asyncio.run_coroutine_threadsafe(dm.broadcast_to_observers(payload), loop)
     except Exception as e:  # pragma: no cover
         SLog.d(TAG, f"emit_agent_event failed: {e}")
+
+
+def emit_testing_task(data: dict[str, Any]) -> None:
+    """向前端 observers 广播任务级事件 {type:"testing_task", data:{...}}（fire-and-forget）。
+
+    event ∈ task_created | case_running | case_finished | task_finished | hitl | cancelled。
+    与 agent_step 并列，payload 小、可丢可补——前端订阅它增量刷新任务列表/详情进度，
+    轮询降为兜底。见 docs/prd_testing_platform.md §12.1。
+    """
+    try:
+        import asyncio
+
+        from server.websocket.device_manager import DeviceManager
+
+        dm = DeviceManager()
+        loop = getattr(dm, "loop", None)
+        if loop is None:
+            return
+        payload = {"type": "testing_task", "data": data}
+        asyncio.run_coroutine_threadsafe(dm.broadcast_to_observers(payload), loop)
+    except Exception as e:  # pragma: no cover
+        SLog.d(TAG, f"emit_testing_task failed: {e}")
+

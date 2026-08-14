@@ -1,0 +1,17 @@
+id: ios_wda
+display_name: iOS WebDriverAgent
+description: |
+  通过 usbmuxd（USB）或已配对 Wi‑Fi 连接真机，用 WebDriverAgent 点击/滑动/截图。
+  不走 adb，也不走 ClawNode remote。
+
+available_when: connectivity.ios_wda
+
+provides:
+  - ui_native_input
+  - ui_input_text
+  - ui_screenshot
+  - app_launch_native
+  - app_force_stop
+  - key_event
+
+platforms: [ios]

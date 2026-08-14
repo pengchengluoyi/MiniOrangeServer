@@ -24,6 +24,10 @@ class MCaseRunTrace(Base):
 
     run_id = Column(String(64), primary_key=True, index=True)
     case_id = Column(String(128), index=True, nullable=False)
+    # 任务归属（BE-P0-3）：batch_id = 任务 id（run_id 形如 "{batch_id}::{case_id}"）
+    # 有了这两列，用例历史可以按应用/按任务直接查，前端不必再拿 case_id 集合去猜。
+    app_id = Column(String(64), index=True, default="")
+    batch_id = Column(String(32), index=True, default="")
     device_signature = Column(String(256), index=True, default="")
     sn = Column(String(128), default="")
     platform = Column(String(32), default="android")

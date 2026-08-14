@@ -27,6 +27,13 @@ implementations:
       params: { package: "{package}", activity: "{activity}" }
     cost: 2
 
+  - id: ios_wda_open_app
+    display_name: WDA app_launch
+    executor: ios_wda
+    requires_caps: [app_launch_native]
+    needs_vlm: false
+    cost: 2
+
 ui:
   shown_in_settings: true
   examples: ["打开 造物相机", "打开 com.mathmagic.zaohaowu"]

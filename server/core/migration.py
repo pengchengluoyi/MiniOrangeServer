@@ -27,6 +27,35 @@ def run_auto_migration():
                 SLog.e(TAG, f"Migration failed for {filename}: {e}")
 
 
+def _migrate_case_run_trace(cursor):
+    """m_case_run_trace 增加 app_id / batch_id（BE-P0-3），并回填历史 batch_id。
+
+    run_id 形如 "cr-4d3429901ceb::row-59"，'::' 前半段就是任务 id，所以旧数据
+    也能按任务过滤；app_id 无从反推，留空，只有新跑的 trace 才有值。
+    """
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='m_case_run_trace'")
+    if not cursor.fetchone():
+        return
+
+    cursor.execute("PRAGMA table_info(m_case_run_trace)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+
+    for col_name in ("app_id", "batch_id"):
+        if col_name in existing_cols:
+            continue
+        SLog.i(TAG, f"🛠️ Migrating: Adding column '{col_name}' to table 'm_case_run_trace'")
+        cursor.execute(f"ALTER TABLE m_case_run_trace ADD COLUMN {col_name} TEXT DEFAULT ''")
+        if col_name == "batch_id":
+            cursor.execute(
+                "UPDATE m_case_run_trace "
+                "SET batch_id = substr(run_id, 1, instr(run_id, '::') - 1) "
+                "WHERE instr(run_id, '::') > 1"
+            )
+            SLog.i(TAG, f"   -> Backfilled batch_id for {cursor.rowcount} rows in m_case_run_trace")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS ix_m_case_run_trace_{col_name} "
+                       f"ON m_case_run_trace ({col_name})")
+
+
 def _check_and_migrate(db_path):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -98,6 +127,10 @@ def _check_and_migrate(db_path):
                 ('region_hint', 'TEXT', None),
             ],
         }
+
+        # m_case_run_trace 单独处理：app_id 不能套用下面 'default_app' 的通用兜底，
+        # 且 batch_id 可以从 run_id（"{batch_id}::{case_id}"）反解回填历史数据。
+        _migrate_case_run_trace(cursor)
 
         for table, columns in schema_changes.items():
             # 1. 检查表是否存在

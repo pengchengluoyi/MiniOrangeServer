@@ -16,6 +16,13 @@
         "transport": "usb" | "tcp" | None,
         "serial": str,        # 真实 adb serial（claw-* 设备解析后的）
         "reason": str
+      },
+      "ios": {
+        "state": "connected" | "disconnected" | "not_applicable",
+        "last_probe_at": "2026-06-24T19:00:00",
+        "transport": "usb" | "wifi" | None,
+        "udid": str,
+        "reason": str
       }
     }
 """
@@ -29,6 +36,7 @@ from server.models.mDevice import MDevice
 
 REMOTE_STATES = frozenset({"connected", "disconnected", "auth_failed", "unpaired"})
 ADB_STATES = frozenset({"connected", "disconnected", "unauthorized", "not_applicable"})
+IOS_STATES = frozenset({"connected", "disconnected", "not_applicable"})
 
 DEFAULT_CHANNELS: dict[str, dict[str, Any]] = {
     "remote": {
@@ -42,6 +50,13 @@ DEFAULT_CHANNELS: dict[str, dict[str, Any]] = {
         "last_probe_at": None,
         "transport": None,
         "serial": "",
+        "reason": "",
+    },
+    "ios": {
+        "state": "not_applicable",
+        "last_probe_at": None,
+        "transport": None,
+        "udid": "",
         "reason": "",
     },
 }
@@ -113,17 +128,46 @@ def set_adb_channel(
     return channels
 
 
+def set_ios_channel(
+    device: MDevice,
+    *,
+    state: str,
+    udid: str | None = None,
+    transport: str | None = None,
+    reason: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """更新 channels.ios（usbmuxd USB / Bonjour Wi‑Fi）。"""
+    if state not in IOS_STATES:
+        raise ValueError(f"invalid ios state: {state}")
+    channels = read_channels(device)
+    channels["ios"]["state"] = state
+    channels["ios"]["last_probe_at"] = _now_iso()
+    if udid is not None:
+        channels["ios"]["udid"] = udid
+    if transport is not None:
+        channels["ios"]["transport"] = transport
+    if reason is not None:
+        channels["ios"]["reason"] = reason
+    device.channels = channels
+    return channels
+
+
 def channels_to_brief(channels: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """把 channels 摘要成给前端列表 / Prompt 的精简形式。"""
     remote = channels.get("remote") or {}
     adb = channels.get("adb") or {}
+    ios = channels.get("ios") or {}
     return {
         "remote_state": remote.get("state") or "disconnected",
         "adb_state": adb.get("state") or "not_applicable",
+        "ios_state": ios.get("state") or "not_applicable",
         "remote_last_heartbeat_at": remote.get("last_heartbeat_at"),
         "adb_last_probe_at": adb.get("last_probe_at"),
+        "ios_last_probe_at": ios.get("last_probe_at"),
         "adb_serial": adb.get("serial") or "",
         "adb_transport": adb.get("transport"),
+        "ios_udid": ios.get("udid") or "",
+        "ios_transport": ios.get("transport"),
     }
 
 
@@ -144,7 +188,8 @@ def derive_main_status(
         return "busy"
     remote = (channels.get("remote") or {}).get("state")
     adb = (channels.get("adb") or {}).get("state")
-    if remote == "connected" or adb == "connected" or has_active_ws:
+    ios = (channels.get("ios") or {}).get("state")
+    if remote == "connected" or adb == "connected" or ios == "connected" or has_active_ws:
         return "online"
     if remote == "auth_failed":
         return "error"
@@ -155,14 +200,15 @@ def resolve_control_channel(device: MDevice | None) -> dict[str, Any]:
     """判定一台设备当前应走哪条控制渠道。
 
     统一替换散落各处的 `sn.startswith("claw-")` 硬编码。返回：
-        { "channel": "remote" | "adb" | "none", "adb_serial": str }
+        { "channel": "remote" | "adb" | "ios" | "none", "adb_serial": str }
 
     判定顺序（v3，P0）：
       1. ClawNode 设备（claw-* / android_direct / 已绑定 clawnode_id）→ remote
          —— 保持现状语义，绝不让 claw 设备误走 adb，ClawNode 零回归。
       2. adb 通道 connected 且有 serial → adb
       3. remote 通道 connected → remote
-      4. 否则 → none
+      4. ios 通道 connected → ios（usbmuxd USB / Bonjour Wi‑Fi）
+      5. 否则 → none
     双通道并存时的"优先 adb / 交给大模型"策略见 PRD §6，属 P2，本函数只给安全默认值。
     """
     if device is None:
@@ -185,6 +231,15 @@ def resolve_control_channel(device: MDevice | None) -> dict[str, Any]:
 
     if (channels.get("remote") or {}).get("state") == "connected":
         return {"channel": "remote", "adb_serial": adb_serial}
+
+    ios = channels.get("ios") or {}
+    if ios.get("state") == "connected":
+        return {
+            "channel": "ios",
+            "adb_serial": "",
+            "ios_udid": str(ios.get("udid") or sn),
+            "ios_transport": ios.get("transport") or "",
+        }
 
     return {"channel": "none", "adb_serial": adb_serial}
 

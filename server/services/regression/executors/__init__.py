@@ -15,6 +15,7 @@ from server.services.regression.executors.base import (  # noqa: F401
 )
 from server.services.regression.executors.hitl_executor import HitlExecutor  # noqa: F401
 from server.services.regression.executors.internal_executor import InternalExecutor  # noqa: F401
+from server.services.regression.executors.ios_wda_executor import IosWdaExecutor  # noqa: F401
 from server.services.regression.executors.remote_executor import RemoteExecutor  # noqa: F401
 from server.services.regression.executors.vlm_executor import VlmExecutor  # noqa: F401
 
@@ -28,4 +29,5 @@ def build_default_executors() -> dict[str, Executor]:
         "vlm": VlmExecutor(),
         "hitl": HitlExecutor(),
         "ai_persona": AiPersonaExecutor(),
+        "ios_wda": IosWdaExecutor(),
     }

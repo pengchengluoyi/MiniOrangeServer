@@ -93,6 +93,42 @@ def _capture_via_adb(adb_serial: str, *, timeout_sec: float = 15.0) -> CapturedS
     )
 
 
+def _capture_via_ios_wda(udid: str, *, timeout_sec: float = 30.0) -> CapturedScreen:
+    started = time.time()
+    try:
+        from server.services.runtime.ios_wda_session import get_ios_engine
+
+        engine = get_ios_engine(udid)
+        img = engine.driver.screenshot()
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+    except Exception as e:
+        return CapturedScreen(
+            ok=False,
+            source="ios_wda",
+            error=f"wda screenshot failed: {e}",
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
+    elapsed_ms = int((time.time() - started) * 1000)
+    fd, path = tempfile.mkstemp(prefix=f"screen_ios_{udid[:8]}_", suffix=".png")
+    try:
+        os.write(fd, png_bytes)
+    finally:
+        os.close(fd)
+    width, height = _peek_png_size(png_bytes)
+    return CapturedScreen(
+        ok=True,
+        source="ios_wda",
+        image_path=path,
+        image_base64=base64.b64encode(png_bytes).decode("ascii"),
+        image_mime="image/png",
+        width=width,
+        height=height,
+        elapsed_ms=elapsed_ms,
+    )
+
+
 def _peek_png_size(data: bytes) -> tuple[int, int]:
     """PNG 文件头里取 width/height。失败返回 (0,0)。"""
     try:
@@ -451,6 +487,16 @@ def capture_screen(
             )
             if res.ok:
                 SLog.i(TAG, f"capture via remote sn={ctx.sn} elapsed={res.elapsed_ms}ms size={res.width}x{res.height}")
+                return res
+            last = res
+        elif ch in ("ios_wda", "ios"):
+            if ctx.ios.get("state") != "connected" and str(ctx.platform or "").lower() not in ("ios", "iphone", "ipad"):
+                last = CapturedScreen(ok=False, source="ios_wda", error="ios not connected")
+                continue
+            udid = str(ctx.ios.get("udid") or ctx.sn or "")
+            res = _capture_via_ios_wda(udid, timeout_sec=timeout_sec)
+            if res.ok:
+                SLog.i(TAG, f"capture via ios_wda sn={ctx.sn} elapsed={res.elapsed_ms}ms size={res.width}x{res.height}")
                 return res
             last = res
         else:

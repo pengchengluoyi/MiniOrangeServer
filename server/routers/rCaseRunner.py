@@ -5,32 +5,57 @@
 路径前缀：/case-runner
 
 端点：
-- POST /case-runner/run                            启动 AI-led 回归
-- GET  /case-runner/run/{run_id}                   in-flight run 进度快照
-- GET  /case-runner/runs                           列出最近的内存 runs
-- GET  /case-runner/traces                         m_case_run_trace 列表
+- POST /case-runner/run                            启动 AI-led 回归（落库 + 设备占用 409）
+- GET  /case-runner/tasks                          任务列表（DB 权威 + 内存热覆盖）
+- GET  /case-runner/tasks/summary                  多 app 聚合（运行中条数 / 最近一条）
+- GET  /case-runner/tasks/{task_id}                任务详情（含全量 cases）
+- POST /case-runner/tasks/{task_id}/cancel         取消运行中任务（case 边界）
+- POST /case-runner/tasks/{task_id}/retry-failed   重跑失败用例（新任务）
+- GET  /case-runner/run/{run_id}                   in-flight run 进度快照（过渡保留）
+- GET  /case-runner/runs                           列出最近的内存 runs（过渡保留）
+- GET  /case-runner/traces                         m_case_run_trace 列表（可按 app_id / batch_id）
 - GET  /case-runner/traces/{run_id}                单条 trace 详情
 - GET  /case-runner/baseline/{case_id}             baseline overview + prompt_block
 - POST /case-runner/baseline/promote               手工 promote 指定 run 为 baseline
-- GET  /case-runner/devices                        当前可用设备（在线 + 通道状态）
+- GET  /case-runner/devices                        当前可用设备（在线 + 通道状态 + busy_task_id）
 
 数据源仍来自 feishu_service（飞书表格），但执行链路由 server.services.regression.case_runner 驱动。
+
+响应约定
+========
+本仓库历史响应是 `{"code": 200, "data": ...}`，而测试平台契约
+（docs/prd_testing_platform.md §12.1）写的是 `{"ok": true, "data": ...}`。
+新增的 /tasks* 端点两个字段都给，前端按哪一个判断都成立，老端点不动。
+
+任务 JSON / WS `testing_task` 事件的字段形状见 §0 与 §12.1，实现在
+server/services/regression/task_store.py。设备被占用时 POST /run 返回：
+
+    409 {"detail": {"message": "device busy", "busy_task_id": "cr-xxx", "sn": "..."}}
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from server.core.database import get_db
 from server.models.project import App
 from server.services.regression import case_runner as cr
+from server.services.regression import task_store
 from script.log import SLog
 
 router = APIRouter(prefix="/case-runner", tags=["Case Runner"])
 TAG = "CaseRunnerRouter"
+
+
+def _ok(data: Any, msg: str = "") -> dict[str, Any]:
+    """新端点统一响应：同时满足 code / ok 两套约定。"""
+    out: dict[str, Any] = {"code": 200, "ok": True, "data": data}
+    if msg:
+        out["msg"] = msg
+    return out
 
 
 def _get_app(db: Session, app_id: str) -> App:
@@ -51,6 +76,8 @@ class RunRequest(BaseModel):
     use_cache: bool = True
     # 执行引擎：auto(adb设备→agent, 其余→plan) | agent | plan
     execution_mode: str = "auto"
+    # 触发源：manual | feishu | schedule（定时/飞书走同一个创建函数，只是来源不同）
+    run_type: str = "manual"
 
 
 class PromoteBaselineRequest(BaseModel):
@@ -59,12 +86,34 @@ class PromoteBaselineRequest(BaseModel):
     notes: str = ""
 
 
+class RetryFailedRequest(BaseModel):
+    # 默认沿用原任务的设备；需要换机时显式指定
+    sn: str = ""
+    execution_mode: str = "auto"
+
+
 @router.post("/run")
 def run_cases(body: RunRequest, db: Session = Depends(get_db)):
-    """启动一次 AI-led 回归。"""
+    """启动一次 AI-led 回归。
+
+    同一台设备同时只跑一个任务：若该 sn 已有 running 任务，直接 409 并带上占用的
+    task_id，前端可跳过去看，而不是排在后面互相抢设备。
+    """
     app = _get_app(db, body.app_id)
     if not body.sn:
         raise HTTPException(status_code=400, detail="请选择执行设备")
+
+    busy_task_id = task_store.busy_task_for_sn(body.sn)
+    if busy_task_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "device busy",
+                "busy_task_id": busy_task_id,
+                "sn": body.sn,
+            },
+        )
+
     try:
         snapshot = cr.run_cases(
             app,
@@ -77,11 +126,110 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
             use_persisted_baseline=body.use_persisted_baseline,
             use_cache=body.use_cache,
             execution_mode=(body.execution_mode or "auto").lower(),
+            run_type=(body.run_type or "manual").lower(),
         )
-        return {"code": 200, "msg": "AI-led 回归任务已启动", "data": snapshot}
+        return {"code": 200, "ok": True, "msg": "AI-led 回归任务已启动", "data": snapshot}
     except Exception as e:
         SLog.e(TAG, f"/run failed app={body.app_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- 任务中心（BE-P0-2 / BE-P1-1/2/3） ----------
+
+
+@router.get("/tasks")
+def list_tasks(
+    app_id: str = Query("", description="必填：任务永远属于某个 App"),
+    status: str = Query("", description="queued|running|done|failed|cancelled"),
+    limit: int = 30,
+    offset: int = 0,
+):
+    """任务列表（列表项省略 cases，只带计数）。任务列表的唯一数据源。"""
+    if not app_id:
+        raise HTTPException(status_code=400, detail="app_id is required")
+    data = task_store.list_tasks(
+        app_id, status=(status or "").strip(), limit=max(0, limit), offset=max(0, offset),
+    )
+    return _ok(data)
+
+
+@router.get("/tasks/summary")
+def tasks_summary(app_ids: str = Query("", description="逗号分隔的 app_id")):
+    """多个 app 的运行中条数 / 最近一条任务（应用卡片角标用）。"""
+    ids = [a.strip() for a in (app_ids or "").split(",") if a.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="app_ids is required")
+    return _ok({"items": task_store.summary_for_apps(ids)})
+
+
+@router.get("/tasks/{task_id}")
+def get_task(task_id: str):
+    """任务详情：含全量 cases（len(cases) == total）。running 时内存覆盖 DB。"""
+    task = task_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+    return _ok(task)
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    """取消运行中任务：worker 在下一条 case 开始前退出，剩余 pending → cancelled。"""
+    result = cr.request_cancel(task_id)
+    if not result.get("ok"):
+        code = int(result.get("code") or 400)
+        raise HTTPException(
+            status_code=code if code in (400, 404) else 400,
+            detail=result.get("reason") or "cancel failed",
+        )
+    if result.get("already"):
+        return _ok(result, msg="任务已结束")
+    if result.get("offline"):
+        return _ok(result, msg="已取消")
+    return _ok(result, msg="已请求取消，当前步骤结束后停止")
+
+
+@router.post("/tasks/{task_id}/retry-failed")
+def retry_failed_cases(task_id: str, body: Optional[RetryFailedRequest] = None,
+                       db: Session = Depends(get_db)):
+    """重跑该任务里 fail / blocked / declined 的用例：创建一条新任务并返回新 task_id。"""
+    body = body or RetryFailedRequest()
+    sn = (body.sn or "").strip()
+    if sn:
+        busy_task_id = task_store.busy_task_for_sn(sn)
+        if busy_task_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "device busy", "busy_task_id": busy_task_id, "sn": sn},
+            )
+    try:
+        result = cr.retry_failed(
+            task_id, db=db, sn=sn, execution_mode=(body.execution_mode or "auto").lower(),
+        )
+    except Exception as e:
+        SLog.e(TAG, f"/tasks/{task_id}/retry-failed failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    if not result.get("ok"):
+        code = int(result.get("code") or 400)
+        if code == 409:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "device busy",
+                    "busy_task_id": result.get("busy_task_id") or "",
+                    "sn": result.get("sn") or sn,
+                },
+            )
+        raise HTTPException(status_code=code, detail=result.get("reason") or "retry failed")
+    snapshot = result.get("data") or {}
+    return _ok(
+        {
+            "task_id": snapshot.get("run_id", ""),
+            "retried_from": task_id,
+            "case_ids": result.get("case_ids") or [],
+            "task": snapshot,
+        },
+        msg=f"已重跑 {len(result.get('case_ids') or [])} 条失败用例",
+    )
 
 
 @router.get("/agent/runs")
@@ -111,26 +259,38 @@ def get_run(run_id: str):
 
 
 @router.get("/runs")
-def list_runs(limit: int = 30):
-    """列出最近的内存 runs（重启进程后丢失，只为 UI 列表用）。"""
-    return {"code": 200, "data": {"runs": cr.list_runs(limit=limit)}}
+def list_runs(limit: int = 30, app_id: str = ""):
+    """列出最近的内存 runs（重启进程后丢失）。
+
+    过渡期端点：任务列表请用 GET /tasks（DB 权威、重启不丢）。
+    """
+    return {"code": 200, "ok": True,
+            "data": {"runs": cr.list_runs(limit=limit, app_id=(app_id or "").strip())}}
 
 
 @router.get("/traces")
 def list_traces(
     case_id: Optional[str] = None,
     device_signature: Optional[str] = None,
+    app_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
     only_pass: bool = False,
     limit: int = 20,
 ):
-    """列出持久化在 m_case_run_trace 的 run 摘要。"""
+    """列出持久化在 m_case_run_trace 的 run 摘要。
+
+    app_id / batch_id 是 BE-P0-3 新加的归属过滤：不用再靠「当前 App 的 case_id 集合」
+    去猜哪些用例属于这个应用 / 这次任务。
+    """
     rows = cr.list_recent_traces(
         case_id=case_id,
         device_signature=device_signature,
+        app_id=app_id,
+        batch_id=batch_id,
         only_pass=only_pass,
         limit=limit,
     )
-    return {"code": 200, "data": {"count": len(rows), "items": rows}}
+    return {"code": 200, "ok": True, "data": {"count": len(rows), "items": rows}}
 
 
 @router.get("/traces/{run_id}")
@@ -176,11 +336,15 @@ def promote_baseline(body: PromoteBaselineRequest):
 
 @router.get("/devices")
 def list_devices(only_online: bool = True):
-    """便利端点：返回 MDevice 列表（含 channels），供前端 sn 选择器使用。"""
+    """便利端点：返回 MDevice 列表（含 channels），供前端 sn 选择器使用。
+
+    busy_task_id 非空表示该设备正被这条任务占用，下发前应禁用/提示（同 SN 只跑一个任务）。
+    """
     from server.core.database import SessionLocal
     from server.models.mDevice import MDevice
     from server.services.runtime.channels import channels_to_brief
 
+    busy = task_store.busy_map()
     items = []
     try:
         with SessionLocal() as db:
@@ -197,7 +361,8 @@ def list_devices(only_online: bool = True):
                     "role": d.role or "",
                     "status": d.status or "offline",
                     "channels": channels_to_brief(d.channels or {}),
+                    "busy_task_id": busy.get(d.sn, ""),
                 })
     except Exception as e:
         SLog.w(TAG, f"/devices failed: {e}")
-    return {"code": 200, "data": {"count": len(items), "items": items}}
+    return {"code": 200, "ok": True, "data": {"count": len(items), "items": items}}

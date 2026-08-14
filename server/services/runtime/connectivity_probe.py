@@ -65,6 +65,51 @@ def probe_remote(sn: str) -> ProbeResult:
     return "disconnected", {"reason": "no active ws"}
 
 
+# ====== iOS (usbmuxd / WDA) ======
+
+
+def probe_ios(sn: str) -> ProbeResult:
+    """iOS 是否可作为执行目标：USB 在 usbmuxd 上，或发现器已标记 ios_nodes。
+
+    不要求 WDA 此刻已起来（首次动作时再拉起），避免把插着的真机判成 offline。
+    """
+    if not sn:
+        return "disconnected", {"reason": "no sn"}
+    try:
+        from server.websocket.device_manager import DeviceManager
+
+        manager = DeviceManager()
+        if sn in getattr(manager, "ios_nodes", set()):
+            return "connected", {"source": "ios_nodes"}
+    except Exception as e:
+        SLog.d(TAG, f"ios_nodes read failed: {e}")
+    try:
+        from server.services.runtime.ios_usbmux import list_usb_ios_devices
+
+        for item in list_usb_ios_devices():
+            if str(item.get("udid") or "") == str(sn):
+                return "connected", {"source": "usbmuxd", "transport": "usb"}
+    except Exception as e:
+        SLog.d(TAG, f"usbmux probe failed: {e}")
+    try:
+        from server.core.database import SessionLocal
+        from server.models.mDevice import MDevice
+        from server.services.runtime.channels import read_channels
+
+        with SessionLocal() as db:
+            dev = db.query(MDevice).filter(MDevice.sn == sn).first()
+            if dev:
+                ios = (read_channels(dev).get("ios") or {})
+                if ios.get("state") == "connected":
+                    return "connected", {
+                        "source": "m_device",
+                        "transport": ios.get("transport") or "",
+                    }
+    except Exception as e:
+        SLog.d(TAG, f"m_device ios channel probe failed: {e}")
+    return "disconnected", {"reason": "not present on usbmuxd / ios discovery"}
+
+
 # ====== ADB ======
 
 

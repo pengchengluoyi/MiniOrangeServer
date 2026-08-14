@@ -28,6 +28,10 @@ from server.services.regression.hitl.schemas import HitlPending, HitlReply, Hitl
 TAG = "HitlSession"
 
 
+def _run_belongs_to_task(run_id: str, task_id: str) -> bool:
+    return run_id == task_id or run_id.startswith(f"{task_id}::")
+
+
 @dataclass
 class _Session:
     request: HitlRequest
@@ -131,6 +135,23 @@ class HitlSessionManager:
             if self.revoke(rid, reason=reason):
                 count += 1
         return count
+
+    def revoke_for_task(self, task_id: str, reason: str = "task_cancelled") -> list[str]:
+        """撤销属于某任务的 HITL（run_id 为 task_id 或 task_id::case_id）。"""
+        prefix = str(task_id or "").strip()
+        if not prefix:
+            return []
+        with self._lock:
+            ids = [
+                s.request.request_id
+                for s in self._sessions.values()
+                if _run_belongs_to_task(str(s.request.run_id or ""), prefix)
+            ]
+        revoked: list[str] = []
+        for rid in ids:
+            if self.revoke(rid, reason=reason):
+                revoked.append(rid)
+        return revoked
 
     # ---------- 查询 ----------
 

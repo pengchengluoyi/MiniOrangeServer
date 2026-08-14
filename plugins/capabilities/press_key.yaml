@@ -27,6 +27,13 @@ implementations:
       params: { keyevent: "{key}" }
     cost: 2
 
+  - id: ios_wda_press
+    display_name: WDA press
+    executor: ios_wda
+    requires_caps: [key_event]
+    needs_vlm: false
+    cost: 2
+
 ui:
   shown_in_settings: true
   examples: ["返回", "Home"]

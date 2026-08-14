@@ -163,6 +163,17 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     LogBase.metadata.create_all(bind=log_engine)
 
+    # 上次进程遗留的 running 任务收尾：worker 只活在内存里，进程一死就没人更新这些行，
+    # 不收尾则任务列表永远「运行中」、设备也一直显示被占用。
+    try:
+        from server.core.database import SessionLocal
+        from server.services.app_automation_service import reconcile_stale_runs
+
+        with SessionLocal() as db:
+            reconcile_stale_runs(db)
+    except Exception as e:
+        SLog.w(TAG, f"reconcile_stale_runs failed: {e}")
+
     # 配置代理绕过
     configure_proxy_bypass()
 
@@ -178,6 +189,10 @@ async def lifespan(app: FastAPI):
     # [ADB] 启动 adb (USB/TCP) 设备发现器，与 ClawNode 心跳监控并列，互不干扰
     from server.services.runtime.adb_discovery import run_adb_discovery
     asyncio.create_task(run_adb_discovery())
+
+    # [iOS] usbmuxd USB + Bonjour Wi‑Fi，同样无独立 WS
+    from server.services.runtime.ios_discovery import run_ios_discovery
+    asyncio.create_task(run_ios_discovery())
 
     from server.core.scheduler import SchedulerService
     SchedulerService().start()
@@ -317,7 +332,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.102",
+        "version": "0.0.103",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

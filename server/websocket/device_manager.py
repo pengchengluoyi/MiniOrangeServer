@@ -72,6 +72,9 @@ class DeviceManager:
     # 其在线/离线不走 WS 心跳，故 monitor_heartbeats 需跳过它们（否则会误判离线）。
     adb_nodes: set = set()
 
+    # [iOS] 经 usbmuxd / Bonjour 发现、无独立 WS 的设备。同样由发现器管在线态。
+    ios_nodes: set = set()
+
     # [ClawNode] 主 event loop 引用，供 RemoteEngine 从 worker 线程 run_coroutine_threadsafe。
     # 在 main.py lifespan 启动时赋值。
     loop = None
@@ -1173,6 +1176,8 @@ class DeviceManager:
                         # [ADB] adb 直连设备无 WS，其在线/离线由 ADB 发现器管理，此处跳过避免误判
                         if sn in getattr(self, "adb_nodes", set()):
                             continue
+                        if sn in getattr(self, "ios_nodes", set()):
+                            continue
                         ws = self.active_connections.get(sn)
                         if ws is not None:
                             # 连接仍在：刷新 DB 在线时间，避免仅 mDNS 可达时被误判
@@ -1506,6 +1511,107 @@ class DeviceManager:
             _with_db_retry(_write)
         except Exception as e:
             SLog.e("DeviceManager", f"mark_adb_offline db error {serial}: {e}")
+
+    def register_ios_device(
+        self,
+        udid: str,
+        *,
+        transport: str = "usb",
+        state: str = "connected",
+        model: str = "",
+        os_version: str = "",
+        ip_address: str = "",
+        reason: str = "",
+    ) -> bool:
+        """注册/更新一台 iOS 设备（连接句柄 sn=UDID）。无独立 WS，在线态由 iOS 发现器维护。"""
+        from server.services.device_service import is_valid_sn
+        from server.services.runtime.channels import set_ios_channel, read_channels, derive_main_status
+        from server.services.runtime.device_identity import compute_fingerprint
+
+        if not is_valid_sn(udid):
+            SLog.d("DeviceManager", f"skip invalid ios udid={udid!r}")
+            return False
+
+        fingerprint_id = compute_fingerprint("ios", udid)
+
+        def _write():
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == udid).first()
+                if not device:
+                    device = MDevice(sn=udid, device_type="ios")
+                    db.add(device)
+                owned = str(device.device_type or "").lower()
+                if owned in ("android_direct", "pc", "mac") or str(udid).startswith("claw-"):
+                    SLog.d("DeviceManager", f"skip ios register, sn owned by {owned or 'claw'}: {udid}")
+                    return False
+                device.device_type = "ios"
+                if not device.role:
+                    device.role = "node"
+                incoming = str(model or "").strip()
+                generic = incoming.lower() in {"ios", "iphone", "ipad", "device", "ios device", "apple"}
+                cur = str(device.model or "").strip()
+                if incoming and not generic:
+                    device.model = incoming
+                elif cur.lower() in {"ios", "iphone", "ipad", "device", "ios device", "apple"}:
+                    device.model = ""
+                if os_version:
+                    device.os_version = os_version
+                if ip_address:
+                    device.ip_address = ip_address
+                device.hw_uid = udid
+                device.fingerprint_id = fingerprint_id
+                set_ios_channel(
+                    device,
+                    state=state,
+                    udid=udid,
+                    transport=transport,
+                    reason=reason,
+                )
+                has_ws = udid in getattr(self, "active_connections", {})
+                device.status = derive_main_status(
+                    read_channels(device), has_active_ws=has_ws
+                )
+                if device.status == "online":
+                    device.last_online_time = datetime.now().replace(microsecond=0)
+                db.commit()
+                return True
+
+        try:
+            ok = _with_db_retry(_write)
+        except Exception as e:
+            SLog.e("DeviceManager", f"register_ios_device db error {udid}: {e}")
+            return False
+
+        if not ok:
+            return False
+        if state == "connected":
+            self.ios_nodes.add(udid)
+        else:
+            self.ios_nodes.discard(udid)
+        return True
+
+    def mark_ios_offline(self, udid: str) -> None:
+        """iOS 设备从 usbmuxd/Bonjour 消失。"""
+        from server.services.runtime.channels import set_ios_channel, read_channels, derive_main_status
+
+        self.ios_nodes.discard(udid)
+
+        def _write():
+            with SessionLocal() as db:
+                device = db.query(MDevice).filter(MDevice.sn == udid).first()
+                if not device:
+                    return
+                set_ios_channel(device, state="disconnected", udid=udid, reason="ios device gone")
+                has_ws = udid in getattr(self, "active_connections", {})
+                device.status = derive_main_status(
+                    read_channels(device), has_active_ws=has_ws
+                )
+                db.commit()
+
+        try:
+            _with_db_retry(_write)
+        except Exception as e:
+            SLog.e("DeviceManager", f"mark_ios_offline db error {udid}: {e}")
 
     def _save_log(self, sn: str, direction: str, msg_type: str, content: str):
         try:

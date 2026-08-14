@@ -192,6 +192,11 @@ class AgentExecutor:
         self._emit("start")
 
         for step_idx in range(1, self.opts.max_steps + 1):
+            if self._task_cancelled():
+                overall = "fail"
+                decline_reason = "任务已取消"
+                failure_category = "execution_error"
+                break
             screen = capture_screen(
                 self.ctx, prefer=self.router.capture_prefer,
                 timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
@@ -422,6 +427,14 @@ class AgentExecutor:
         ))
         self.steps.append(_Step(idx=idx, capability_id=cap, status=str(status.value),
                                 summary=summary, screen_hash=screen_hash))
+
+    def _task_cancelled(self) -> bool:
+        try:
+            from server.services.regression.case_runner import is_task_cancelled
+
+            return is_task_cancelled(self.run_id)
+        except Exception:
+            return False
 
     def _is_oscillating(self) -> bool:
         w = self.opts.oscillation_window

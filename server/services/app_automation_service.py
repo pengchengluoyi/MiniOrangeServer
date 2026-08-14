@@ -1368,21 +1368,35 @@ def persist_run_start(
     platform: str,
     total: int,
     run_type: str = "feishu",
+    run_doc: Optional[Dict[str, Any]] = None,
 ) -> AppRegressionRun:
-    row = AppRegressionRun(
-        run_id=run_id,
-        app_id=app_id,
-        run_type=run_type,
-        sn=sn,
-        platform=platform,
-        status="running",
-        total=float(total),
-        passed=0,
-        failed=0,
-        payload={"cases": []},
-        started_at=datetime.now(),
-    )
-    db.add(row)
+    """创建任务行；run_id 已存在则复用（进程重启 / 重复 persist 不炸）。"""
+    row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_id).first()
+    payload = _json_safe(run_doc) if isinstance(run_doc, dict) else {"cases": []}
+    if row is None:
+        row = AppRegressionRun(
+            run_id=run_id,
+            app_id=app_id,
+            run_type=run_type,
+            sn=sn,
+            platform=platform,
+            status=(run_doc or {}).get("status") or "running",
+            total=float((run_doc or {}).get("total") or total),
+            passed=float((run_doc or {}).get("passed") or 0),
+            failed=float((run_doc or {}).get("failed") or 0),
+            payload=payload,
+            started_at=datetime.now(),
+        )
+        db.add(row)
+    else:
+        row.app_id = app_id or row.app_id
+        row.sn = sn or row.sn
+        row.platform = platform or row.platform
+        row.run_type = run_type or row.run_type
+        if run_doc:
+            _apply_run_doc(row, run_doc, default_status=row.status or "running")
+        elif not row.payload:
+            row.payload = payload
     db.commit()
     db.refresh(row)
     return row
@@ -1408,15 +1422,37 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _apply_run_doc(row: AppRegressionRun, run_doc: Dict[str, Any], *, default_status: str) -> None:
+    """把 run_doc 同步到任务行。
+
+    列只存查询/排序要用的字段（status/total/passed/failed），其余计数
+    （completed / blocked / declined / error / cases[]）随 payload JSON 落库，
+    由 task_store.to_task_json 还原成任务 JSON——避免为每个新计数 ALTER 表。
+    """
+    row.status = run_doc.get("status") or default_status
+    if run_doc.get("total") is not None:
+        row.total = float(run_doc.get("total") or 0)
+    row.passed = float(run_doc.get("passed") or 0)
+    row.failed = float(run_doc.get("failed") or 0)
+    row.payload = _json_safe(run_doc)
+
+
 def persist_run_progress(db: Session, run_doc: Dict[str, Any]) -> None:
     """执行过程中增量写入，供前端轮询展示进度与回放。"""
     row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_doc.get("run_id")).first()
     if not row:
+        persist_run_start(
+            db,
+            run_id=str(run_doc.get("run_id") or ""),
+            app_id=str(run_doc.get("app_id") or ""),
+            sn=str(run_doc.get("sn") or ""),
+            platform=str(run_doc.get("platform") or "android"),
+            total=int(run_doc.get("total") or 0),
+            run_type=str(run_doc.get("run_type") or "manual"),
+            run_doc=run_doc,
+        )
         return
-    row.status = run_doc.get("status") or "running"
-    row.passed = float(run_doc.get("passed") or 0)
-    row.failed = float(run_doc.get("failed") or 0)
-    row.payload = _json_safe(run_doc)
+    _apply_run_doc(row, run_doc, default_status="running")
     db.commit()
 
 
@@ -1424,23 +1460,63 @@ def persist_run_pause(db: Session, run_doc: Dict[str, Any]) -> None:
     row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_doc.get("run_id")).first()
     if not row:
         return
-    row.status = run_doc.get("status") or "awaiting_clarification"
-    row.passed = float(run_doc.get("passed") or 0)
-    row.failed = float(run_doc.get("failed") or 0)
-    row.payload = _json_safe(run_doc)
+    _apply_run_doc(row, run_doc, default_status="awaiting_clarification")
     db.commit()
 
 
 def persist_run_finish(db: Session, run_doc: Dict[str, Any]) -> None:
     row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_doc.get("run_id")).first()
     if not row:
-        return
-    row.status = run_doc.get("status") or "done"
-    row.passed = float(run_doc.get("passed") or 0)
-    row.failed = float(run_doc.get("failed") or 0)
-    row.payload = _json_safe(run_doc)
+        persist_run_start(
+            db,
+            run_id=str(run_doc.get("run_id") or ""),
+            app_id=str(run_doc.get("app_id") or ""),
+            sn=str(run_doc.get("sn") or ""),
+            platform=str(run_doc.get("platform") or "android"),
+            total=int(run_doc.get("total") or 0),
+            run_type=str(run_doc.get("run_type") or "manual"),
+            run_doc=run_doc,
+        )
+        row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == run_doc.get("run_id")).first()
+        if not row:
+            return
+    _apply_run_doc(row, run_doc, default_status="done")
     row.finished_at = datetime.now()
     db.commit()
+
+
+def reconcile_stale_runs(db: Session) -> int:
+    """启动时收尾上次进程遗留的 running 任务。
+
+    任务的 worker 只活在进程内存里，进程一死就不会有人再更新这些行。若不收尾，
+    列表会永远显示「运行中」，且 BE-P0-5 的设备占用判断也会被误导。这里把它们
+    标 failed，并把未跑完的用例标 cancelled（区别于真正跑失败的 fail）。
+    """
+    rows = (
+        db.query(AppRegressionRun)
+        .filter(AppRegressionRun.status.in_(["running", "queued"]))
+        .all()
+    )
+    if not rows:
+        return 0
+    reason = "服务重启，任务已中断"
+    for row in rows:
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        cases = [dict(c) for c in (payload.get("cases") or []) if isinstance(c, dict)]
+        for case in cases:
+            if str(case.get("status") or "") in ("pending", "running"):
+                case["status"] = "cancelled"
+                case["summary"] = case.get("summary") or reason
+        payload["cases"] = cases
+        payload["status"] = "failed"
+        payload["error"] = payload.get("error") or reason
+        payload["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        row.payload = _json_safe(payload)
+        row.status = "failed"
+        row.finished_at = row.finished_at or datetime.now()
+    db.commit()
+    SLog.w(TAG, f"reconcile_stale_runs: {len(rows)} 条遗留 running 任务标记为 failed")
+    return len(rows)
 
 
 def get_run_from_db(db: Session, run_id: str) -> Optional[Dict[str, Any]]:

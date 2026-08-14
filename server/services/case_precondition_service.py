@@ -69,6 +69,12 @@ def _classify_line(line: str) -> Tuple[str, str]:
 
 
 def _mobile_engine(sn: str, platform: str):
+    plat = (platform or "android").lower()
+    if plat in ("ios", "iphone", "ipad"):
+        from server.services.runtime.ios_wda_session import get_ios_engine
+
+        return get_ios_engine(str(sn))
+
     import builtins
 
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
@@ -76,6 +82,10 @@ def _mobile_engine(sn: str, platform: str):
     builtins.TARGET_DEVICE_SN = str(sn)
     engine, _ = bootstrap_mobile_engine(str(sn), platform)
     return engine
+
+
+def _is_ios_engine(engine) -> bool:
+    return type(engine).__name__ == "IOSEngine" if engine is not None else False
 
 
 def _read_sim_phone_number(engine) -> str:
@@ -160,6 +170,16 @@ def _check_sim(engine) -> Tuple[bool, str, Dict[str, Any]]:
 
 
 def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
+    if _is_ios_engine(engine):
+        bundle = "com.tencent.xin"
+        try:
+            st = int(engine.driver.app_state(bundle))
+        except Exception as e:
+            return False, f"无法探测微信安装状态: {e}"
+        installed = st != 0
+        if must_exist:
+            return (True, "已安装微信") if installed else (False, "未安装微信，不满足前置条件")
+        return (True, "未安装微信") if not installed else (False, "已安装微信，与「未装微信」前置不符")
     out = (engine.shell(f"pm path {WECHAT_PKG}") or "").strip()
     installed = "package:" in out
     if must_exist:
@@ -170,6 +190,13 @@ def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
 def _clear_app_data(engine, package: str) -> Tuple[bool, str]:
     if not package:
         return False, "未配置应用包名，无法清除缓存"
+    if _is_ios_engine(engine):
+        try:
+            if hasattr(engine.driver, "app_terminate"):
+                engine.driver.app_terminate(package)
+            return True, f"iOS 已结束应用进程（{package}）；系统不提供等价于 pm clear 的清缓存"
+        except Exception as e:
+            return False, f"iOS 结束应用失败: {e}"
     from server.services.shared.clawnode_engine import is_clawnode_remote_engine
 
     if is_clawnode_remote_engine(engine):
@@ -215,6 +242,8 @@ def _main_tab_bar_logged_in(blob: str) -> bool:
 
 def _has_persisted_login_session(engine, package: str) -> Tuple[bool, str]:
     """通过应用本地存储启发式判断是否存在登录会话（不读取敏感内容）。"""
+    if _is_ios_engine(engine):
+        return False, ""
     pkg = (package or "").strip()
     if not pkg:
         return False, ""
@@ -298,8 +327,12 @@ def _run_one(
         if kind == "clear_cache":
             ok, msg = _clear_app_data(engine, package)
         elif kind == "check_sim":
-            ok, msg, sim_meta = _check_sim(engine)
-            entry.update(sim_meta)
+            if _is_ios_engine(engine):
+                ok, msg = True, "iOS 无法用 adb 读取 SIM，已跳过"
+                entry["skipped"] = True
+            else:
+                ok, msg, sim_meta = _check_sim(engine)
+                entry.update(sim_meta)
         elif kind == "check_wechat":
             ok, msg = _check_wechat(engine, must_exist=True)
         elif kind == "check_no_wechat":
@@ -381,36 +414,27 @@ def run_preconditions(
     if not tasks:
         return {"ok": True, "items": [], "msg": ""}
 
-    if platform != "android" and phase == "before_launch":
-        non_platform = [k for k, _ in tasks if k not in ("check_ios_device", "check_android_device", "unknown")]
-        if non_platform:
-            return {
-                "ok": False,
-                "items": [
-                    {
-                        "text": precondition_raw,
-                        "kind": "platform",
-                        "ok": False,
-                        "msg": f"前置检查 {non_platform} 暂仅支持 Android 设备",
-                    }
-                ],
-                "msg": "前置条件需要 Android 设备执行",
-            }
+    plat = (platform or "android").lower()
+    ios = plat in ("ios", "iphone", "ipad")
 
     engine = None
     items: List[Dict[str, Any]] = []
     try:
-        if platform == "android":
+        needs_engine = any(
+            k not in ("check_ios_device", "check_android_device", "unknown")
+            for k, _ in tasks
+        )
+        if needs_engine:
             engine = _mobile_engine(sn, platform)
         for kind, line in tasks:
-            if kind != "check_ios_device" and kind != "check_android_device" and engine is None:
+            if kind not in ("check_ios_device", "check_android_device", "unknown") and engine is None:
                 items.append(
                     _stamp_precondition_item(
                         {
                             "text": line,
                             "kind": kind,
                             "ok": False,
-                            "msg": "需要 Android 设备执行该检查",
+                            "msg": f"无法初始化{(' iOS' if ios else ' Android')}执行引擎，前置检查未执行",
                         }
                     )
                 )

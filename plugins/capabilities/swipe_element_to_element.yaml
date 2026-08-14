@@ -34,5 +34,13 @@ implementations:
       shell: "input swipe {start_x} {start_y} {end_x} {end_y} 500"
     cost: 6
 
+  - id: vlm_locate_ios_wda_drag
+    display_name: VLM 定位 + WDA swipe
+    executor: ios_wda
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    cost: 6
+
 ui:
   shown_in_settings: true

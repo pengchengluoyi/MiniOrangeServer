@@ -29,6 +29,13 @@ implementations:
       shell: "input swipe {x1} {y1} {x2} {y2} {duration_ms}"
     cost: 3
 
+  - id: ios_wda_swipe
+    display_name: WDA swipe
+    executor: ios_wda
+    requires_caps: [ui_native_input]
+    needs_vlm: false
+    cost: 3
+
 ui:
   shown_in_settings: true
   examples: ["上滑", "下拉刷新"]

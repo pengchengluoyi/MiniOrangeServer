@@ -307,6 +307,31 @@ def bootstrap_mobile_engine(
     初始化 Manager + MobileEngine，返回 (engine, (width, height))。
     同一设备在回归批次内会复用引擎实例，避免重复 bootstrap。
     """
+    plat = (platform or "android").lower()
+    if plat in ("ios", "iphone", "ipad"):
+        from server.services.runtime.ios_wda_session import get_ios_engine
+
+        mobile_sn = str(node_sn or "")
+        builtins.TARGET_DEVICE_SN = mobile_sn
+        memory_manager.short_term.set_global("platform", "ios")
+        memory_manager.short_term.set_global("run_device_sn", mobile_sn)
+        if reuse:
+            cached = _try_reuse_engine(mobile_sn, "ios")
+            if cached:
+                return cached
+        engine = get_ios_engine(mobile_sn)
+        try:
+            sz = engine.driver.window_size()
+            w = int(getattr(sz, "width", None) or sz[0])
+            h = int(getattr(sz, "height", None) or sz[1])
+        except Exception:
+            w, h = 390, 844
+        size = (w, h)
+        SLog.i(TAG, f"iOS WDA engine ready sn={mobile_sn} screen={w}x{h}")
+        if reuse:
+            _cache_engine(mobile_sn, "ios", engine, size)
+        return engine, size
+
     mobile_sn = ensure_adb_device_online(node_sn, platform, wait=True, wait_timeout=8.0)
     if reuse:
         cached = _try_reuse_engine(mobile_sn, platform)

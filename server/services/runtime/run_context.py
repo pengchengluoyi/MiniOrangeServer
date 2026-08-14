@@ -33,6 +33,10 @@ class RunContext:
     platform: str = "android"
     run_id: str = ""
 
+    # 任务归属（BE-P0-3）：落到 trace.run_context / trace 列，供按应用/任务查询用例历史
+    app_id: str = ""
+    batch_id: str = ""
+
     # 设备元信息（来自 MDevice）
     device_type: str = ""
     model: str = ""
@@ -45,6 +49,7 @@ class RunContext:
     adb: dict[str, Any] = field(default_factory=dict)
     vlm: dict[str, Any] = field(default_factory=dict)
     hitl: dict[str, Any] = field(default_factory=dict)
+    ios: dict[str, Any] = field(default_factory=dict)
 
     # AI provider hints
     provider_id: str = ""
@@ -78,12 +83,10 @@ class RunContext:
             "remote": (self.remote.get("state") == "connected"),
             "vlm": (self.vlm.get("state") == "available"),
             "hitl": (self.hitl.get("state") == "available"),
-            # 占位 for future executors — 全部 False，避免把未实现能力交给 AI
+            "ios_wda": (self.ios.get("state") == "connected"),
             "web_cdp": False,
             "pc_winapi": False,
             "mac_apple_script": False,
-            "ios_wda": False,
-            # ai_persona 不依赖通道，靠 LLM 自身能力
             "ai_persona": (self.vlm.get("state") == "available"),
         }
 
@@ -98,10 +101,16 @@ class RunContext:
         flags = self.connectivity_flags
         adb_on = flags["adb"]
         remote_on = flags["remote"]
+        ios_on = flags.get("ios_wda", False)
         vlm_on = flags["vlm"]
         hitl_on = flags["hitl"]
 
-        if adb_on and remote_on:
+        if ios_on and not adb_on and not remote_on:
+            advice = (
+                "ios_wda=true：走 WebDriverAgent（USB/usbmuxd 或已配对 Wi‑Fi）；"
+                "不要规划 adb / ClawNode remote 事件。"
+            )
+        elif adb_on and remote_on:
             advice = (
                 "adb=true & remote=true：所有路径都可选；"
                 "系统级（install_apk/system_pkg_clear/read_device_data）优先选 adb，"
@@ -117,9 +126,11 @@ class RunContext:
                 "adb=false & remote=true：仅 remote 可用；"
                 "清缓存 / 装包 / 强停因 Android 权限限制需通过 PERSONA 拟人化点击。"
             )
+        elif ios_on:
+            advice = "ios_wda=true：使用 WDA 点击/滑动/截图。"
         else:
             advice = (
-                "adb=false & remote=false：无可用执行通道，"
+                "adb=false & remote=false & ios_wda=false：无可用执行通道，"
                 "PLAN 应直接 decline 并给出 reasoning，不要凭空规划事件。"
             )
 
@@ -146,12 +157,14 @@ class RunContext:
             "channels": {
                 "adb": self.adb.get("state"),
                 "remote": self.remote.get("state"),
+                "ios": self.ios.get("state"),
                 "vlm": self.vlm.get("state"),
                 "hitl": self.hitl.get("state"),
             },
             "flags": {
                 "adb": adb_on,
                 "remote": remote_on,
+                "ios_wda": ios_on,
                 "vlm": vlm_on,
                 "hitl": hitl_on,
             },
@@ -164,6 +177,8 @@ class RunContext:
         return {
             "sn": self.sn,
             "run_id": self.run_id,
+            "app_id": self.app_id,
+            "batch_id": self.batch_id or self.run_id,
             "platform": self.platform,
             "device": {
                 "device_type": self.device_type,
@@ -176,6 +191,7 @@ class RunContext:
             "channels": {
                 "remote": self.remote,
                 "adb": self.adb,
+                "ios": self.ios,
                 "vlm": self.vlm,
                 "hitl": self.hitl,
             },
@@ -190,14 +206,22 @@ class RunContext:
 # ============== builder ==============
 
 
-def _resolve_adb_serial(sn: str, platform: str) -> str:
-    """把 sn 解析为可用的 adb serial。
+def _is_ios_target(sn: str, platform: str = "", device_type: str = "") -> bool:
+    plat = f"{platform} {device_type}".lower()
+    if "ios" in plat or "iphone" in plat or "ipad" in plat:
+        return True
+    try:
+        from server.services.runtime.ios_ids import is_physical_ios_udid
+        return is_physical_ios_udid(sn)
+    except Exception:
+        return False
 
-    - 已经是 adb serial（不是 claw-*）→ 原样返回
-    - claw-* → 尝试通过 driver 的 resolve_mobile_serial 映射
-    - 失败 → ""
-    """
+
+def _resolve_adb_serial(sn: str, platform: str, device_type: str = "") -> str:
+    """把 sn 解析为可用的 adb serial。iOS UDID 不能当 adb serial。"""
     if not sn:
+        return ""
+    if _is_ios_target(sn, platform, device_type):
         return ""
     if not str(sn).startswith("claw-"):
         return str(sn)
@@ -230,6 +254,7 @@ def _load_device_meta(sn: str) -> dict[str, Any]:
                 "os_version": dev.os_version or "",
                 "resolution": dev.resolution or "",
                 "role": dev.role or "",
+                "channels": dev.channels or {},
             }
     except Exception as e:
         SLog.w(TAG, f"load MDevice({sn}) failed: {e}")
@@ -241,6 +266,8 @@ def build_run_context(
     *,
     platform: str = "android",
     run_id: str = "",
+    app_id: str = "",
+    batch_id: str = "",
     provider_id: str = "",
     model_name: str = "",
     target_package: str = "",
@@ -257,6 +284,8 @@ def build_run_context(
         sn=sn or "",
         platform=platform or "android",
         run_id=run_id or "",
+        app_id=app_id or "",
+        batch_id=batch_id or run_id or "",
         provider_id=provider_id or "",
         model_name=model_name or "",
         target_package=(target_package or "").strip(),
@@ -277,9 +306,9 @@ def build_run_context(
     else:
         ctx.remote = {"state": "disconnected", "reason": "probe skipped"}
 
-    # 3. ADB（先把 sn 解析成 adb serial）
-    if probe_adb_channel:
-        adb_serial = _resolve_adb_serial(ctx.sn, ctx.platform)
+    # 3. ADB（先把 sn 解析成 adb serial；iOS 不走 adb）
+    if probe_adb_channel and not _is_ios_target(ctx.sn, ctx.platform, ctx.device_type):
+        adb_serial = _resolve_adb_serial(ctx.sn, ctx.platform, ctx.device_type)
         if not adb_serial:
             ctx.adb = {
                 "state": "not_applicable",
@@ -290,7 +319,14 @@ def build_run_context(
             state, meta_a = cp.probe_adb(adb_serial)
             ctx.adb = {"state": state, "serial": adb_serial, **meta_a}
     else:
-        ctx.adb = {"state": "not_applicable", "reason": "probe skipped"}
+        ctx.adb = {"state": "not_applicable", "reason": "ios device or probe skipped"}
+
+    # 3b. iOS usbmuxd / WDA
+    if _is_ios_target(ctx.sn, ctx.platform, ctx.device_type):
+        state, meta_i = cp.probe_ios(ctx.sn)
+        ctx.ios = {"state": state, "udid": ctx.sn, **meta_i}
+    else:
+        ctx.ios = {"state": "not_applicable"}
 
     # 4. VLM
     if probe_vlm_channel:
@@ -309,6 +345,6 @@ def build_run_context(
     SLog.i(
         TAG,
         f"RunContext built sn={ctx.sn} adb={ctx.adb.get('state')} remote={ctx.remote.get('state')} "
-        f"vlm={ctx.vlm.get('state')} hitl={ctx.hitl.get('state')}",
+        f"ios={ctx.ios.get('state')} vlm={ctx.vlm.get('state')} hitl={ctx.hitl.get('state')}",
     )
     return ctx

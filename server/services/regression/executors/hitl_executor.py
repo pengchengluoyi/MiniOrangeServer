@@ -41,6 +41,20 @@ from server.services.regression.hitl import (
 TAG = "HitlExecutor"
 
 
+def _mark_task_hitl(run_id: str, waiting: bool, *, question: str = "") -> None:
+    """把「等待人工」这件事同步到任务中心（BE-P0-4 的 hitl 事件）。
+
+    延迟 import：case_runner 不是本执行器的依赖，只是可选的上层观察者；
+    失败一律吞掉，人工介入流程本身不受影响。
+    """
+    try:
+        from server.services.regression import case_runner
+
+        case_runner.mark_case_hitl(run_id or "", waiting, question=question)
+    except Exception as exc:  # pragma: no cover
+        SLog.d(TAG, f"mark_case_hitl failed: {exc}")
+
+
 # capability_id → HITL kind
 _CAP_TO_KIND: dict[str, str] = {
     "human_confirm":          "confirm",
@@ -130,6 +144,9 @@ class HitlExecutor:
         if not pushed:
             SLog.w(TAG, f"hitl {request_id} 推送失败，仍等待人工经 /hitl/pending 主动拉取")
 
+        # 让任务列表 / 用例轨也亮起来，而不是只有一个全局弹窗（PRD §5.6）
+        _mark_task_hitl(ctx.run_id, True, question=composer.title)
+
         # ---- 4) wait ----
         SLog.i(
             TAG,
@@ -137,6 +154,7 @@ class HitlExecutor:
             f"cap={event.capability_id} timeout={timeout_sec}s",
         )
         reply = manager.wait_for_reply(session, timeout_sec=timeout_sec)
+        _mark_task_hitl(ctx.run_id, False)
 
         elapsed_ms = int((time.time() - t0) * 1000)
         composer_meta: dict[str, Any] = {
@@ -152,6 +170,26 @@ class HitlExecutor:
 
         # ---- 5) 处理结果 ----
         if reply is None:
+            revoked = bool(getattr(session, "revoked", False))
+            revoke_reason = str(getattr(session, "revoke_reason", "") or "")
+            if revoked and "cancel" in revoke_reason:
+                self._safe_revoke(request_id, reason=revoke_reason)
+                self._safe_push_resolved(request_id, {
+                    "status": "cancelled",
+                    "summary": "任务已取消",
+                })
+                composer_meta["resolved"] = "cancelled"
+                return make_event_result(
+                    event,
+                    status=EventStatus.FAIL,
+                    executor_used=self.id,
+                    started_at=started_at,
+                    elapsed_ms=int((time.time() - t0) * 1000),
+                    summary="任务已取消",
+                    error="task_cancelled",
+                    vlm_meta=composer_meta,
+                    raw_response={"request": request.to_payload()},
+                )
             # 超时 → 主动 revoke + 通知前端关闭
             self._safe_revoke(request_id, reason="executor_timeout")
             self._safe_push_resolved(request_id, {

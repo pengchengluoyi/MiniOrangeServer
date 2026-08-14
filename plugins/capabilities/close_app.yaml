@@ -27,6 +27,13 @@ implementations:
     cost: 12
     description: Remote 关闭应用 = 设置内强制停止，不是仅按 Home。
 
+  - id: ios_wda_terminate
+    display_name: WDA app_terminate
+    executor: ios_wda
+    requires_caps: [app_force_stop]
+    needs_vlm: false
+    cost: 2
+
 ui:
   shown_in_settings: true
   examples: ["关闭 微信"]

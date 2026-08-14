@@ -30,6 +30,15 @@ implementations:
     cost: 4
     description: Remote 不可用时的 adb 兜底（拟人感稍弱但可靠）
 
+  - id: vlm_locate_ios_wda_tap
+    display_name: VLM 定位 + WDA tap
+    executor: ios_wda
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    locate_prompt: LOCATE_VISION
+    cost: 4
+    description: iOS 真机（usbmuxd / WDA）
+
 ui:
   shown_in_settings: true
   examples: ["点击「同意」", "点击 一键登录"]
