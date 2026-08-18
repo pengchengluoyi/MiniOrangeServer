@@ -107,6 +107,14 @@ def probe_ios(sn: str) -> ProbeResult:
                     }
     except Exception as e:
         SLog.d(TAG, f"m_device ios channel probe failed: {e}")
+    try:
+        from server.services.runtime.ios_simctl import list_booted_simulators
+
+        for item in list_booted_simulators():
+            if str(item.get("udid") or "") == str(sn):
+                return "connected", {"source": "simctl", "transport": "simulator"}
+    except Exception as e:
+        SLog.d(TAG, f"simctl probe failed: {e}")
     return "disconnected", {"reason": "not present on usbmuxd / ios discovery"}
 
 

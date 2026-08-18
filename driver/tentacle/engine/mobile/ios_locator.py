@@ -1,6 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""iOS 链式定位（WDA / facebook-wda）"""
+"""iOS 链式定位（后端无关：元素查找与外框都经 engine 转发）"""
 import time
 
 
@@ -32,13 +32,12 @@ class IOSLocator:
 
     @property
     def info(self):
-        el = self._resolve()
-        b = el.bounds
+        left, top, right, bottom = self._engine.element_bounds(self._resolve())
         return {
             "bounds": {
-                "left": b.x,
-                "top": b.y,
-                "right": b.x2,
-                "bottom": b.y2,
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
             }
         }

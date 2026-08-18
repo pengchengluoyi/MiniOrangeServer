@@ -71,6 +71,7 @@ class VlmExecutor:
             image_base64=ctx.screen.image_base64,
             image_mime=ctx.screen.image_mime,
             ai_hint=ai_hint,
+            context_block=str(params.get("memory_context") or ""),
         )
         elapsed = int((time.time() - t0) * 1000)
         status = EventStatus.PASS if result.passed else EventStatus.FAIL

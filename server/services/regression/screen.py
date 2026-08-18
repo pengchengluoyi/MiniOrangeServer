@@ -99,10 +99,8 @@ def _capture_via_ios_wda(udid: str, *, timeout_sec: float = 30.0) -> CapturedScr
         from server.services.runtime.ios_wda_session import get_ios_engine
 
         engine = get_ios_engine(udid)
-        img = engine.driver.screenshot()
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
+        # 走引擎层 screenshot()（返回 base64），wda / appium 后端通用
+        png_bytes = base64.b64decode(engine.screenshot())
     except Exception as e:
         return CapturedScreen(
             ok=False,

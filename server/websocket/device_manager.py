@@ -1591,7 +1591,7 @@ class DeviceManager:
         return True
 
     def mark_ios_offline(self, udid: str) -> None:
-        """iOS 设备从 usbmuxd/Bonjour 消失。"""
+        """iOS 设备从 usbmuxd / Bonjour / 模拟器消失。"""
         from server.services.runtime.channels import set_ios_channel, read_channels, derive_main_status
 
         self.ios_nodes.discard(udid)

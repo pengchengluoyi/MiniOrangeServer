@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any, Optional
 
 from driver.tentacle.engine.mobile.ios_config import (
+    assert_ddi_ready,
     detect_xcode_team_id,
     probe_wda_url,
     resolve_device,
@@ -403,6 +404,9 @@ def start_wda(
     if verify_wda_url(target):
         SLog.i(TAG, f"WDA already ready at {target}")
         return target
+
+    # DDI 不就绪时，开 Xcode 按 ⌘U 也只会等满 240s 再报一堆 xcodebuild 堆栈 —— 先快速失败。
+    assert_ddi_ready(resolve_device(os.environ.get("IOS_UDID")), tag=TAG)
 
     mount_developer_image(settings["udid"])
     if _should_iproxy(mode, use_iproxy):

@@ -20,7 +20,7 @@
       "ios": {
         "state": "connected" | "disconnected" | "not_applicable",
         "last_probe_at": "2026-06-24T19:00:00",
-        "transport": "usb" | "wifi" | None,
+        "transport": "usb" | "wifi" | "simulator" | None,
         "udid": str,
         "reason": str
       }
@@ -136,7 +136,7 @@ def set_ios_channel(
     transport: str | None = None,
     reason: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """更新 channels.ios（usbmuxd USB / Bonjour Wi‑Fi）。"""
+    """更新 channels.ios（usbmuxd USB / Bonjour Wi‑Fi / simctl 模拟器）。"""
     if state not in IOS_STATES:
         raise ValueError(f"invalid ios state: {state}")
     channels = read_channels(device)

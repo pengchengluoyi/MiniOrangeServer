@@ -211,8 +211,8 @@ def _is_ios_target(sn: str, platform: str = "", device_type: str = "") -> bool:
     if "ios" in plat or "iphone" in plat or "ipad" in plat:
         return True
     try:
-        from server.services.runtime.ios_ids import is_physical_ios_udid
-        return is_physical_ios_udid(sn)
+        from server.services.runtime.ios_ids import is_physical_ios_udid, is_simulator_udid
+        return is_physical_ios_udid(sn) or is_simulator_udid(sn)
     except Exception:
         return False
 

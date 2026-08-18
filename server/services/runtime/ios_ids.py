@@ -26,8 +26,16 @@ def is_physical_ios_udid(value: str) -> bool:
     return bool(_APPLE_UDID.fullmatch(s))
 
 
+def is_simulator_udid(value: str) -> bool:
+    """模拟器 UDID 是标准 UUID。CoreDevice _remotepairing 也长这样，不能单靠这个当在线设备。"""
+    return is_rfc4122_uuid(value)
+
+
 def is_executable_ios_sn(value: str) -> bool:
-    """能作为新建执行目标的 iOS SN：真机 UDID，或 apple-mobdev 的 MAC 句柄。"""
+    """Bonjour/USB 可执行目标：真机 UDID，或 apple-mobdev 的 MAC 句柄。
+
+    模拟器 UUID 不走这条（CoreDevice `_remotepairing` 同形）；模拟器只从 simctl 进发现器。
+    """
     s = str(value or "").strip()
     if is_physical_ios_udid(s):
         return True

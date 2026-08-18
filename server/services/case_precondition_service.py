@@ -85,7 +85,8 @@ def _mobile_engine(sn: str, platform: str):
 
 
 def _is_ios_engine(engine) -> bool:
-    return type(engine).__name__ == "IOSEngine" if engine is not None else False
+    """覆盖所有 iOS backend（IOSEngine / IOSAppiumEngine / 后续新增），不按类名硬编码。"""
+    return getattr(engine, "PLATFORM", "") == "ios" if engine is not None else False
 
 
 def _read_sim_phone_number(engine) -> str:
@@ -173,7 +174,8 @@ def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
     if _is_ios_engine(engine):
         bundle = "com.tencent.xin"
         try:
-            st = int(engine.driver.app_state(bundle))
+            # 走引擎层 app_state()（wda / appium 通用）：0 未安装，其余为已安装
+            st = engine.app_state(bundle)
         except Exception as e:
             return False, f"无法探测微信安装状态: {e}"
         installed = st != 0
@@ -192,8 +194,8 @@ def _clear_app_data(engine, package: str) -> Tuple[bool, str]:
         return False, "未配置应用包名，无法清除缓存"
     if _is_ios_engine(engine):
         try:
-            if hasattr(engine.driver, "app_terminate"):
-                engine.driver.app_terminate(package)
+            # 走引擎层 stop_app()（wda app_stop / appium terminateApp）
+            engine.stop_app(package)
             return True, f"iOS 已结束应用进程（{package}）；系统不提供等价于 pm clear 的清缓存"
         except Exception as e:
             return False, f"iOS 结束应用失败: {e}"

@@ -314,6 +314,10 @@ class CaseCheckpoint(BaseModel):
 
     id: str = Field(..., description="稳定短 id，如 cp1")
     description: str = Field(..., description="可在屏幕上观测的状态，如『进入一键登录页』")
+    kind: str = Field(
+        "terminal",
+        description="process=加载/占位/切换中等过程态，须中途验证；terminal=完成后的稳定屏",
+    )
     done: bool = Field(False, description="运行时标记是否已达成")
 
 
@@ -350,5 +354,9 @@ class AgentDecision(BaseModel):
     expected_after: str = Field("", description="执行后预期出现的状态，供下一步自检")
     status: Literal["continue", "done", "give_up", "ask_human"] = "continue"
     confidence: float = Field(0.0, ge=0.0, le=1.0)
+    remember: list[str] = Field(default_factory=list, description="本步要写入短期记忆的事实")
+    checkpoint_ids: list[str] = Field(default_factory=list, description="本步正在验证/已达成的检查点 id")
+    subflow: str = Field("none", description="none | create_publish，创作发布子流程中不占主预算")
+    published: dict[str, Any] = Field(default_factory=dict, description="发布成功时的内容指纹")
     raw_llm: dict[str, Any] = Field(default_factory=dict)
     parse_warnings: list[str] = Field(default_factory=list)

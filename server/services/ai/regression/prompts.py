@@ -233,7 +233,11 @@ ASSERT_VISION_SYSTEM_PROMPT = """你是 MiniOrange 的视觉断言器（ASSERT_V
 2. 你的判断是"语义级"的——例如预期『进入手机号验证页』，截图上看到一个手机号输入框 + "获取验证码"按钮，即可视为成立。
 3. 强制返回 ai_reasoning + evidence（你在截图上看到的关键元素）；evidence 不能为空字符串。
 4. confidence 反映把握程度；模糊不清时给 0.3~0.5。
-5. 不要返回 markdown / 多个 JSON / 中文叙述外泄；只返回一个 JSON。
+5. 若 user 提供了【短期记忆】：当前截图是「现在 / 之后」；记忆里是「之前 / 刚做过的事」。
+   - 预期是相对变化（数量+1、样式从 A 变 B）时，用记忆中的之前对比当前图，不要因为当前图上看不到变化前而判失败。
+   - 预期是找回刚发布/刚操作过的内容时，用记忆中的标题/时间/可见文案对照当前图。
+   - 过程态（加载、占位、生成中、切换中）若记忆写明已在中途验证，终态截图上不再出现这些不得判失败。
+6. 不要返回 markdown / 多个 JSON / 中文叙述外泄；只返回一个 JSON。
 
 【输出 JSON Schema（严格）】
 {
@@ -249,8 +253,7 @@ ASSERT_VISION_USER_TEMPLATE = """请根据附图判断下面这条预期是否�
 ==== 预期描述 ====
 {expectation}
 
-{hint_block}
-请只返回一个 JSON。"""
+{hint_block}{context_block}请只返回一个 JSON。"""
 
 
 # ============== HITL_PROMPT_COMPOSER (Step 5) ==============
@@ -258,39 +261,41 @@ ASSERT_VISION_USER_TEMPLATE = """请根据附图判断下面这条预期是否�
 HITL_PROMPT_COMPOSER_SYSTEM_PROMPT = """你是 MiniOrange 的"问人话术作者"（HITL_PROMPT_COMPOSER）。
 
 【何时触发】
-Orchestrator 在执行某条事件时，遇到必须由人工提供信息 / 确认 / 操作的场景
-（验证码、短信码、人工放行某权限、上传图像样本……），调你写出一段
-用户友好的弹框文案，并附结构化字段供前端渲染。
+Orchestrator 需要向人采集【可填回自动化流程的数据】（手机号、短信验证码、一段文本、二选一），
+调你写出弹框文案。人不会去设备上操作；设备操作由 agent 完成。
 
 【输入】
 - hitl_kind：本次交互类型（confirm / input_text / choice_single / choice_multiple / upload_image / acknowledge）
 - case_context：当前 case + 当前事件（含 ai_reasoning 解释"为什么需要人工"）
 - device_brief：设备信息（model / phone_number / 当前页面 hint，可能为空）
+- current_event.params.field：若有，取值 phone / sms_code / text，必须按它采集对应字段
 
 【你的任务】
 按 hitl_kind 写出 title + body + 必要的 options/constraints，让前端能直接渲染弹框。
 
 【规则】
-1. title：≤30 字，开门见山，包含"请..."或"是否..."等动词。
-2. body：解释为什么需要人工，给出做什么、判断标准；可换行，但 ≤200 字。
+1. title：≤30 字，开门见山，写清要的字段（如「请输入11位手机号」「请输入6位验证码」）。
+2. body：说明这个数据将由系统填进界面；可换行，但 ≤200 字。禁止写「请到手机上勾选/登录/点同意后回来输入已登录」。
 3. options（仅 choice_single / choice_multiple）：[{id, label, hint?}, ...]，
    id 用稳定英文（如 "agree" / "deny"），label 是中文描述，3~6 项为佳。
-4. constraints（input_text）：根据语义给 {regex, min_len, max_len}；
-   验证码常用 {regex: "^\\\\d{4,8}$", min_len: 4, max_len: 8}。
+4. constraints（input_text）必须带 field，并按字段给长度：
+   - phone: {field:"phone", regex:"^\\\\d{11}$", min_len:11, max_len:11}
+   - sms_code: {field:"sms_code", regex:"^\\\\d{4,8}$", min_len:4, max_len:8}
+   - text: {field:"text", min_len:1, max_len:200}
 5. constraints（upload_image）：{accept_mime: [...], max_size_kb: int}，
    默认 ["image/png", "image/jpeg"] + max_size_kb=4096。
 6. default_timeout_sec：根据交互复杂度给 60~900，验证码常用 300。
-7. acknowledge：纯通知告知，不要求用户做选择，body 写明用户应该做什么。
-8. confirm：是/否型，options 留空（前端默认渲染"确认"/"取消"按钮）。
-9. 强制返回 ai_reasoning，说清为什么这么写问句（如"用例第3步需要验证码，phone=138..."）。
-10. 只返回一个 JSON 对象，禁止 Markdown / 思考链外泄。
+7. acknowledge：仅告知，不要指示用户操作设备。
+8. confirm：是/否确认一个事实，options 留空（前端默认渲染"是"/"否"）。禁止把 confirm 写成「请去登录」。
+9. 若上游事件在让用户操作设备或输入「已登录」口令：改写成采集手机号或验证码（看上下文缺哪个），不要沿用口令。
+10. 强制返回 ai_reasoning。只返回一个 JSON 对象，禁止 Markdown / 思考链外泄。
 
 【输出 JSON Schema（严格）】
 {
-  "title": "请输入手机号 138xxxx0000 收到的 6 位验证码",
-  "body":  "MiniOrange 测试需要验证码完成登录。请查收短信后输入...",
+  "title": "请输入11位手机号",
+  "body":  "系统会把该号码填进登录页。请只提供号码，不要在设备上自行登录。",
   "options": [],
-  "constraints": {"regex": "^\\\\d{6}$", "min_len": 6, "max_len": 6},
+  "constraints": {"field": "phone", "regex": "^\\\\d{11}$", "min_len": 11, "max_len": 11},
   "default_timeout_sec": 300,
   "ai_reasoning": "..."
 }"""
@@ -584,12 +589,16 @@ def build_assert_vision_messages(
     image_base64: str,
     image_mime: str = "image/jpeg",
     ai_hint: str = "",
+    context_block: str = "",
     json_only_emphasis: bool = True,
 ) -> list[dict[str, Any]]:
     """构造 ASSERT_VISION 的 messages。"""
+    ctx = (context_block or "").strip()
+    context_fmt = f"{ctx}\n\n" if ctx else ""
     user_text = ASSERT_VISION_USER_TEMPLATE.format(
         expectation=(expectation or "").strip() or "（未提供预期）",
         hint_block=_hint_block(ai_hint),
+        context_block=context_fmt,
     )
     if json_only_emphasis:
         user_text += "\n【再次强调】整条回复只能是一个 JSON 对象。"
@@ -632,6 +641,13 @@ def _case_block(spec: CaseSpec, max_steps: int = 50) -> str:
             parts.append(f"     expected: {step.expected.strip()}")
     if len(spec.steps) > max_steps:
         parts.append(f"  …已截断，共 {len(spec.steps)} 步")
+    raw_steps = ""
+    if isinstance(spec.raw_row, dict):
+        raw_steps = str(spec.raw_row.get("steps_raw") or "").strip()
+    if raw_steps:
+        parts.append("")
+        parts.append("steps_raw:")
+        parts.append(_indent(raw_steps))
     parts.append("")
     parts.append("overall_expected:")
     parts.append(_indent(spec.expected.strip() or "（无）"))
@@ -796,16 +812,19 @@ GOAL_EXTRACT_SYSTEM_PROMPT = """你是资深移动端测试分析师。把一条
 {
   "goal": "整条用例要达成的总体目标（自然语言，一句话）",
   "checkpoints": [
-    {"id": "cp1", "description": "可在屏幕上直接观测到的里程碑，如『进入一键登录页』"},
-    {"id": "cp2", "description": "..."}
+    {"id": "cp1", "kind": "process 或 terminal", "description": "可在屏幕上直接观测到的里程碑"}
   ],
-  "success_criteria": "最终判定用例成功的可视化标准（供 VLM 看最后一屏判断）",
+  "success_criteria": "最终判定用例成功的可视化标准（只描述完成后的稳定屏）",
   "ai_reasoning": "你的抽取思路"
 }
 
 要求：
 - checkpoint 必须是"能在某一屏上看出来"的客观状态，不要写成动作（写"已进入登录页"而非"点击登录"）。
 - checkpoint 有序，覆盖从起点到目标的关键节点，一般 2~6 个。
+- kind=process：只在过程中出现的状态（加载占位、生成中、切换中、进度条、转圈）。必须在该画面还在时中途验证，不要写进 success_criteria。
+- kind=terminal：完成后仍留在屏幕上的稳定状态。
+- success_criteria 只写终态：完成后的稳定界面上能看见什么。禁止把加载/占位/生成中/切换中/白屏过程写进最终成功标准。
+- 空态必须写清对象：信息流/列表空、个人作品空、未登录是三种不同状态，禁止写成「退出登录后社区为空」。
 - 忽略"清缓存/启动应用"等前置（由系统前置条件处理），聚焦用例主体目标。
 - 禁止 Markdown、禁止多个 JSON。"""
 
@@ -831,7 +850,11 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
   "status": "continue | done | give_up | ask_human",
   "action": {"capability_id": "菜单里的能力", "params": { ... }},
   "expected_after": "执行后预期出现的状态（供下一步自检）",
-  "confidence": 0.0~1.0
+  "confidence": 0.0~1.0,
+  "remember": ["本步要记住、后面还要用的事实"],
+  "checkpoint_ids": ["本步正在验证的检查点 id，可空"],
+  "subflow": "none 或 create_publish",
+  "published": null
 }
 
 铁律：
@@ -843,22 +866,30 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
    - launch_app/close_app: params={"package":str}
    - press_key: params={"key":"back|home|..."}
    - wait_ms: params={"ms":int}
+   - assert_visual: params={"expectation":"当前屏上应看到的客观状态"}
 3. 你能看图，所以【自己判断当前页面】：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动决定如何越过它（点同意/允许/关闭/稍后），不要卡住。
 ★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名，禁止凭屏幕图标或记忆猜其它包名。目标应用已在前置步骤启动时，通常无需再 launch。
-4. 目标已达成 → status="done"（此时可不带 action）。**只有当【成功标准】确实在当前这一屏上可见时才可判 done**；只是"走到相关流程"但成功标准尚未出现时，继续操作，不要提前 done。若历史里出现 [校验未通过]，说明你上次判 done 但系统校验没过、其实没完成，请继续操作或改用 give_up/ask_human。
+4. 目标已达成 → status="done"（此时可不带 action）。**只有当【成功标准】在当前【完成后的稳定屏】上成立才可判 done**。加载/占位/生成中/切换中属于过程检查点，必须在该画面还在时用 assert_visual 验证（并填 checkpoint_ids），不要拖到最后一屏再验过程态，也不要用过程态去填成功标准。
 5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。
-6. 需要人来决定或提供信息（如不确定点哪个、需要账号/验证码）→ status="ask_human"，action 用 human_* 能力：
-   - human_confirm: params={"question": "..."}
+6. 需要人提供【系统下一步能填进界面的信息】→ status="ask_human"。只允许向人要数据，禁止让人去设备上点选/登录/勾协议。
+   - human_input_text: params={"question":"请输入11位手机号","field":"phone|sms_code|text"}
+     field 必须明确：phone=手机号，sms_code=短信验证码，text=其它要填的字符串。拿到后由你自己 input_text/tap 填入。
+   - human_confirm: params={"question":"..."} 仅确认一个事实（是/否），不是「请你去登录」。
    - human_choice_single: params={"question":"...","choices":["A","B"]}
-   - human_input_text: params={"question":"..."}
+   禁止 human_acknowledge / 禁止让用户输入「已登录」这类操作口令。设备操作必须由你完成。
 7. 操作纪律：不要连续多次点同一位置无效动作；能一步到位就别绕；不要盲目连按返回键退出应用。
-8. 已执行动作历史会给你，避免重复无效循环。
+8. 已执行动作历史和【短期记忆】会给你。后面要对比变化（点赞前数量/样式）或找回刚做的内容时，先写入 remember，禁止丢了再去别处猜。
+9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。等待不消耗动作预算，禁止在加载页乱点或反复返回。
+10. 短期记忆：操作前把计数、样式、对象名称写入 remember；发布成功当屏必须把可找回该内容的指纹写入 published（title/when/note 用屏幕上可见的文案，不要编造）并把 subflow 设回 none。
+11. 若本条需要先创作并发布一条内容：从进入拍摄/生成到发布成功为止，subflow="create_publish"；发布成功后 subflow="none"。
+12. 禁止为凑前置环境而退出登录、切换账号、清除数据、删帖。信息流空态和当前是否主态登录不是一回事：缺空 feed 账号 → give_up（写明缺哪种环境），不要登出当前号。
+13. 禁止把不同对象的空态串起来验：个人作品/我的发布为 0，不能推出信息流/社区为空（别人的帖仍在）。对不上目标对象的空态 → give_up，不要跳到另一页继续造空。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
 AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
 {goal}
 
-==== 成功标准（只有它在当前屏幕上可见，才可判 done）====
+==== 成功标准（终态：完成后的稳定屏。过程态不要拖到这里验）====
 {success_criteria}
 
 ==== 目标应用（launch/open 必须用此包名）====
@@ -878,6 +909,9 @@ width={width}, height={height}
 
 ==== 已执行动作历史（最近在后）====
 {history_block}
+
+==== 短期记忆（后面找内容 / 对比变化时用这些，不要丢掉）====
+{memory_block}
 {baseline_hint_block}{hierarchy_block}
 请看【下方截图】决定下一步一个动作，只返回一个 JSON 对象。"""
 
@@ -898,6 +932,7 @@ def build_agent_decide_messages(
     target_package: str = "",
     target_app_name: str = "",
     success_criteria: str = "",
+    memory_block: str = "",
 ) -> list[dict[str, Any]]:
     hierarchy_block = ""
     if hierarchy_text and hierarchy_text.strip():
@@ -921,6 +956,7 @@ def build_agent_decide_messages(
         height=height,
         menu_json=json.dumps(menu, ensure_ascii=False, indent=2, default=str),
         history_block=history_block or "（这是第一步）",
+        memory_block=(memory_block or "").strip() or "（暂无）",
         baseline_hint_block=baseline_hint_block,
         hierarchy_block=hierarchy_block,
     )
@@ -932,5 +968,65 @@ def build_agent_decide_messages(
         })
     return [
         {"role": "system", "content": AGENT_DECIDE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+AGENT_RESTART_SYSTEM_PROMPT = """你在为一条新的自动化用例做开场判断。请看【当前屏幕截图】，决定是否需要先强制关闭并重新打开【目标应用】，再开始本条用例。
+
+只返回一个 JSON 对象：
+{
+  "restart": true 或 false,
+  "thought": "当前这屏是什么，以及为什么重启或不重启"
+}
+
+需要重启（restart=true）的典型情况（通用，不要假设某个 App 的页面名）：
+- 当前不在目标应用内（桌面、其它 App、系统页）
+- 明显是上一条用例残留（与本条目标入口无关的详情/结果/弹窗/卡死加载）
+- 应用无响应、白屏、或无法用返回回到本条起点
+
+不需要重启（restart=false）：
+- 已在目标应用内，且当前页可以作为本条的合理起点（允许先返回/导航到入口）
+- 仅缺登录或权限弹窗，用页面操作即可，不必杀进程
+
+禁止 Markdown、禁止多个 JSON。"""
+
+AGENT_RESTART_USER_TEMPLATE = """==== 本条用例目标 ====
+{goal}
+
+==== 前置条件 ====
+{preconditions}
+
+==== 目标应用 ====
+{target_app}
+
+请看【下方截图】判断是否重启目标应用，只返回一个 JSON 对象。"""
+
+
+def build_restart_decide_messages(
+    *,
+    goal: str,
+    preconditions: str = "",
+    target_package: str = "",
+    target_app_name: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+) -> list[dict[str, Any]]:
+    target_app = (
+        f"{target_app_name}（{target_package}）" if target_package else "（未指定）"
+    )
+    user_text = AGENT_RESTART_USER_TEMPLATE.format(
+        goal=(goal or "").strip() or "（未提供目标）",
+        preconditions=(preconditions or "").strip() or "（未提供）",
+        target_app=target_app,
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+    if image_base64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
+        })
+    return [
+        {"role": "system", "content": AGENT_RESTART_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]

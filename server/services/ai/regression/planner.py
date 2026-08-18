@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from pydantic import ValidationError
@@ -430,6 +431,7 @@ def assert_visual(
     image_base64: str,
     image_mime: str = "image/jpeg",
     ai_hint: str = "",
+    context_block: str = "",
     provider_id: Optional[str] = None,
     timeout_sec: int = 60,
 ) -> AssertResult:
@@ -447,6 +449,7 @@ def assert_visual(
         image_base64=image_base64,
         image_mime=image_mime,
         ai_hint=ai_hint,
+        context_block=context_block,
     )
     raw, meta = call_chat_text(
         provider=provider,
@@ -752,6 +755,55 @@ def expand_persona_task(
 # ============== Agent 执行引擎（目标导向闭环，仅 adb 通道） ==============
 
 
+_PROCESS_KIND_RE = re.compile(r"加载占位|加载中|生成中|切换中|转圈|进度未|白屏|占位")
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return []
+
+
+def _checkpoint_kind(raw_kind: str, description: str) -> str:
+    kind = (raw_kind or "").strip().lower()
+    if kind in {"process", "transient", "mid"}:
+        return "process"
+    if kind in {"terminal", "final", "end"}:
+        return "terminal"
+    return "process" if _PROCESS_KIND_RE.search(description or "") else "terminal"
+
+
+def _split_process_from_success(
+    success: str, cps: list[CaseCheckpoint],
+) -> tuple[list[CaseCheckpoint], str]:
+    """终态标准里若混入过程态句子，挪到 process 检查点，并给终态补一句。"""
+    text = (success or "").strip()
+    if not text:
+        return cps, text
+    parts = [p.strip() for p in re.split(r"[。；;\n]+", text) if p.strip()]
+    keep: list[str] = []
+    moved: list[str] = []
+    for part in parts:
+        if _PROCESS_KIND_RE.search(part):
+            moved.append(part)
+        else:
+            keep.append(part)
+    extra = list(cps)
+    for i, desc in enumerate(moved, 1):
+        if any(desc in c.description or c.description in desc for c in extra):
+            for c in extra:
+                if desc in c.description or c.description in desc:
+                    c.kind = "process"
+            continue
+        extra.append(CaseCheckpoint(id=f"cp_p{i}", description=desc, kind="process"))
+    success_out = "。".join(keep) if keep else text
+    if moved:
+        success_out = success_out.rstrip("。") + "。终态只判定完成后的稳定界面，不要把加载/占位/生成中/切换中当作最终失败理由。"
+    return extra, success_out
+
+
 def extract_goal(
     case_spec: CaseSpec,
     *,
@@ -785,16 +837,20 @@ def extract_goal(
     cps: list[CaseCheckpoint] = []
     for idx, cp in enumerate(raw.get("checkpoints") or [], start=1):
         if isinstance(cp, dict) and (cp.get("description") or "").strip():
+            desc = str(cp.get("description")).strip()
             cps.append(CaseCheckpoint(
                 id=str(cp.get("id") or f"cp{idx}"),
-                description=str(cp.get("description")).strip(),
+                description=desc,
+                kind=_checkpoint_kind(str(cp.get("kind") or ""), desc),
             ))
     goal_text = str(raw.get("goal") or "").strip() or (case_spec.expected or case_spec.name or "完成用例").strip()
+    success = str(raw.get("success_criteria") or "").strip() or goal_text
+    cps, success = _split_process_from_success(success, cps)
     return CaseGoal(
         case_id=case_spec.case_id,
         goal=goal_text,
         checkpoints=cps,
-        success_criteria=str(raw.get("success_criteria") or "").strip() or goal_text,
+        success_criteria=success,
         ai_reasoning=str(raw.get("ai_reasoning") or "").strip() or "（模型未给出 reasoning）",
         raw_llm=raw,
     )
@@ -828,12 +884,27 @@ def _parse_agent_decision(raw: dict[str, Any], width: int, height: int) -> Agent
         action = AgentAction(capability_id=str(raw_action.get("capability_id")), params=params)
     if status in {"continue", "ask_human"} and action is None:
         warnings.append(f"status={status} 但无有效 action")
+    subflow = str(raw.get("subflow") or "none").strip().lower() or "none"
+    if subflow in {"create", "publish", "create_publish", "generating"}:
+        subflow = "create_publish"
+    elif subflow not in {"none", "create_publish"}:
+        subflow = "none"
+    published: dict[str, Any] = {}
+    raw_pub = raw.get("published")
+    if isinstance(raw_pub, dict):
+        published = {k: v for k, v in raw_pub.items() if v not in (None, "", [])}
+    elif isinstance(raw_pub, str) and raw_pub.strip() and raw_pub.strip().lower() not in {"null", "none"}:
+        published = {"note": raw_pub.strip()}
     return AgentDecision(
         thought=str(raw.get("thought") or "").strip(),
         action=action,
         expected_after=str(raw.get("expected_after") or "").strip(),
         status=status,  # type: ignore[arg-type]
         confidence=max(0.0, min(1.0, float(raw.get("confidence") or 0.0))),
+        remember=_as_str_list(raw.get("remember")),
+        checkpoint_ids=_as_str_list(raw.get("checkpoint_ids") or raw.get("checkpoints")),
+        subflow=subflow,
+        published=published,
         raw_llm=raw,
         parse_warnings=warnings,
     )
@@ -852,6 +923,7 @@ def decide_next_action(
     hierarchy_text: str = "",
     baseline_hint: str = "",
     success_criteria: str = "",
+    memory_block: str = "",
     provider_id: Optional[str] = None,
     timeout_sec: int = 90,
 ) -> AgentDecision:
@@ -878,6 +950,7 @@ def decide_next_action(
         baseline_hint=baseline_hint,
         target_package=str(getattr(run_context, "target_package", "") or ""),
         success_criteria=success_criteria,
+        memory_block=memory_block,
     )
     raw, meta = call_chat_text(
         provider=provider, messages=messages,
@@ -888,3 +961,42 @@ def decide_next_action(
         return AgentDecision(status="give_up", thought="LLM 返回空/解析失败",
                              raw_llm={"meta": meta}, parse_warnings=["llm failed"])
     return _parse_agent_decision(raw, width, height)
+
+
+def decide_restart_app(
+    *,
+    goal: str,
+    preconditions: str = "",
+    target_package: str = "",
+    target_app_name: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 60,
+) -> tuple[bool, str]:
+    """用例开场：看图决定是否 force-stop + launch 目标应用。失败时默认不重启。"""
+    if not image_base64:
+        return False, "无截图，跳过重启判断"
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        return False, f"未启用 AI：{gate.get('reason')}，跳过重启"
+    messages = P.build_restart_decide_messages(
+        goal=goal,
+        preconditions=preconditions,
+        target_package=target_package,
+        target_app_name=target_app_name,
+        image_base64=image_base64,
+        image_mime=image_mime,
+    )
+    raw, meta = call_chat_text(
+        provider=provider, messages=messages,
+        temperature=0.1, max_tokens=512, timeout_sec=timeout_sec,
+    )
+    if not isinstance(raw, dict):
+        SLog.w(TAG, f"decide_restart_app LLM failed err={meta.get('error')!r}")
+        return False, "LLM 返回空/解析失败，跳过重启"
+    restart = raw.get("restart")
+    if isinstance(restart, str):
+        restart = restart.strip().lower() in {"true", "1", "yes"}
+    thought = str(raw.get("thought") or "").strip() or "（未说明）"
+    return bool(restart), thought

@@ -150,6 +150,13 @@ class Manager(metaclass=SingletonMeta):
                 if want_remote != is_remote:
                     self.MobileEngine = None
 
+            # [iOS] backend 守卫：wda / appium 换后端时强制重建，避免复用错实现。
+            if self.MobileEngine is not None and getattr(self.MobileEngine, "PLATFORM", "") == "ios":
+                from driver.tentacle.engine.mobile.mIOS import resolve_ios_backend
+
+                if getattr(self.MobileEngine, "BACKEND", None) != resolve_ios_backend():
+                    self.MobileEngine = None
+
             if self.MobileEngine:
                 prev = getattr(self.MobileEngine, "_serial", None) or getattr(
                     self.MobileEngine, "_test_subject", None
@@ -166,9 +173,9 @@ class Manager(metaclass=SingletonMeta):
 
                 engine = RemoteEngine()
             elif effective == platform_code.IOS:
-                from driver.tentacle.engine.mobile.mIOS import IOSEngine
+                from driver.tentacle.engine.mobile.mIOS import create_ios_engine
 
-                engine = IOSEngine()
+                engine = create_ios_engine()
             else:
                 from driver.tentacle.engine.mobile.mAdb import MAdbEngine
 

@@ -65,6 +65,22 @@ _CAP_TO_KIND: dict[str, str] = {
     "human_acknowledge":      "acknowledge",
 }
 
+_FIELD_CONSTRAINTS: dict[str, dict] = {
+    "phone": {"field": "phone", "min_len": 11, "max_len": 11, "regex": r"^\d{11}$"},
+    "sms_code": {"field": "sms_code", "min_len": 4, "max_len": 8, "regex": r"^\d{4,8}$"},
+    "text": {"field": "text", "min_len": 1, "max_len": 200},
+}
+_FIELD_TITLES = {
+    "phone": "请输入11位手机号",
+    "sms_code": "请输入短信验证码",
+    "text": "请输入所需文本",
+}
+_FIELD_BODIES = {
+    "phone": "请只提供手机号。系统会把它填进登录页，请不要在设备上自行登录或勾选协议。",
+    "sms_code": "请只提供短信验证码。系统会把它填进验证码框，请不要在设备上自行操作。",
+    "text": "请提供需要填进当前界面的文本。系统会代为输入，请不要在设备上操作。",
+}
+
 
 class HitlExecutor:
     id = "hitl"
@@ -103,6 +119,7 @@ class HitlExecutor:
             provider_id=self._provider_id,
             timeout_sec=self._compose_timeout_sec,
         )
+        composer = self._apply_field_constraints(composer, kind, event)
 
         # ---- 2) build HitlRequest ----
         manager = get_session_manager()
@@ -257,6 +274,45 @@ class HitlExecutor:
         )
 
     # ---------- helpers ----------
+
+    @staticmethod
+    def _apply_field_constraints(composer, kind: str, event: PlanEvent):
+        """input_text 必须带明确字段约束，禁止「已登录」口令式 max_len=3。"""
+        if kind != "input_text":
+            return composer
+        params = event.params or {}
+        field = str(params.get("field") or (composer.constraints or {}).get("field") or "").strip().lower()
+        blob = f"{composer.title} {composer.body} {params.get('question') or ''}"
+        if field not in _FIELD_CONSTRAINTS:
+            if "验证码" in blob or "sms" in blob.lower():
+                field = "sms_code"
+            elif "手机" in blob or "电话" in blob:
+                field = "phone"
+            else:
+                field = "text"
+        defaults = dict(_FIELD_CONSTRAINTS[field])
+        merged = dict(composer.constraints or {})
+        merged.update(defaults)
+        updates: dict[str, Any] = {"constraints": merged}
+        if (
+            "已登录" in (composer.title or "")
+            or "协助完成" in (composer.title or "")
+            or "勾选" in (composer.body or "")
+            or "在设备上" in (composer.body or "")
+        ):
+            updates["title"] = _FIELD_TITLES[field]
+            updates["body"] = _FIELD_BODIES[field]
+        elif not (composer.title or "").strip():
+            updates["title"] = _FIELD_TITLES[field]
+        try:
+            return composer.model_copy(update=updates)
+        except Exception:
+            composer.constraints = merged
+            if "title" in updates:
+                composer.title = updates["title"]
+            if "body" in updates:
+                composer.body = updates["body"]
+            return composer
 
     def _fail(self, event: PlanEvent, started_at: str, t0: float, msg: str) -> EventResult:
         return make_event_result(

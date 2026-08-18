@@ -321,13 +321,13 @@ def bootstrap_mobile_engine(
                 return cached
         engine = get_ios_engine(mobile_sn)
         try:
-            sz = engine.driver.window_size()
-            w = int(getattr(sz, "width", None) or sz[0])
-            h = int(getattr(sz, "height", None) or sz[1])
+            # 走引擎层 screen_size()，wda / appium 后端通用
+            w, h = engine.screen_size()
+            w, h = int(w), int(h)
         except Exception:
             w, h = 390, 844
         size = (w, h)
-        SLog.i(TAG, f"iOS WDA engine ready sn={mobile_sn} screen={w}x{h}")
+        SLog.i(TAG, f"iOS engine ready sn={mobile_sn} screen={w}x{h}")
         if reuse:
             _cache_engine(mobile_sn, "ios", engine, size)
         return engine, size
