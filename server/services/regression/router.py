@@ -254,6 +254,15 @@ class CapabilityRouter:
         if event.capability_id not in _VLM_LOCATE_NEEDED:
             return False
         params = event.params or {}
+        # 带语义锚点（target: resource_id/text/content_desc）时不走 VLM locate：
+        # 由 executor 用 UI 层级解析成精确坐标，更稳且可复用（S0b）。
+        try:
+            from server.services.regression.hierarchy import has_target
+
+            if has_target(params):
+                return False
+        except Exception:  # pragma: no cover - 解析模块不可用时退回原行为
+            pass
         # 已经有坐标（如 baseline 填的）就不重抓
         if event.capability_id == "swipe_element_to_element":
             return any(params.get(k) is None for k in ("from_x", "from_y", "to_x", "to_y"))

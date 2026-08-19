@@ -809,6 +809,36 @@ def _execute(
                 run_doc["failed"] += 1
             _upsert_case(run_doc, entry)
 
+        try:
+            from server.services.knowledge_capture_service import capture_case_knowledge
+
+            events_raw = []
+            for e in (getattr(report, "events", None) or []):
+                if hasattr(e, "model_dump"):
+                    events_raw.append(e.model_dump())
+                elif isinstance(e, dict):
+                    events_raw.append(e)
+            proposals = capture_case_knowledge(
+                app_id=app_id,
+                task_id=run_id,
+                case_id=spec.case_id,
+                case_name=spec.name,
+                status=str(report.overall_status),
+                summary=str(entry.get("summary") or ""),
+                events=events_raw,
+                provider_id=str(run_doc.get("provider_id") or ""),
+            )
+            if proposals:
+                with _LOCK:
+                    _upsert_case(run_doc, {
+                        "case_id": spec.case_id,
+                        "status": str(report.overall_status),
+                        "knowledge_ids": [p.get("id") for p in proposals if p.get("id")],
+                        "knowledge_proposals": proposals,
+                    })
+        except Exception as exc:
+            SLog.w(TAG, f"[{run_id}] knowledge capture failed case={spec.case_id}: {exc}")
+
         SLog.i(
             TAG,
             f"[{run_id}] <<< case={spec.case_id} status={report.overall_status} "
@@ -825,6 +855,23 @@ def _execute(
         _emit_task(run_doc, "cancelled")
         _finish_run(run_doc, "cancelled")
         return
+    try:
+        from server.services.knowledge_capture_service import capture_task_knowledge
+
+        with _LOCK:
+            snap = _snapshot(run_doc)
+        task_items = capture_task_knowledge(
+            app_id=app_id,
+            task_id=run_id,
+            cases=snap.get("cases") or [],
+            provider_id=str(snap.get("provider_id") or ""),
+        )
+        if task_items:
+            with _LOCK:
+                run_doc["knowledge_ids"] = [p.get("id") for p in task_items if p.get("id")]
+                run_doc["knowledge_proposals"] = task_items
+    except Exception as exc:
+        SLog.w(TAG, f"[{run_id}] task knowledge capture failed: {exc}")
     _finish_run(run_doc, "done")
 
 

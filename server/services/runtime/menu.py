@@ -18,13 +18,32 @@ def available_capabilities(ctx: RunContext) -> list[Capability]:
     return plugin_registry.filter_capabilities_by_connectivity(ctx.connectivity_flags)
 
 
-def available_menu_brief(ctx: RunContext) -> list[dict[str, Any]]:
+def _visible_to(cap: Capability, audience: str) -> bool:
+    """能力对该受众是否可见。
+
+    audience="case"   业务用例决策 agent（默认，行为与改造前一致）
+    audience="system" L0 系统层处置 agent
+    audience="all"    不过滤（Skills 页 / 诊断用）
+    老 yaml 不写 visible_to 时默认 ["case","system"]，两个受众都能看到。
+    """
+    if audience == "all":
+        return True
+    allowed = [str(x).strip().lower() for x in (getattr(cap, "visible_to", None) or [])]
+    if not allowed or "both" in allowed:
+        return True
+    return audience in allowed
+
+
+def available_menu_brief(ctx: RunContext, *, audience: str = "case") -> list[dict[str, Any]]:
     """喂给 PLAN_OVERVIEW prompt 的"菜单"精简结构。
 
     刻意去掉文档级字段（description / ui / examples），只保留决策时必需信息：
       - id / type / needs_vlm / implementations[ {executor, requires_caps} ]
+
+    audience 决定按 capability.visible_to 过滤：业务菜单不该出现系统层专用能力
+    （否则业务 agent 会自己去调，白烧决策预算）。
     """
-    caps = available_capabilities(ctx)
+    caps = [c for c in available_capabilities(ctx) if _visible_to(c, audience)]
     out: list[dict[str, Any]] = []
     for cap in caps:
         is_hitl = (cap.category or "").lower() == "hitl"

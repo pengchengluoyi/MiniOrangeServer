@@ -2095,13 +2095,14 @@ def _plan_message_local(
     app_id = ctx.get("app_id") or ctx.get("appId")
     plat = (ctx.get("platform") or "android").lower()
     try:
-        from server.services.system_settings_service import match_testing_knowledge
+        from server.services.system_settings_service import match_testing_knowledge, knowledge_prompt_snippet
 
         for item in match_testing_knowledge(raw, app_id=app_id, limit=3):
-            title = (item.get("title") or "").strip()
-            content = (item.get("content") or "").strip()
-            if title and content:
-                knowledge_hints.append(f"「{title}」: {content[:120]}")
+            if item.get("used") is False:
+                continue
+            snippet = knowledge_prompt_snippet(item, max_chars=1200)
+            if snippet:
+                knowledge_hints.append(snippet)
     except Exception:
         pass
 

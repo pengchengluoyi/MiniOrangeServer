@@ -7,8 +7,16 @@ import os
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+
+import yaml
 
 from server.core.security import SecurityManager
+
+from server.core.database import APP_DATA_DIR
+from script.log import SLog
+
+TAG = "system_settings_service"
 
 
 def _feishu_root() -> Dict[str, Any]:
@@ -786,92 +794,391 @@ def _testing_root() -> Dict[str, Any]:
     return root
 
 
+def _knowledge_entries_dir() -> Path:
+    """knowledge 写入到 packs/learned（S0 后续：真正迁移读写链路）。"""
+    # 保持与前端/规划一致：packs/learned/<pack>/entries/*.yaml
+    return Path(APP_DATA_DIR) / "packs" / "learned" / "knowledge" / "entries"
+
+
+def _load_knowledge_from_yaml() -> List[Dict[str, Any]]:
+    d = _knowledge_entries_dir()
+    if not d.is_dir():
+        return []
+    out: List[Dict[str, Any]] = []
+    for p in sorted(d.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in (".yaml", ".yml"):
+            continue
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        title = (data.get("title") or "").strip()
+        content = (data.get("content") or "").strip()
+        if not title or not content:
+            continue
+        out.append(dict(data))
+    return out
+
+
+_KNOWLEDGE_RUNTIME_KEYS = ("score", "match_pct", "used", "skip_reason")
+_KNOWLEDGE_REVIEW_STATUSES = ("pending", "approved", "rejected")
+_KNOWLEDGE_SOURCES = ("manual", "case_run", "task_run")
+
+
+def _knowledge_review_status(raw: Dict[str, Any]) -> str:
+    st = str(raw.get("review_status") or "").strip().lower()
+    if st in _KNOWLEDGE_REVIEW_STATUSES:
+        return st
+    # 旧条目没有该字段：视为已审核，保持现网可匹配
+    return "approved"
+
+
+def _knowledge_source(raw: Dict[str, Any]) -> str:
+    src = str(raw.get("source") or "").strip().lower()
+    if src in _KNOWLEDGE_SOURCES:
+        return src
+    return "manual"
+
+
+def _normalize_knowledge_row(raw: Dict[str, Any], *, require_body: bool = True) -> Dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    title = (raw.get("title") or "").strip()
+    content = (raw.get("content") or "").strip()
+    if require_body and (not title or not content):
+        return None
+    extra = {
+        k: v for k, v in raw.items()
+        if k not in (
+            "score", "match_pct", "used", "skip_reason",
+            "id", "title", "content", "category", "tags", "app_ids", "enabled",
+            "source", "review_status",
+        ) and v not in (None, "", [], {})
+    }
+    return {
+        **extra,
+        "id": raw.get("id") or uuid.uuid4().hex[:12],
+        "title": title,
+        "content": content,
+        "category": (raw.get("category") or "").strip() or "其他",
+        "tags": [str(t).strip() for t in (raw.get("tags") or []) if str(t).strip()],
+        "app_ids": [str(a).strip() for a in (raw.get("app_ids") or []) if str(a).strip()],
+        "enabled": raw.get("enabled", True) is not False,
+        "source": _knowledge_source(raw),
+        "review_status": _knowledge_review_status(raw),
+    }
+
+
 def list_testing_knowledge() -> List[Dict[str, Any]]:
+    # 优先从 packs/learned 读取：实现 /settings/knowledge 写入迁移
+    from_yaml = _load_knowledge_from_yaml()
+    if from_yaml:
+        cleaned: List[Dict[str, Any]] = []
+        for raw in from_yaml:
+            row = _normalize_knowledge_row(raw)
+            if row:
+                cleaned.append(row)
+        return cleaned
+
+    # 兼容旧数据：config.json/testing/knowledge
     root = _testing_root()
     items = root.get("knowledge") or []
     if not isinstance(items, list):
         return []
-    return [dict(x) for x in items if isinstance(x, dict)]
+    out: List[Dict[str, Any]] = []
+    for x in items:
+        row = _normalize_knowledge_row(x) if isinstance(x, dict) else None
+        if row:
+            out.append(row)
+    return out
 
 
 def save_testing_knowledge(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     root = _testing_root()
     cleaned: List[Dict[str, Any]] = []
     for raw in items or []:
-        if not isinstance(raw, dict):
-            continue
-        title = (raw.get("title") or "").strip()
-        content = (raw.get("content") or "").strip()
-        if not title or not content:
-            continue
-        tags = [str(t).strip() for t in (raw.get("tags") or []) if str(t).strip()]
-        app_ids = [str(a).strip() for a in (raw.get("app_ids") or []) if str(a).strip()]
-        category = (raw.get("category") or "").strip() or "其他"
-        cleaned.append(
-            {
-                "id": (raw.get("id") or uuid.uuid4().hex[:12]),
-                "title": title,
-                "content": content,
-                "category": category,
-                "tags": tags,
-                "app_ids": app_ids,
-                "enabled": raw.get("enabled", True) is not False,
-            }
-        )
+        row = _normalize_knowledge_row(raw)
+        if row:
+            cleaned.append(row)
+
+    # 迁移写入：同时落到 packs/learned（learned 默认用于“系统写入”）
+    try:
+        d = _knowledge_entries_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        for row in cleaned:
+            kid = str(row.get("id") or "").strip()
+            if not kid:
+                continue
+            p = d / f"{kid}.yaml"
+            p.write_text(
+                yaml.safe_dump(
+                    {k: v for k, v in row.items()
+                     if k not in _KNOWLEDGE_RUNTIME_KEYS and v not in (None, "")},
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        # 不要因为 YAML 写入失败导致保存失败；config.json 仍保留（可回滚）
+        SLog.w(TAG, f"knowledge yaml write failed: {type(exc).__name__}: {exc}")
+
     root["knowledge"] = cleaned
     SecurityManager.save()
     return cleaned
+
+
+def _write_knowledge_yaml(row: Dict[str, Any]) -> None:
+    """把单条知识写入 yaml 文件（有 id 才写）。"""
+    kid = str(row.get("id") or "").strip()
+    if not kid:
+        return
+    d = _knowledge_entries_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{kid}.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {k: v for k, v in row.items()
+             if k not in ("score", "match_pct", "used", "skip_reason") and v not in (None, "")},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def upsert_knowledge_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """新建或更新单条知识条目，不影响其他条目。"""
+    title = (item.get("title") or "").strip()
+    content = (item.get("content") or "").strip()
+    if not title or not content:
+        raise ValueError("标题与知识内容均不能为空")
+
+    kid = (item.get("id") or "").strip() or uuid.uuid4().hex[:12]
+    existing = next(
+        (x for x in list_testing_knowledge() if str(x.get("id") or "") == kid),
+        None,
+    )
+    merged = dict(existing or {})
+    merged.update(item)
+    merged["id"] = kid
+    if not str(item.get("source") or "").strip():
+        merged["source"] = (existing or {}).get("source") or "manual"
+    if not str(item.get("review_status") or "").strip():
+        if existing:
+            merged["review_status"] = existing.get("review_status") or "approved"
+        else:
+            src = _knowledge_source(merged)
+            merged["review_status"] = "approved" if src == "manual" else "pending"
+    row = _normalize_knowledge_row(merged)
+    if not row:
+        raise ValueError("标题与知识内容均不能为空")
+
+    # 1. 写 yaml（首选持久化路径）
+    try:
+        _write_knowledge_yaml(row)
+    except Exception as exc:
+        SLog.w(TAG, f"upsert_knowledge_item yaml write failed: {exc}")
+
+    # 2. 同步更新 config.json（兼容旧读取路径）
+    root = _testing_root()
+    items: List[Dict[str, Any]] = root.get("knowledge") or []
+    if not isinstance(items, list):
+        items = []
+    idx = next((i for i, x in enumerate(items) if isinstance(x, dict) and x.get("id") == kid), -1)
+    if idx >= 0:
+        items[idx] = row
+    else:
+        items.append(row)
+    root["knowledge"] = items
+    SecurityManager.save()
+
+    return row
+
+
+def delete_knowledge_item(kid: str) -> bool:
+    """删除单条知识条目（yaml + config.json 同步）。返回是否找到并删除。"""
+    kid = (kid or "").strip()
+    if not kid:
+        return False
+
+    # 1. 删 yaml 文件
+    yaml_path = _knowledge_entries_dir() / f"{kid}.yaml"
+    deleted_yaml = False
+    try:
+        if yaml_path.exists():
+            yaml_path.unlink()
+            deleted_yaml = True
+    except Exception as exc:
+        SLog.w(TAG, f"delete_knowledge_item yaml unlink failed: {exc}")
+
+    # 2. 从 config.json 移除
+    root = _testing_root()
+    items: List[Dict[str, Any]] = root.get("knowledge") or []
+    if not isinstance(items, list):
+        items = []
+    before = len(items)
+    items = [x for x in items if not (isinstance(x, dict) and x.get("id") == kid)]
+    root["knowledge"] = items
+    SecurityManager.save()
+
+    return deleted_yaml or len(items) < before
+
+
+def review_knowledge_item(kid: str, *, action: str, updates: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """审核通过才可被执行匹配；驳回则删除。"""
+    kid = (kid or "").strip()
+    act = (action or "").strip().lower()
+    if act not in ("approve", "reject"):
+        raise ValueError("action 必须是 approve 或 reject")
+    existing = next(
+        (x for x in list_testing_knowledge() if str(x.get("id") or "") == kid),
+        None,
+    )
+    if not existing:
+        raise KeyError(kid)
+    if act == "reject":
+        delete_knowledge_item(kid)
+        return {**existing, "review_status": "rejected", "deleted": True}
+    payload = dict(existing)
+    if isinstance(updates, dict):
+        payload.update({k: v for k, v in updates.items() if v is not None})
+    payload["id"] = kid
+    payload["review_status"] = "approved"
+    return upsert_knowledge_item(payload)
+
+
+# 原始分 25 视为 100%；低于 40% 不注入 prompt，避免低相关知识误导模型。
+KNOWLEDGE_SCORE_FULL = 25
+KNOWLEDGE_USE_MIN_PCT = 40
+KNOWLEDGE_SKIP_REASON = "匹配度过低，未注入本步，避免误导模型"
+_KNOWLEDGE_CORE_KEYS = (
+    "id", "title", "content", "category", "tags", "app_ids", "enabled",
+    "source", "review_status", "origin_task_id", "origin_case_id",
+    *_KNOWLEDGE_RUNTIME_KEYS,
+)
+
+
+def _knowledge_match_pct(score: int) -> int:
+    if score <= 0:
+        return 0
+    return max(1, min(100, round(score * 100 / KNOWLEDGE_SCORE_FULL)))
+
+
+def knowledge_body_text(item: Dict[str, Any]) -> str:
+    """正文 + 1.2.0 起新增的扩展字段（如 物体），供匹配与注入，避免只截 content。"""
+    parts: List[str] = []
+    content = str(item.get("content") or "").strip()
+    if content:
+        parts.append(content)
+    for key, val in item.items():
+        if key in _KNOWLEDGE_CORE_KEYS or val in (None, "", [], {}):
+            continue
+        if isinstance(val, (dict, list)):
+            try:
+                import json
+                rendered = json.dumps(val, ensure_ascii=False)
+            except Exception:
+                rendered = str(val)
+        else:
+            rendered = str(val).strip()
+        if rendered:
+            parts.append(f"{key}: {rendered}")
+    return "\n".join(parts)
+
+
+def knowledge_prompt_snippet(item: Dict[str, Any], *, max_chars: int = 1200) -> str:
+    title = str(item.get("title") or "").strip() or str(item.get("id") or "")
+    body = knowledge_body_text(item).strip()
+    if len(body) > max_chars:
+        body = body[:max_chars].rstrip() + "…"
+    return f"「{title}」: {body}" if body else f"「{title}」"
+
+
+def _score_knowledge_item(item: Dict[str, Any], query: str) -> int:
+    q = (query or "").strip().lower()
+    if not q:
+        return 0
+    title = (item.get("title") or "").lower()
+    body = knowledge_body_text(item).lower()
+    category = (item.get("category") or "").lower()
+    tags = [str(t).lower() for t in (item.get("tags") or [])]
+    score = 0
+    if title and title in q:
+        score += 14
+    elif title:
+        n = 4 if len(title) >= 4 else max(2, len(title))
+        hits = 0
+        step = max(1, n // 2)
+        for i in range(0, max(0, len(title) - n + 1), step):
+            gram = title[i:i + n]
+            if gram and gram in q:
+                hits += 1
+        score += min(12, hits * 2)
+    for tag in tags:
+        if len(tag) >= 2 and tag in q:
+            score += 6
+    if category and len(category) >= 2 and category in q:
+        score += 3
+    stop = {
+        "点击", "输入", "勾选", "页面", "步骤", "进行", "成功", "失败",
+        "登录", "打开", "关闭", "测试", "用例", "操作", "验证", "检查",
+    }
+    for token in re.split(r"[\s,，、/]+", q):
+        if len(token) < 2 or token in stop:
+            continue
+        if len(token) < 3 and not re.search(r"[a-zA-Z]{3,}", token):
+            continue
+        local = 0
+        if token in title:
+            local += 8
+        if token in body:
+            local += 4
+        if category and token in category:
+            local += 5
+        for tag in tags:
+            if token in tag or tag in token:
+                local += 6
+        if local > 0:
+            score += local
+    return score
 
 
 def match_testing_knowledge(
     text: str,
     *,
     app_id: Optional[str] = None,
-    limit: int = 5,
+    limit: int = 3,
 ) -> List[Dict[str, Any]]:
-    """按关键词/标签匹配知识条目，供规划与语义层引用。"""
-    query = (text or "").strip().lower()
-    if not query:
-        return []
-    hits: List[tuple] = []
+    """按当前上下文匹配知识条目。返回匹配度最高的前 N 条（默认 3），带 score / match_pct / used。
+
+    used=False 的条目仍返回给前端展示，但不应写入模型 prompt。
+    """
+    query = (text or "").strip()
+    ranked: List[tuple[int, Dict[str, Any]]] = []
     for item in list_testing_knowledge():
         if item.get("enabled") is False:
+            continue
+        if _knowledge_review_status(item) != "approved":
             continue
         app_ids = item.get("app_ids") or []
         if app_ids and app_id and str(app_id) not in [str(x) for x in app_ids]:
             continue
-        title = (item.get("title") or "").lower()
-        content = (item.get("content") or "").lower()
-        tags = [str(t).lower() for t in (item.get("tags") or [])]
-        score = 0
-        matched_tokens = 0
-        category = (item.get("category") or "").lower()
-        stop = {
-            "点击", "输入", "勾选", "页面", "步骤", "进行", "成功", "失败",
-            "登录", "打开", "关闭", "测试", "用例", "操作", "验证", "检查",
-        }
-        for token in re.split(r"[\s,，、/]+", query):
-            if len(token) < 2 or token in stop:
-                continue
-            if len(token) < 3 and not re.search(r"[a-zA-Z]{3,}", token):
-                continue
-            local = 0
-            if token in title:
-                local += 8
-            if token in content:
-                local += 4
-            if category and token in category:
-                local += 5
-            for tag in tags:
-                if token in tag or tag in token:
-                    local += 6
-            if local > 0:
-                score += local
-                matched_tokens += 1
-        if score >= 10 and matched_tokens >= 1:
-            hits.append((score, item))
-    hits.sort(key=lambda x: x[0], reverse=True)
-    return [h[1] for h in hits[:limit]]
+        ranked.append((_score_knowledge_item(item, query), item))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    out: List[Dict[str, Any]] = []
+    for score, item in ranked[: max(1, int(limit or 3))]:
+        pct = _knowledge_match_pct(score)
+        used = pct >= KNOWLEDGE_USE_MIN_PCT
+        row = dict(item)
+        row["score"] = score
+        row["match_pct"] = pct
+        row["used"] = used
+        row["skip_reason"] = "" if used else KNOWLEDGE_SKIP_REASON
+        out.append(row)
+    return out
 
 
 def get_figma_access_token() -> str:

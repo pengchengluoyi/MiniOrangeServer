@@ -924,6 +924,7 @@ def decide_next_action(
     baseline_hint: str = "",
     success_criteria: str = "",
     memory_block: str = "",
+    knowledge_hint: str = "",
     provider_id: Optional[str] = None,
     timeout_sec: int = 90,
 ) -> AgentDecision:
@@ -951,16 +952,39 @@ def decide_next_action(
         target_package=str(getattr(run_context, "target_package", "") or ""),
         success_criteria=success_criteria,
         memory_block=memory_block,
+        knowledge_hint=knowledge_hint,
     )
+
+    # 给前端展示：我们喂给模型的“文本块/上下文”（不直接回传超大 image_base64）。
+    llm_input_debug = {
+        "goal": goal,
+        "checkpoints_block": checkpoints_block,
+        "history_block": history_block,
+        "baseline_hint": baseline_hint,
+        "knowledge_hint": knowledge_hint,
+        "memory_block": memory_block,
+        "success_criteria": success_criteria,
+        "device_brief": run_context.to_prompt_brief(),
+        "target_package": str(getattr(run_context, "target_package", "") or ""),
+        "image": {"width": width, "height": height, "mime": image_mime, "note": "image_base64 omitted"},
+    }
     raw, meta = call_chat_text(
         provider=provider, messages=messages,
         temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
     )
     if raw is None:
         SLog.w(TAG, f"decide_next_action LLM failed err={meta.get('error')!r}")
-        return AgentDecision(status="give_up", thought="LLM 返回空/解析失败",
-                             raw_llm={"meta": meta}, parse_warnings=["llm failed"])
-    return _parse_agent_decision(raw, width, height)
+        return AgentDecision(
+            status="give_up",
+            thought="LLM 返回空/解析失败",
+            raw_llm={"llm_input": llm_input_debug, "llm_output": None, "meta": meta},
+            parse_warnings=["llm failed"],
+        )
+
+    decision = _parse_agent_decision(raw, width, height)
+    # 覆盖 raw_llm：既保留输出，也带上“喂给模型的输入”用于 UI 可视化溯源。
+    decision.raw_llm = {"llm_input": llm_input_debug, "llm_output": raw, "meta": meta}
+    return decision
 
 
 def decide_restart_app(

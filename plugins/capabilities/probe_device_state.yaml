@@ -1,0 +1,53 @@
+id: probe_device_state
+display_name: 读取设备运行态
+event_kind: probe_device_state
+category: system
+description: |
+  一次批量取回电源 / 锁屏 / 前台 Activity / 目标进程 / ANR / 输入法 状态，
+  供 L0 系统层取证使用（只输出事实，不做判断）。
+  本能力没有 Python 分支，完全由下面的 low_level 声明驱动 —— 用于验证
+  "只加 yaml 就能新增能力"这条通路（docs/plan-skill-packs-and-console.md §3.1）。
+platforms: [android]
+trigger_phrases: [设备状态, 息屏, 锁屏, 前台应用, ANR]
+needs_vlm: false
+
+# 可见域：仅系统层 prompt 可见，业务用例菜单里不出现（避免业务 agent 乱调）
+visible_to: [system]
+
+implementations:
+  - id: adb_dumpsys_batch
+    display_name: ADB dumpsys 批量取证
+    executor: adb
+    requires_caps: [read_system_data]
+    needs_vlm: false
+    low_level:
+      kind: shell_batch
+      parse: keyvalue_lines
+      commands:
+        - name: power
+          shell: "dumpsys power | grep -E 'mWakefulness=|mHoldingDisplaySuspendBlocker='"
+          parse: keyvalue_lines
+        - name: keyguard
+          shell: "dumpsys window | grep -E 'isKeyguardShowing=|mDreamingLockscreen=|mKeyguardOccluded='"
+          parse: keyvalue_lines
+        - name: foreground
+          shell: "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'"
+          parse: lines
+        - name: target_pid
+          # 进程不存在时 pidof 返回 1 —— 这是事实不是错误
+          shell: "pidof {package}"
+          parse: first_token
+          allow_rc: [0, 1]
+        - name: anr_window
+          # grep -c 计数为 0 时返回 1 —— 同理
+          shell: "dumpsys window windows | grep -icE 'Application Not Responding|Application Error'"
+          parse: first_token
+          allow_rc: [0, 1]
+        - name: ime
+          shell: "dumpsys input_method | grep -E 'mInputShown='"
+          parse: keyvalue_lines
+    cost: 1
+
+ui:
+  shown_in_settings: false
+  examples: ["取证：屏幕是否点亮 / 是否锁屏 / 被测应用是否在前台"]

@@ -176,6 +176,8 @@ def append_app_knowledge(app_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "tags": [str(t).strip() for t in (item.get("tags") or []) if str(t).strip()],
         "app_ids": [aid],
         "enabled": item.get("enabled", True) is not False,
+        "source": (item.get("source") or "manual").strip() or "manual",
+        "review_status": (item.get("review_status") or "approved").strip() or "approved",
     }
     saved = save_testing_knowledge(existing + [new_row])
     for row in saved:

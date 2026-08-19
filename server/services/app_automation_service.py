@@ -28,7 +28,28 @@ DEFAULT_AUTOMATION = {
         "devices": {},
     },
     "icon_targets": [],
+    "suites": [],
 }
+
+
+def _normalize_suites(raw) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        ids = [str(x).strip() for x in (item.get("case_ids") or []) if str(x).strip()]
+        if not name or not ids:
+            continue
+        out.append({
+            "id": str(item.get("id") or uuid.uuid4().hex[:10]),
+            "name": name[:80],
+            "case_ids": ids,
+            "updated_at": str(item.get("updated_at") or ""),
+        })
+    return out
 
 
 def _app_env(app) -> dict:
@@ -64,6 +85,7 @@ def get_automation_config(app) -> Dict[str, Any]:
     icons = raw.get("icon_targets")
     if isinstance(icons, list):
         out["icon_targets"] = [x for x in icons if isinstance(x, dict)]
+    out["suites"] = _normalize_suites(raw.get("suites"))
     figma = raw.get("figma")
     if isinstance(figma, dict):
         out["figma"] = {
@@ -110,6 +132,8 @@ def save_automation_config(app, config: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
         current["icon_targets"] = normalized
+    if "suites" in config:
+        current["suites"] = _normalize_suites(config.get("suites"))
     if "figma" in config and isinstance(config["figma"], dict):
         prev_figma = current.get("figma") or {}
         incoming = config["figma"]

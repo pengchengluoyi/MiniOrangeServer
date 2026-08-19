@@ -1,0 +1,63 @@
+id: system_permission_dialog_while_using_deterministic
+kind: recovery
+title: 系统权限授权框（仅在使用该应用时允许）
+enabled: true
+provider: device_team
+owner: "@device-team"
+lifecycle: active
+priority: 65
+platforms: [android]
+
+when: 顶层窗口是系统权限控制器，屏上出现「仅在使用该应用时允许 / While using the app」
+
+match:
+  evidence:
+    # 只有当系统弹窗在前台、且前台并不是被测应用时才处理
+    # （collect_evidence 会把 app_foreground=compare(前台包, target_package) 规整成 yes/no/unknown）
+    app_foreground: "no"
+  top_window_pkg_prefix:
+    - com.android.permissioncontroller
+    - com.android.packageinstaller
+    - com.miui.securitycenter
+  screen_text_any:
+    - "允许"
+    - "仅在使用该应用时允许"
+    - "While using the app"
+    - "Allow while using the app"
+
+mode: deterministic
+actions:
+  # 先点“while using”，如果语言/ROM 文案不一致失败也不阻断后续 verify（apply_rule 会继续执行所有 actions）
+  - capability: tap_element
+    target: {text: "允许"}
+  - capability: wait_ms
+    params: {ms: 350}
+
+  - capability: tap_element
+    target: {text: "仅在使用该应用时允许"}
+  - capability: wait_ms
+    params: {ms: 400}
+
+  - capability: tap_element
+    target: {text: "While using the app"}
+  - capability: wait_ms
+    params: {ms: 600}
+
+  - capability: tap_element
+    target: {text: "Allow while using the app"}
+  - capability: wait_ms
+    params: {ms: 600}
+
+verify:
+  evidence:
+    app_foreground: "yes"
+
+forbid:
+  text_any: ["拒绝", "不允许", "禁止", "Deny"]
+
+max_attempts: 2
+
+evidence_notes:
+  - "目的：验证 YAML 声明的 system dialog handling 能端到端跑通（tap_element + semantic anchoring + verify）。"
+  - "文案强依赖 ROM/语言；因此用多条 tap_element actions 覆盖常见变体。"
+

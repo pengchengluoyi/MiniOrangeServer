@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from typing import Any
+from typing import Any, Optional
 
 from script.log import SLog
 
@@ -25,7 +25,7 @@ from server.services.regression.executors.base import (
 
 TAG = "AdbExecutor"
 
-# capability_id → 内部处理方法
+# capability_id → 内部处理方法（有专属 Python 实现的）
 _SUPPORTED_CAPS: set[str] = {
     "launch_app",
     "close_app",
@@ -43,11 +43,30 @@ _SUPPORTED_CAPS: set[str] = {
 }
 
 
+def _declares_adb_low_level(capability_id: str) -> bool:
+    """该 capability 是否声明了可执行的 adb low_level（纯 yaml 能力的支持依据）。
+
+    这样新增能力只需写 yaml：不必回来改 _SUPPORTED_CAPS，也不必加 Python 分支。
+    """
+    try:
+        from server.services.plugins import registry as plugin_registry
+
+        cap = plugin_registry.get_capability(capability_id)
+    except Exception:  # pragma: no cover - registry 不可用时退化为不支持
+        return False
+    if cap is None:
+        return False
+    for impl in cap.implementations or []:
+        if getattr(impl, "executor", "") == "adb" and (getattr(impl, "low_level", None) or {}):
+            return True
+    return False
+
+
 class AdbExecutor:
     id = "adb"
 
     def supports(self, capability_id: str) -> bool:
-        return capability_id in _SUPPORTED_CAPS
+        return capability_id in _SUPPORTED_CAPS or _declares_adb_low_level(capability_id)
 
     def execute(self, event: PlanEvent, ctx: ExecutorContext) -> EventResult:
         started_at = _now_iso()
@@ -84,7 +103,9 @@ class AdbExecutor:
                 return self._input_text(event, ctx, serial, started_at, t0)
             if cap == "exec_script":
                 return self._exec_script(event, ctx, serial, started_at, t0)
-            return self._fail(event, started_at, t0, f"AdbExecutor 不处理 capability={cap}")
+            # 兜底：capability 未写 Python 分支时，按 yaml 里的 low_level 声明执行。
+            # 这条分支让"只加 yaml 就多一个能力"成真（见 docs/plan-skill-packs-and-console.md §3.1）。
+            return self._run_declared_low_level(event, ctx, serial, started_at, t0)
         except Exception as e:
             SLog.e(TAG, f"execute exception cap={cap} sn={ctx.run_context.sn}: {e}")
             return self._fail(event, started_at, t0, f"exception: {e}")
@@ -339,66 +360,168 @@ class AdbExecutor:
         )
 
     def _tap_element(self, event, ctx, serial, started_at, t0):
-        # 优先用 PlanEvent.params 里 router 注入的 vlm_locate 坐标
-        params = event.params or {}
-        x = params.get("x"); y = params.get("y")
+        # 坐标来源：语义锚点优先（稳定、可复用），模型给的坐标兜底
+        x, y, audit, how = self._point_for(event, serial)
         if x is None or y is None:
-            return self._fail(event, started_at, t0, "tap_element 缺坐标（router 未注入 VLM locate 结果）")
-        rc, out, err = self._adb_shell(serial, "input", "tap", str(int(x)), str(int(y)))
+            return self._fail(
+                event, started_at, t0,
+                "tap_element 无可用坐标（锚点未命中且未给 x/y）"
+                + (f"：{(audit.get('anchor') or {}).get('reason', '')}" if audit else ""),
+            )
+        rc, out, err = self._adb_shell(serial, "input", "tap", str(x), str(y))
         elapsed = int((time.time() - t0) * 1000)
+        label = self._point_label(how, audit, x, y)
+        self._invalidate_hierarchy(serial)
         if rc == 0:
             return make_event_result(
                 event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
-                elapsed_ms=elapsed, summary=f"点击 ({x},{y})",
+                elapsed_ms=elapsed, summary=f"点击 {label}", raw_response=audit,
             )
         return make_event_result(
             event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
-            elapsed_ms=elapsed, summary=f"点击 ({x},{y}) 失败", error=err or out,
+            elapsed_ms=elapsed, summary=f"点击 {label} 失败", error=err or out, raw_response=audit,
         )
+
+    def _point_label(self, how: str, audit: dict, x: int, y: int) -> str:
+        """人可读的落点说明：锚点命中时说清点的是哪个元素。"""
+        if how == "anchor":
+            a = audit.get("anchor") or {}
+            name = a.get("text") or a.get("content_desc") or a.get("resource_id") or "?"
+            return f"「{str(name)[:20]}」({x},{y}) via {a.get('matched_by')}"
+        if how == "fallback_xy":
+            return f"({x},{y})[锚点未命中，回落坐标]"
+        return f"({x},{y})"
+
+    def _invalidate_hierarchy(self, serial: str) -> None:
+        """动作后屏幕会变，主动失效层级缓存，避免下一步拿到旧快照。"""
+        try:
+            from server.services.regression import hierarchy as H
+
+            H.invalidate_cache(serial)
+        except Exception:  # pragma: no cover
+            pass
 
     def _long_press_element(self, event, ctx, serial, started_at, t0):
         params = event.params or {}
-        x = params.get("x"); y = params.get("y")
+        x, y, audit, how = self._point_for(event, serial)
         if x is None or y is None:
-            return self._fail(event, started_at, t0, "long_press_element 缺坐标")
+            return self._fail(event, started_at, t0, "long_press_element 无可用坐标")
         duration = int(params.get("duration_ms") or 1000)
         # 长按 = swipe 自己到自己
-        rc, out, err = self._adb_shell(serial, "input", "swipe", str(int(x)), str(int(y)), str(int(x)), str(int(y)), str(duration))
+        rc, out, err = self._adb_shell(serial, "input", "swipe", str(x), str(y), str(x), str(y), str(duration))
         elapsed = int((time.time() - t0) * 1000)
+        label = self._point_label(how, audit, x, y)
+        self._invalidate_hierarchy(serial)
         if rc == 0:
             return make_event_result(
                 event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
-                elapsed_ms=elapsed, summary=f"长按 ({x},{y}) {duration}ms",
+                elapsed_ms=elapsed, summary=f"长按 {label} {duration}ms", raw_response=audit,
             )
         return make_event_result(
             event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
-            elapsed_ms=elapsed, summary="长按失败", error=err or out,
+            elapsed_ms=elapsed, summary="长按失败", error=err or out, raw_response=audit,
         )
 
     def _input_text(self, event, ctx, serial, started_at, t0):
         params = event.params or {}
         text = params.get("text") or ""
-        x = params.get("x"); y = params.get("y")
         if not text:
             return self._fail(event, started_at, t0, "input_text 缺 params.text")
-        # 若给了坐标，先点焦点
+        # 若能定出输入框位置（锚点优先），先点它取焦点
+        x, y, audit, how = self._point_for(event, serial)
         if x is not None and y is not None:
-            self._adb_shell(serial, "input", "tap", str(int(x)), str(int(y)))
+            self._adb_shell(serial, "input", "tap", str(x), str(y))
         # adb input text 不支持中文 / 空格；空格转 %s
         safe_text = str(text).replace(" ", "%s")
         rc, out, err = self._adb_shell(serial, "input", "text", safe_text)
         elapsed = int((time.time() - t0) * 1000)
+        self._invalidate_hierarchy(serial)
         if rc == 0:
             return make_event_result(
                 event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
-                elapsed_ms=elapsed, summary=f"输入 {len(text)} 字",
+                elapsed_ms=elapsed, summary=f"输入 {len(text)} 字", raw_response=audit,
             )
         return make_event_result(
             event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
-            elapsed_ms=elapsed, summary="输入失败（中文需要 IME 协助，建议改 remote）", error=err or out,
+            elapsed_ms=elapsed, summary="输入失败（中文需要 IME 协助，建议改 remote）",
+            error=err or out, raw_response=audit,
         )
 
     # ---------- 内部 ----------
+
+    # ---------- 语义锚点解析（S0b） ----------
+
+    def _resolve_anchor_xy(self, event, serial: str) -> tuple[Optional[int], Optional[int], dict]:
+        """params.target 有语义锚点时，用 UI 层级解析成精确坐标。
+
+        返回 (x, y, audit)。解析不到时 x/y 为 None，调用方回落到模型给的坐标。
+        audit 会进 raw_response，便于回放时看清"这一下点的到底是哪个元素"。
+        """
+        from server.services.regression import hierarchy as H
+
+        params = event.params or {}
+        if not H.has_target(params):
+            return None, None, {}
+        target = dict(params.get("target") or {})
+        dump = H.dump_ui_nodes(serial)
+        if not dump.ok:
+            return None, None, {"anchor": {"ok": False, "reason": f"层级采集失败: {dump.error[:120]}",
+                                           "target": target}}
+        match = H.resolve_target(dump.nodes, target)
+        if match is None:
+            return None, None, {"anchor": {"ok": False, "reason": "锚点未命中任何节点",
+                                           "target": target, "nodes": len(dump)}}
+        x, y = match.node.center
+        audit = {"anchor": {"ok": True, "target": target, "nodes": len(dump),
+                            "dump_ms": dump.elapsed_ms, **match.to_brief()}}
+        SLog.i(TAG, f"anchor hit by={match.matched_by} label={match.node.label()!r} "
+                    f"-> ({x},{y}) candidates={match.candidates}")
+        return x, y, audit
+
+    def _point_for(self, event, serial: str) -> tuple[Optional[int], Optional[int], dict, str]:
+        """统一取坐标：锚点优先，模型坐标兜底。返回 (x, y, audit, how)。"""
+        params = event.params or {}
+        ax, ay, audit = self._resolve_anchor_xy(event, serial)
+        if ax is not None and ay is not None:
+            return ax, ay, audit, "anchor"
+        x, y = params.get("x"), params.get("y")
+        if x is None or y is None:
+            return None, None, audit, "none"
+        return int(x), int(y), audit, "fallback_xy" if audit else "xy"
+
+    # ---------- 通用 low_level 兜底 ----------
+
+    def _run_declared_low_level(self, event, ctx, serial, started_at, t0):
+        """按 capability yaml 的 low_level 声明执行（无 Python 分支时的通路）。"""
+        from server.services.regression.executors.low_level import run_low_level
+
+        impl = ctx.selected_impl or {}
+        low = impl.get("low_level") or {}
+        cap = event.capability_id
+        if not low:
+            return self._fail(
+                event, started_at, t0,
+                f"cap={cap} 既无 Python 分支，其 adb 实现也未声明 low_level",
+            )
+
+        def _shell(cmd: str) -> tuple[int, str, str]:
+            # 整串交给 adb shell（命令已过白名单，不含重定向/管道到 sh）
+            return self._adb_shell(serial, cmd)
+
+        outcome = run_low_level(
+            low, dict(event.params or {}), _shell,
+            log_prefix=f"[{ctx.run_id}] cap={cap} ",
+        )
+        elapsed = int((time.time() - t0) * 1000)
+        SLog.i(TAG, f"[{ctx.run_id}] low_level cap={cap} kind={low.get('kind')} "
+                    f"ok={outcome.ok} cmds={len(outcome.commands)}")
+        return make_event_result(
+            event,
+            status=EventStatus.PASS if outcome.ok else EventStatus.FAIL,
+            executor_used=self.id, started_at=started_at, elapsed_ms=elapsed,
+            summary=outcome.summary, error=outcome.error,
+            raw_response=outcome.as_raw_response(),
+        )
 
     def _fail(self, event, started_at, t0, msg: str) -> EventResult:
         return make_event_result(

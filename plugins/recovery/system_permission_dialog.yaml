@@ -1,0 +1,31 @@
+id: system_permission_dialog
+kind: recovery
+title: 系统权限授权框
+enabled: true
+provider: device_team
+owner: "@device-team"
+lifecycle: active
+priority: 50
+platforms: [android]
+
+when: 顶层窗口是系统权限控制器，屏上出现「允许 / 仅在使用该应用时允许」这类授权框
+
+match:
+  top_window_pkg_prefix:
+    - com.android.permissioncontroller
+    - com.android.packageinstaller
+    - com.miui.securitycenter
+  screen_text_any: ["允许", "仅在使用该应用时允许", "While using the app", "Allow"]
+
+# advise：文案与按钮位置随 ROM 变化很大，不写死动作，交给 SystemAgent 看图决定
+mode: advise
+prompt_snippet: |
+  这是系统权限授权框，不是被测应用界面。选择允许类按钮（「仅在使用该应用时允许」优先，
+  其次「允许」）让流程继续；**禁止**点「拒绝 / 不允许 / 禁止」，那会让后续所有用例都缺权限。
+  处置完成后回到被测应用继续原任务。
+
+forbid:
+  text_any: ["拒绝", "不允许", "禁止", "Deny"]
+
+evidence_notes:
+  - "长尾场景：各家 ROM 文案与按钮顺序不同，硬编码枚举不完，故用 advise 形态"

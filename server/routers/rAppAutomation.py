@@ -71,11 +71,19 @@ class FigmaDesignConfig(BaseModel):
     pages_summary: List[str] = []
 
 
+class CaseSuiteBody(BaseModel):
+    id: str = ""
+    name: str
+    case_ids: List[str] = []
+    updated_at: str = ""
+
+
 class AutomationConfigUpdate(BaseModel):
-    env_profile: str = "test"
+    env_profile: Optional[str] = None
     execution_env: Optional[ExecutionEnvConfig] = None
     skills: Optional[AutomationSkills] = None
     figma: Optional[FigmaDesignConfig] = None
+    suites: Optional[List[CaseSuiteBody]] = None
 
 
 def _get_app(db: Session, app_id: str) -> App:
@@ -193,13 +201,17 @@ def apply_figma_app_logic(app_id: str, body: FigmaApplyLogicBody, db: Session = 
 @router.put("/config/{app_id}")
 def update_automation_config(app_id: str, body: AutomationConfigUpdate, db: Session = Depends(get_db)):
     app = _get_app(db, app_id)
-    payload: Dict[str, Any] = {"env_profile": body.env_profile}
+    payload: Dict[str, Any] = {}
+    if body.env_profile is not None:
+        payload["env_profile"] = body.env_profile
     if body.execution_env is not None:
         payload["execution_env"] = body.execution_env.model_dump()
     if body.skills is not None:
         payload["skills"] = body.skills.model_dump()
     if body.figma is not None:
         payload["figma"] = body.figma.model_dump()
+    if body.suites is not None:
+        payload["suites"] = [s.model_dump() for s in body.suites]
     cfg = aas.save_automation_config(app, payload)
     db.commit()
     return {"code": 200, "msg": "自动化配置已保存", "data": {"automation": cfg}}

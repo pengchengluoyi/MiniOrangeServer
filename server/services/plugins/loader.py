@@ -18,6 +18,7 @@ from server.services.plugins.models import (
     Capability,
     Executor,
     LoadError,
+    RecoveryRule,
 )
 
 TAG = "PluginLoader"
@@ -72,6 +73,7 @@ class PluginLoader:
         self._abstract_caps: dict[str, AbstractCap] = {}
         self._executors: dict[str, Executor] = {}
         self._capabilities: dict[str, Capability] = {}
+        self._recovery_rules: dict[str, RecoveryRule] = {}
         self._errors: list[LoadError] = []
 
     # ---------- 公开访问 ----------
@@ -90,6 +92,11 @@ class PluginLoader:
     def capabilities(self) -> dict[str, Capability]:
         self._ensure_loaded()
         return self._capabilities
+
+    @property
+    def recovery_rules(self) -> dict[str, RecoveryRule]:
+        self._ensure_loaded()
+        return self._recovery_rules
 
     @property
     def errors(self) -> list[LoadError]:
@@ -127,7 +134,7 @@ class PluginLoader:
         ac = self.root / "abstract_caps.yaml"
         if ac.is_file():
             paths.append(ac)
-        for sub in ("executors", "capabilities"):
+        for sub in ("executors", "capabilities", "recovery"):
             d = self.root / sub
             if not d.is_dir():
                 continue
@@ -140,6 +147,7 @@ class PluginLoader:
         self._abstract_caps = {}
         self._executors = {}
         self._capabilities = {}
+        self._recovery_rules = {}
         self._errors = []
         self._mtimes = {}
 
@@ -170,11 +178,18 @@ class PluginLoader:
                 if _is_active_yaml(path):
                     self._load_capability(path)
 
+        # recovery 规则（kind=recovery，L0 系统层处置声明）
+        rec_dir = self.root / "recovery"
+        if rec_dir.is_dir():
+            for path in sorted(rec_dir.iterdir()):
+                if _is_active_yaml(path):
+                    self._load_recovery_rule(path)
+
         SLog.i(
             TAG,
             f"loaded plugins: abstract_caps={len(self._abstract_caps)}, "
             f"executors={len(self._executors)}, capabilities={len(self._capabilities)}, "
-            f"errors={len(self._errors)}",
+            f"recovery={len(self._recovery_rules)}, errors={len(self._errors)}",
         )
 
         # cross-check：每个 capability 的 requires_caps 是否都在 abstract_caps 中
@@ -251,6 +266,41 @@ class PluginLoader:
                 LoadError(path=str(path), kind="capability", message=str(e))
             )
             SLog.w(TAG, f"capability validation failed: {path} -> {e}")
+
+    def _load_recovery_rule(self, path: Path) -> None:
+        data = self._read_yaml(path)
+        if not data or not isinstance(data, dict):
+            return
+        try:
+            rule = RecoveryRule(**data)
+            rule.source_path = str(path)
+            if rule.id in self._recovery_rules:
+                self._errors.append(
+                    LoadError(path=str(path), kind="recovery",
+                              message=f"duplicate recovery rule id: {rule.id}")
+                )
+                return
+            if rule.mode not in ("deterministic", "advise"):
+                self._errors.append(
+                    LoadError(path=str(path), kind="recovery",
+                              message=f"unknown mode={rule.mode!r}（只支持 deterministic / advise）")
+                )
+                return
+            if rule.mode == "deterministic" and not rule.actions:
+                self._errors.append(
+                    LoadError(path=str(path), kind="recovery",
+                              message="mode=deterministic 必须声明 actions")
+                )
+                return
+            if not rule.owner:
+                self._errors.append(
+                    LoadError(path=str(path), kind="recovery",
+                              message="缺 owner（谁负责这条规则），仍加载但请补上")
+                )
+            self._recovery_rules[rule.id] = rule
+        except ValidationError as e:
+            self._errors.append(LoadError(path=str(path), kind="recovery", message=str(e)))
+            SLog.w(TAG, f"recovery rule validation failed: {path} -> {e}")
 
     def _cross_check(self) -> None:
         """校验：

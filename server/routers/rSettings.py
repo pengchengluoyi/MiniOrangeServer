@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from server.services import system_settings_service as ss
 
@@ -146,6 +146,7 @@ def update_feishu_settings_legacy(body: FeishuBotSettingsUpdate):
 
 
 class KnowledgeItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
     id: str = ""
     title: str = ""
     content: str = ""
@@ -153,6 +154,8 @@ class KnowledgeItem(BaseModel):
     tags: List[str] = Field(default_factory=list)
     app_ids: List[str] = Field(default_factory=list)
     enabled: bool = True
+    source: str = "manual"
+    review_status: str = "approved"
 
 
 class KnowledgeSaveBody(BaseModel):
@@ -194,6 +197,69 @@ class FailureAnalyzeBody(BaseModel):
 class KnowledgeAppendBody(BaseModel):
     app_id: str
     item: KnowledgeItem
+
+
+class KnowledgeUpsertBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str = ""
+    title: str
+    content: str
+    category: str = "其他"
+    tags: List[str] = Field(default_factory=list)
+    app_ids: List[str] = Field(default_factory=list)
+    enabled: bool = True
+    source: str = ""
+    review_status: str = ""
+
+
+@router.put("/knowledge/{kid}")
+def upsert_knowledge_item(kid: str, body: KnowledgeUpsertBody):
+    """新建或更新单条知识条目（kid 若与 body.id 不一致以 kid 为准）。"""
+    item = body.model_dump()
+    item["id"] = "" if kid.strip() == "new" else (kid.strip() or item.get("id") or "")
+    try:
+        row = ss.upsert_knowledge_item(item)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "msg": "已保存", "data": {"item": row}}
+
+
+@router.delete("/knowledge/{kid}")
+def delete_knowledge_item(kid: str):
+    """删除单条知识条目。"""
+    found = ss.delete_knowledge_item(kid.strip())
+    if not found:
+        raise HTTPException(status_code=404, detail=f"未找到知识条目：{kid}")
+    return {"code": 200, "msg": "已删除"}
+
+
+class KnowledgeReviewBody(BaseModel):
+    action: str
+    title: str = ""
+    content: str = ""
+    category: str = ""
+    tags: List[str] = Field(default_factory=list)
+
+
+@router.post("/knowledge/{kid}/review")
+def review_knowledge_item(kid: str, body: KnowledgeReviewBody):
+    """待审核知识：approve 后才进入匹配；reject 删除。"""
+    updates: dict = {}
+    if body.title.strip():
+        updates["title"] = body.title.strip()
+    if body.content.strip():
+        updates["content"] = body.content.strip()
+    if body.category.strip():
+        updates["category"] = body.category.strip()
+    if body.tags:
+        updates["tags"] = body.tags
+    try:
+        row = ss.review_knowledge_item(kid.strip(), action=body.action, updates=updates or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"未找到知识条目：{kid}") from e
+    return {"code": 200, "msg": "已审核", "data": {"item": row}}
 
 
 @router.post("/knowledge/analyze-failure")

@@ -34,6 +34,18 @@ def list_capabilities() -> list[Capability]:
     return list(get_loader().capabilities.values())
 
 
+def list_recovery_rules(*, enabled_only: bool = True) -> list:
+    """L0 恢复规则，按 priority 降序。enabled_only 过滤掉 draft/deprecated。"""
+    rules = list(get_loader().recovery_rules.values())
+    if enabled_only:
+        rules = [r for r in rules if r.enabled and r.lifecycle == "active"]
+    return sorted(rules, key=lambda r: -int(getattr(r, "priority", 0)))
+
+
+def get_recovery_rule(rule_id: str):
+    return get_loader().recovery_rules.get(rule_id)
+
+
 def list_load_errors() -> list[LoadError]:
     return list(get_loader().errors)
 

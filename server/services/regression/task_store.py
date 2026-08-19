@@ -105,6 +105,8 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "busy": st == "running",
         "current_case_id": current,
         "hitl": hitl,
+        "knowledge_ids": list(doc.get("knowledge_ids") or []),
+        "knowledge_proposals": list(doc.get("knowledge_proposals") or []),
     }
     if include_cases:
         task["cases"] = cases
@@ -129,6 +131,8 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
         "progress": t["progress"],
         "current_case_id": t["current_case_id"],
         "hitl": t["hitl"],
+        "knowledge_ids": list(t.get("knowledge_ids") or []),
+        "knowledge_proposals": list(t.get("knowledge_proposals") or []),
     }
     if case:
         data["case"] = {
@@ -137,6 +141,8 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
             "report_run_id": case.get("report_run_id"),
             "summary": case.get("summary", ""),
             "hitl": bool(case.get("hitl", False)),
+            "knowledge_ids": list(case.get("knowledge_ids") or []),
+            "knowledge_proposals": list(case.get("knowledge_proposals") or []),
         }
     return data
 

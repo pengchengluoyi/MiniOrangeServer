@@ -912,7 +912,7 @@ width={width}, height={height}
 
 ==== 短期记忆（后面找内容 / 对比变化时用这些，不要丢掉）====
 {memory_block}
-{baseline_hint_block}{hierarchy_block}
+{baseline_hint_block}{knowledge_block}{hierarchy_block}
 请看【下方截图】决定下一步一个动作，只返回一个 JSON 对象。"""
 
 
@@ -933,6 +933,7 @@ def build_agent_decide_messages(
     target_app_name: str = "",
     success_criteria: str = "",
     memory_block: str = "",
+    knowledge_hint: str = "",
 ) -> list[dict[str, Any]]:
     hierarchy_block = ""
     if hierarchy_text and hierarchy_text.strip():
@@ -946,6 +947,12 @@ def build_agent_decide_messages(
             "\n==== 上次成功路径（仅供参考，不是脚本；以当前真实屏幕为准）====\n"
             f"{baseline_hint.strip()[:1500]}\n"
         )
+    knowledge_block = ""
+    if knowledge_hint and knowledge_hint.strip():
+        knowledge_block = (
+            "\n==== 本步相关知识（参考，不是脚本；以当前真实屏幕为准）====\n"
+            f"{knowledge_hint.strip()[:4000]}\n"
+        )
     user_text = AGENT_DECIDE_USER_TEMPLATE.format(
         goal=(goal or "").strip() or "（未提供目标）",
         success_criteria=(success_criteria or "").strip() or "（未提供，凭目标自行判断）",
@@ -958,6 +965,7 @@ def build_agent_decide_messages(
         history_block=history_block or "（这是第一步）",
         memory_block=(memory_block or "").strip() or "（暂无）",
         baseline_hint_block=baseline_hint_block,
+        knowledge_block=knowledge_block,
         hierarchy_block=hierarchy_block,
     )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
@@ -1029,4 +1037,33 @@ def build_restart_decide_messages(
     return [
         {"role": "system", "content": AGENT_RESTART_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
+    ]
+
+
+KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一条（或一批）用例的执行结果，整理可供后续 Agent 复用的应用知识草稿。
+
+只返回 JSON：
+{
+  "items": [
+    {
+      "title": "短标题",
+      "category": "业务逻辑|UI导航|登录注册|Tab切换|交互规范|其他",
+      "tags": ["标签"],
+      "content": "可操作的知识正文",
+      "question": "需要用户确认时的提问，可空"
+    }
+  ]
+}
+
+规则：
+- 1~3 条，宁缺毋滥。没有值得沉淀的事实就返回 {"items": []}。
+- 失败：content 写清【失败现象】和【请用户补充正确操作】；question 用口语问用户「这种情况该怎么操作」。
+- 成功：总结本条观察到的界面事实（入口文案、引导语、按钮位置、加载态），不要复述步骤编号。
+- 禁止编造没在记录里出现的控件。禁止 Markdown。"""
+
+
+def build_knowledge_capture_messages(*, context: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": KNOWLEDGE_CAPTURE_SYSTEM},
+        {"role": "user", "content": context.strip() or "（无上下文）"},
     ]

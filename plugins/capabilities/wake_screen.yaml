@@ -1,0 +1,27 @@
+id: wake_screen
+display_name: 唤醒屏幕
+event_kind: wake_screen
+category: system
+description: |
+  点亮屏幕（KEYCODE_WAKEUP=224）。用 WAKEUP 而不是 POWER：POWER 是开关会把亮屏again熄掉，
+  WAKEUP 只唤醒、幂等。本能力零 Python 代码，完全由 low_level 声明驱动。
+platforms: [android]
+trigger_phrases: [唤醒, 点亮屏幕, 亮屏]
+needs_vlm: false
+visible_to: [system]
+
+implementations:
+  - id: adb_keyevent_wakeup
+    display_name: ADB KEYCODE_WAKEUP
+    executor: adb
+    requires_caps: [key_event]
+    needs_vlm: false
+    low_level:
+      kind: shell
+      shell: "input keyevent 224"
+      summary: 已发送唤醒键
+    cost: 1
+
+ui:
+  shown_in_settings: false
+  examples: ["息屏后点亮屏幕"]

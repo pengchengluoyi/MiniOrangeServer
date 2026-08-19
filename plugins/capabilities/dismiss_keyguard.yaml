@@ -1,0 +1,27 @@
+id: dismiss_keyguard
+display_name: 解除锁屏
+event_kind: dismiss_keyguard
+category: system
+description: |
+  解除锁屏（wm dismiss-keyguard）。无密码设备直接进桌面；有密码时会停在密码盘，
+  需后续 input_text 输密码。本能力零 Python 代码，由 low_level 声明驱动。
+platforms: [android]
+trigger_phrases: [解锁, 解除锁屏, 划开锁屏]
+needs_vlm: false
+visible_to: [system]
+
+implementations:
+  - id: adb_wm_dismiss
+    display_name: ADB wm dismiss-keyguard
+    executor: adb
+    requires_caps: [system_shell]
+    needs_vlm: false
+    low_level:
+      kind: shell
+      shell: "wm dismiss-keyguard"
+      summary: 已请求解除锁屏
+    cost: 1
+
+ui:
+  shown_in_settings: false
+  examples: ["锁屏时解锁进入应用"]

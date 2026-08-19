@@ -1,0 +1,38 @@
+id: screen_asleep_or_locked
+kind: recovery
+title: 屏幕息屏 / 锁屏
+enabled: true
+provider: device_team
+owner: "@device-team"
+lifecycle: active
+priority: 100          # 屏幕不亮时其它规则都没意义，优先处置
+platforms: [android]
+
+when: 屏幕未点亮或停在锁屏界面，被测应用无法操作
+
+match:
+  evidence:
+    screen_blocked: "yes"      # awake=no 或 locked=yes 时由取证侧置为 yes
+
+mode: deterministic
+actions:
+  - capability: wake_screen
+  - capability: wait_ms
+    params: {ms: 800}
+  - capability: dismiss_keyguard
+  - capability: wait_ms
+    params: {ms: 1000}
+
+verify:
+  evidence:
+    awake: "yes"
+    locked: "no"
+
+forbid:
+  text_any: ["清除数据", "恢复出厂", "退出登录"]
+
+max_attempts: 2
+
+evidence_notes:
+  - "2026-08-19 实测：设备过夜息屏后前台变 com.android.systemui，锚点全部未命中、用例连续失败"
+  - "手动 input keyevent 224 + 上滑即可恢复，因此固化为确定性规则"
