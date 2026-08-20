@@ -30,6 +30,9 @@ class AppEnvUpdate(BaseModel):
 class ProjectEnvUpdate(BaseModel):
     default_profile: Optional[str] = "test"
     profiles: Dict[str, Any] = {}
+    environments: Optional[list] = None
+    channels: Optional[list] = None
+    pipeline: Optional[list] = None
 
 @router.post("/create")
 def create_project(item: ProjectCreate, db: Session = Depends(get_db)):
@@ -102,6 +105,40 @@ def list_projects(db: Session = Depends(get_db)):
     return out
 
 
+def _purge_app(db: Session, app_id: str) -> None:
+    from server.models.app_icon_target import AppIconTarget
+    from server.models.app_regression_run import AppRegressionRun
+    from server.models.AppGraph.app_structure import AppGraph
+
+    db.query(AppIconTarget).filter(AppIconTarget.app_id == app_id).delete(synchronize_session=False)
+    db.query(AppRegressionRun).filter(AppRegressionRun.app_id == app_id).delete(synchronize_session=False)
+    db.query(AppGraph).filter(AppGraph.app_id == app_id).update(
+        {AppGraph.app_id: None},
+        synchronize_session=False,
+    )
+    app = db.query(App).filter(App.id == app_id).first()
+    if app:
+        db.delete(app)
+
+
+@router.delete("/app/{app_id}")
+def delete_app(app_id: str, db: Session = Depends(get_db)):
+    """删除应用。图标目标和回归记录一并清掉；图谱只解绑，不删历史任务。"""
+    app = db.query(App).filter(App.id == app_id).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    name = app.name
+    project_id = app.project_id
+    _purge_app(db, app_id)
+    db.commit()
+    return {
+        "code": 200,
+        "ok": True,
+        "msg": "deleted",
+        "data": {"id": app_id, "name": name, "project_id": project_id},
+    }
+
+
 @router.get("/app/{app_id}")
 def get_app(app_id: str, db: Session = Depends(get_db)):
     app = db.query(App).options(joinedload(App.project)).filter(App.id == app_id).first()
@@ -160,17 +197,47 @@ def get_project_env(project_id: str, db: Session = Depends(get_db)):
 
 @router.put("/{project_id}/env")
 def update_project_env(project_id: str, item: ProjectEnvUpdate, db: Session = Depends(get_db)):
-    from server.services.project_env import normalize_project_env, ENV_PROFILE_KEYS
+    from server.services.project_env import normalize_project_env
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     doc = normalize_project_env(
-        {"default_profile": item.default_profile, "profiles": item.profiles}
+        {
+            "default_profile": item.default_profile,
+            "profiles": item.profiles,
+            "environments": item.environments,
+            "channels": item.channels,
+            "pipeline": item.pipeline,
+        }
     )
-    if doc["default_profile"] not in ENV_PROFILE_KEYS:
-        raise HTTPException(status_code=400, detail="Invalid default_profile")
+    if not doc.get("environments"):
+        raise HTTPException(status_code=400, detail="至少保留一个环境")
+    if doc["default_profile"] not in {e["key"] for e in doc["environments"]}:
+        raise HTTPException(status_code=400, detail="默认环境不在环境列表里")
     project.env = doc
     db.commit()
     db.refresh(project)
     return {"code": 200, "msg": "Project env updated", "data": {"env": project.env}}
+
+
+@router.delete("/{project_id}")
+def delete_project(project_id: str, db: Session = Depends(get_db)):
+    """删除项目及其下全部应用。图谱只解绑，不删历史任务。"""
+    project = db.query(Project).options(joinedload(Project.apps)).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    name = project.name
+    apps = list(project.apps or [])
+    app_ids = [a.id for a in apps]
+    app_names = [a.name for a in apps]
+    for aid in app_ids:
+        _purge_app(db, aid)
+    db.delete(project)
+    db.commit()
+    return {
+        "code": 200,
+        "ok": True,
+        "msg": "deleted",
+        "data": {"id": project_id, "name": name, "app_ids": app_ids, "app_names": app_names},
+    }

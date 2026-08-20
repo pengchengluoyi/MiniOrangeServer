@@ -63,6 +63,10 @@ _HEADER_ALIASES = {
     "expected": ("预期", "预期结果", "expected"),
     "ios_status": ("ios", "ios状态", "ios 状态"),
     "android_status": ("android", "安卓", "android状态", "android 状态"),
+    "requirement_id": (
+        "需求id", "需求编号", "关联需求", "story", "jira",
+        "reqid", "requirementid", "requirement",
+    ),
 }
 
 
@@ -464,6 +468,7 @@ def parse_cases_from_rows(rows: List[List[Any]]) -> List[Dict[str, Any]]:
                     "expected_by_step": _expected_by_step_number(expected_raw),
                     "ios_status": _cell(row, col_map, "ios_status"),
                     "android_status": _cell(row, col_map, "android_status"),
+                    "requirement_id": _cell(row, col_map, "requirement_id"),
                 }
             )
         )

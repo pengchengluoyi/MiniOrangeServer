@@ -334,7 +334,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.106",
+        "version": "0.0.107",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

@@ -18,6 +18,7 @@ from server.models.app_regression_run import AppRegressionRun
 from server.models.project import App
 from server.services.project_env import (
     load_project_env,
+    profile_keys,
     profile_snapshot,
     resolve_profile_name,
     target_id_from_snapshot,
@@ -34,6 +35,7 @@ DEFAULT_AUTOMATION = {
     },
     "icon_targets": [],
     "suites": [],
+    "qa_process": {"requirements": [], "releases": [], "schedule": [], "workflow": None, "updated_at": ""},
 }
 
 
@@ -54,6 +56,26 @@ def _normalize_suites(raw) -> List[Dict[str, Any]]:
             "case_ids": ids,
             "updated_at": str(item.get("updated_at") or ""),
         })
+    return out
+
+
+def _normalize_qa_process(raw) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"requirements": [], "releases": [], "schedule": [], "updated_at": ""}
+    def _rows(key: str) -> List[Dict[str, Any]]:
+        items = raw.get(key)
+        if not isinstance(items, list):
+            return []
+        return [x for x in items if isinstance(x, dict) and str(x.get("id") or "").strip()]
+    out = {
+        "requirements": _rows("requirements"),
+        "releases": _rows("releases"),
+        "schedule": _rows("schedule"),
+        "updated_at": str(raw.get("updated_at") or ""),
+    }
+    wf = raw.get("workflow")
+    if isinstance(wf, dict):
+        out["workflow"] = wf
     return out
 
 
@@ -91,6 +113,7 @@ def get_automation_config(app) -> Dict[str, Any]:
     if isinstance(icons, list):
         out["icon_targets"] = [x for x in icons if isinstance(x, dict)]
     out["suites"] = _normalize_suites(raw.get("suites"))
+    out["qa_process"] = _normalize_qa_process(raw.get("qa_process"))
     figma = raw.get("figma")
     if isinstance(figma, dict):
         out["figma"] = {
@@ -139,6 +162,8 @@ def save_automation_config(app, config: Dict[str, Any]) -> Dict[str, Any]:
         current["icon_targets"] = normalized
     if "suites" in config:
         current["suites"] = _normalize_suites(config.get("suites"))
+    if "qa_process" in config:
+        current["qa_process"] = _normalize_qa_process(config.get("qa_process"))
     if "figma" in config and isinstance(config["figma"], dict):
         prev_figma = current.get("figma") or {}
         incoming = config["figma"]
@@ -233,7 +258,7 @@ def package_for_app(app, env_profile: Optional[str] = None, platform: str = "and
     if pkg:
         return pkg
     if want_ios:
-        for prof in ("test", "dev", "pre", "prod"):
+        for prof in profile_keys(env_doc):
             snap2 = profile_snapshot(env_doc, prof)
             pkg = target_id_from_snapshot(snap2, "ios")
             if pkg:
@@ -252,7 +277,7 @@ def package_for_app(app, env_profile: Optional[str] = None, platform: str = "and
             return pkg
     except Exception as e:
         SLog.w(TAG, f"package_for_app record fallback failed: {e}")
-    for prof in ("test", "dev", "pre", "prod"):
+    for prof in profile_keys(env_doc):
         snap2 = profile_snapshot(env_doc, prof)
         pkg = target_id_from_snapshot(snap2, "android")
         if pkg:

@@ -12,7 +12,7 @@ class Project(Base):
     uid = Column(String, default=lambda: str(uuid.uuid4()), unique=True)
     name = Column(String, nullable=False)
     description = Column(Text)
-    # 项目级运行环境: { default_profile, profiles: { dev|test|pre|prod: { android, ios, web } } }
+    # 项目级运行环境: { default_profile, environments, channels, pipeline, profiles }
     env = Column(JSON, default=dict)
 
     apps = relationship("App", back_populates="project")

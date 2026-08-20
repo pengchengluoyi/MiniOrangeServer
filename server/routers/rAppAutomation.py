@@ -15,7 +15,7 @@ from server.core.database import APP_DATA_DIR, get_db
 from server.models.project import App
 from server.services import app_automation_service as aas
 from server.services.shared import icon_target_service as its
-from server.services.project_env import ENV_PROFILE_KEYS
+from server.services.project_env import load_project_env, profile_keys
 from server.services.crawl_persistence import save_screenshot_file
 from server.services import figma_service as fs
 from server.services import figma_logic_service as fls
@@ -84,6 +84,7 @@ class AutomationConfigUpdate(BaseModel):
     skills: Optional[AutomationSkills] = None
     figma: Optional[FigmaDesignConfig] = None
     suites: Optional[List[CaseSuiteBody]] = None
+    qa_process: Optional[Dict[str, Any]] = None
 
 
 def _get_app(db: Session, app_id: str) -> App:
@@ -100,6 +101,7 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
     pkg = aas.package_for_app(app)
     icon_page = its.list_icon_targets(db, app_id, page=1, page_size=1)
     cache = aas.get_feishu_cases_cache(app) or {}
+    env_doc = load_project_env(db, app.project_id) if app.project_id else None
     return {
         "code": 200,
         "data": {
@@ -107,7 +109,7 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
             "app_name": app.name,
             "project_name": app.project.name if app.project else "",
             "env_profile": cfg.get("env_profile"),
-            "env_profiles": list(ENV_PROFILE_KEYS),
+            "env_profiles": profile_keys(env_doc) if env_doc is not None else ["test", "pre", "prod"],
             "package": pkg,
             "automation": cfg,
             "feishu_cases_cache": cache,
@@ -117,6 +119,60 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
             },
         },
     }
+
+
+@router.get("/qa-process/summary")
+def qa_process_summary(db: Session = Depends(get_db)):
+    """实验室排期：一次返回所有应用的需求/版本/排期，供「全部项目」日历聚合。"""
+    apps = db.query(App).options(joinedload(App.project)).order_by(App.name).all()
+    items = []
+    for app in apps:
+        proc = aas.get_automation_config(app).get("qa_process") or {}
+        items.append({
+            "app_id": app.id,
+            "app_name": app.name or "",
+            "project_id": app.project_id or "",
+            "project_name": app.project.name if app.project else "",
+            "requirements": proc.get("requirements") or [],
+            "releases": proc.get("releases") or [],
+            "schedule": proc.get("schedule") or [],
+            "workflow": proc.get("workflow") or None,
+        })
+    return {"code": 200, "ok": True, "data": {"items": items}}
+
+
+class QaProcessAssistBody(BaseModel):
+    entity: str
+    id: str
+    job: str
+    requirement: Optional[Dict[str, Any]] = None
+    release: Optional[Dict[str, Any]] = None
+    requirements: Optional[List[Dict[str, Any]]] = None
+    cases: Optional[List[Dict[str, Any]]] = None
+    tasks: Optional[List[Dict[str, Any]]] = None
+    suites: Optional[List[Dict[str, Any]]] = None
+
+
+@router.post("/qa-process/assist/{app_id}")
+def qa_process_assist(app_id: str, body: QaProcessAssistBody, db: Session = Depends(get_db)):
+    """流程建议。只返回草稿，不改 gate、不写飞书。"""
+    from server.services import qa_process_assist as assist
+
+    _get_app(db, app_id)
+    if body.job not in assist.ASSIST_JOBS:
+        raise HTTPException(status_code=400, detail="unknown assist job")
+    if body.entity not in ("req", "rel"):
+        raise HTTPException(status_code=400, detail="entity must be req or rel")
+    art = assist.run_job(
+        body.job,
+        requirement=body.requirement,
+        release=body.release,
+        requirements=body.requirements or [],
+        cases=body.cases or [],
+        tasks=body.tasks or [],
+        suites=body.suites or [],
+    )
+    return {"code": 200, "ok": True, "data": {"artifact": art}}
 
 
 class FigmaSyncBody(BaseModel):
@@ -212,6 +268,8 @@ def update_automation_config(app_id: str, body: AutomationConfigUpdate, db: Sess
         payload["figma"] = body.figma.model_dump()
     if body.suites is not None:
         payload["suites"] = [s.model_dump() for s in body.suites]
+    if body.qa_process is not None:
+        payload["qa_process"] = body.qa_process
     cfg = aas.save_automation_config(app, payload)
     db.commit()
     return {"code": 200, "msg": "自动化配置已保存", "data": {"automation": cfg}}

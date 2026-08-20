@@ -44,6 +44,7 @@ from server.core.database import get_db
 from server.models.project import App
 from server.services.regression import case_runner as cr
 from server.services.regression import task_store
+from server.services.runtime.qa_process_lock import blocking_reservation, reservations_by_sn
 from script.log import SLog
 
 router = APIRouter(prefix="/case-runner", tags=["Case Runner"])
@@ -80,6 +81,9 @@ class RunRequest(BaseModel):
     execution_mode: str = "auto"
     # 触发源：manual | feishu | schedule（定时/飞书走同一个创建函数，只是来源不同）
     run_type: str = "manual"
+    slot_id: str = ""
+    requirement_id: str = ""
+    release_id: str = ""
 
 
 class PromoteBaselineRequest(BaseModel):
@@ -114,7 +118,8 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
     """启动一次 AI-led 回归。
 
     同一台设备同时只跑一个任务：若名单里任一 sn 已有 running 任务，直接 409 并带上占用的
-    task_id，前端可跳过去看，而不是排在后面互相抢设备。
+    task_id。若当前时刻落在其他应用/窗口的排期占用内，返回 409 device reserved；本窗口主人
+    （slot_id 或同 requirement/release + run_type）可以下发。
     """
     app = _get_app(db, body.app_id)
     device_sns = _normalize_sns(body.sn, body.sns)
@@ -157,6 +162,28 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
                     "sn": sn,
                 },
             )
+
+    reserved = blocking_reservation(
+        db,
+        device_sns,
+        slot_id=body.slot_id or "",
+        requirement_id=body.requirement_id or "",
+        release_id=body.release_id or "",
+        run_type=body.run_type or "",
+    )
+    if reserved:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "device reserved",
+                "reason": "schedule",
+                "sn": reserved.get("sn") or "",
+                "slot_id": reserved.get("slot_id") or "",
+                "reserved_title": reserved.get("title") or reserved.get("app_name") or "",
+                "reserved_until": reserved.get("reserved_until") or "",
+                "app_id": reserved.get("app_id") or "",
+            },
+        )
 
     try:
         snapshot = cr.run_cases(
@@ -382,34 +409,40 @@ def promote_baseline(body: PromoteBaselineRequest):
 
 
 @router.get("/devices")
-def list_devices(only_online: bool = True):
+def list_devices(only_online: bool = True, db: Session = Depends(get_db)):
     """便利端点：返回 MDevice 列表（含 channels），供前端 sn 选择器使用。
 
-    busy_task_id 非空表示该设备正被这条任务占用，下发前应禁用/提示（同 SN 只跑一个任务）。
+    busy_task_id 非空表示该设备正被这条任务占用；reserved_slot_id 表示当前时刻
+    已被某条测试排期锁住（跨应用）。下发前应禁用/提示。
     """
-    from server.core.database import SessionLocal
     from server.models.mDevice import MDevice
     from server.services.runtime.channels import channels_to_brief
 
     busy = task_store.busy_map()
+    reserved = reservations_by_sn(db)
     items = []
     try:
-        with SessionLocal() as db:
-            q = db.query(MDevice)
-            if only_online:
-                q = q.filter(MDevice.status == "online")
-            for d in q.order_by(MDevice.sn).all():
-                items.append({
-                    "sn": d.sn,
-                    "model": d.model or "",
-                    "device_type": d.device_type or "",
-                    "os_version": d.os_version or "",
-                    "resolution": d.resolution or "",
-                    "role": d.role or "",
-                    "status": d.status or "offline",
-                    "channels": channels_to_brief(d.channels or {}),
-                    "busy_task_id": busy.get(d.sn, ""),
-                })
+        q = db.query(MDevice)
+        if only_online:
+            q = q.filter(MDevice.status == "online")
+        for d in q.order_by(MDevice.sn).all():
+            hit = reserved.get(d.sn) or {}
+            items.append({
+                "sn": d.sn,
+                "model": d.model or "",
+                "device_type": d.device_type or "",
+                "os_version": d.os_version or "",
+                "resolution": d.resolution or "",
+                "role": d.role or "",
+                "status": d.status or "offline",
+                "channels": channels_to_brief(d.channels or {}),
+                "busy_task_id": busy.get(d.sn, ""),
+                "reserved_slot_id": hit.get("slot_id") or "",
+                "reserved_title": hit.get("title") or "",
+                "reserved_until": hit.get("reserved_until") or "",
+                "reserved_kind": hit.get("kind") or "",
+                "reserved_app_id": hit.get("app_id") or "",
+            })
     except Exception as e:
         SLog.w(TAG, f"/devices failed: {e}")
     return {"code": 200, "ok": True, "data": {"count": len(items), "items": items}}
