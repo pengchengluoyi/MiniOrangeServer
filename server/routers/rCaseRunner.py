@@ -67,7 +67,9 @@ def _get_app(db: Session, app_id: str) -> App:
 
 class RunRequest(BaseModel):
     app_id: str
-    sn: str
+    sn: str = ""
+    sns: Optional[List[str]] = None
+    coverage: str = ""
     platform: str = "android"
     case_ids: Optional[List[str]] = None
     start_index: int = 0
@@ -92,33 +94,78 @@ class RetryFailedRequest(BaseModel):
     execution_mode: str = "auto"
 
 
+def _normalize_sns(sn: str = "", sns: Optional[List[str]] = None) -> list[str]:
+    raw: list[str] = []
+    if sn:
+        raw.append(str(sn).strip())
+    for item in sns or []:
+        raw.append(str(item or "").strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 @router.post("/run")
 def run_cases(body: RunRequest, db: Session = Depends(get_db)):
     """启动一次 AI-led 回归。
 
-    同一台设备同时只跑一个任务：若该 sn 已有 running 任务，直接 409 并带上占用的
+    同一台设备同时只跑一个任务：若名单里任一 sn 已有 running 任务，直接 409 并带上占用的
     task_id，前端可跳过去看，而不是排在后面互相抢设备。
     """
     app = _get_app(db, body.app_id)
-    if not body.sn:
+    device_sns = _normalize_sns(body.sn, body.sns)
+    if not device_sns:
         raise HTTPException(status_code=400, detail="请选择执行设备")
 
-    busy_task_id = task_store.busy_task_for_sn(body.sn)
-    if busy_task_id:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "device busy",
-                "busy_task_id": busy_task_id,
-                "sn": body.sn,
-            },
+    cov = str(body.coverage or "").strip().lower()
+    if cov not in ("", "once", "per_device"):
+        raise HTTPException(status_code=400, detail="coverage 必须是 once 或 per_device")
+    if not cov or len(device_sns) == 1:
+        cov = "once"
+
+    from server.models.mDevice import MDevice
+    from server.services.runtime.run_context import device_platform_kind
+
+    rows = db.query(MDevice).filter(MDevice.sn.in_(device_sns)).all()
+    by_sn = {str(r.sn): r for r in rows}
+    platforms_by_sn: dict[str, str] = {}
+    for sn in device_sns:
+        row = by_sn.get(sn)
+        platforms_by_sn[sn] = device_platform_kind(
+            getattr(row, "device_type", "") if row else "",
+            getattr(row, "channels", None) if row else None,
+            sn=sn,
         )
+    platform = (
+        platforms_by_sn[device_sns[0]]
+        if len(set(platforms_by_sn.values())) == 1
+        else "mixed"
+    )
+
+    for sn in device_sns:
+        busy_task_id = task_store.busy_task_for_sn(sn)
+        if busy_task_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "device busy",
+                    "busy_task_id": busy_task_id,
+                    "sn": sn,
+                },
+            )
 
     try:
         snapshot = cr.run_cases(
             app,
-            sn=body.sn,
-            platform=(body.platform or "android").lower(),
+            sn=device_sns[0],
+            sns=device_sns,
+            coverage=cov,
+            platform=platform,
+            platforms_by_sn=platforms_by_sn,
             case_ids=body.case_ids,
             start_index=body.start_index or 0,
             db=db,

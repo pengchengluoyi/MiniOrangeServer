@@ -206,15 +206,43 @@ class RunContext:
 # ============== builder ==============
 
 
+def _looks_ios_token(value: str) -> bool:
+    t = str(value or "").lower()
+    return "ios" in t or "iphone" in t or "ipad" in t
+
+
+def device_platform_kind(device_type: str = "", channels: Any = None, sn: str = "") -> str:
+    """根据设备元信息判断 android / ios。混任务时每台机各自调用。"""
+    dt = str(device_type or "").lower()
+    if _looks_ios_token(dt):
+        return "ios"
+    if "android" in dt:
+        return "android"
+    ch = channels if isinstance(channels, dict) else {}
+    ios_state = str(ch.get("ios_state") or "").lower()
+    if not ios_state and isinstance(ch.get("ios"), dict):
+        ios_state = str(ch.get("ios", {}).get("state") or "").lower()
+    if ios_state in ("connected", "online", "available"):
+        return "ios"
+    if sn and _is_ios_target(sn, "", device_type):
+        return "ios"
+    return "android"
+
+
 def _is_ios_target(sn: str, platform: str = "", device_type: str = "") -> bool:
-    plat = f"{platform} {device_type}".lower()
-    if "ios" in plat or "iphone" in plat or "ipad" in plat:
-        return True
+    """是否按 iOS 通道探测。UDID / device_type 优先于任务级 platform，避免混选时安卓机被带偏。"""
     try:
         from server.services.runtime.ios_ids import is_physical_ios_udid, is_simulator_udid
-        return is_physical_ios_udid(sn) or is_simulator_udid(sn)
+        if is_physical_ios_udid(sn) or is_simulator_udid(sn):
+            return True
     except Exception:
+        pass
+    dt = str(device_type or "").lower()
+    if _looks_ios_token(dt):
+        return True
+    if "android" in dt:
         return False
+    return _looks_ios_token(platform)
 
 
 def _resolve_adb_serial(sn: str, platform: str, device_type: str = "") -> str:

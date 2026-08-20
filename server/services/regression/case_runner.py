@@ -33,7 +33,7 @@ from server.services.regression import case_memory
 from server.services.regression.case_memory import repo as memory_repo
 from server.services.regression.orchestrator import OrchestratorOptions, run_case
 from server.services.regression.router import CapabilityRouter
-from server.services.runtime.run_context import RunContext, build_run_context
+from server.services.runtime.run_context import RunContext, build_run_context, device_platform_kind
 
 TAG = "CaseRunner"
 
@@ -96,20 +96,133 @@ def _emit_task(run_doc: dict[str, Any], event: str, case: dict[str, Any] | None 
         SLog.d(TAG, f"emit_task failed: {e}")
 
 
-def _upsert_case(run_doc: dict[str, Any], entry: dict[str, Any]) -> None:
-    """按 case_id 更新 cases 列表项；不存在则追加。调用方需已持 _LOCK。
+def _coverage_of(run_doc: dict[str, Any]) -> str:
+    cov = str(run_doc.get("coverage") or "once").strip().lower()
+    return cov if cov in ("once", "per_device") else "once"
 
-    每次 case 状态变化落库 + 广播：终态发 case_finished，其它（如 running）由 _mark_case_running 发。
-    """
+
+def _sns_of(run_doc: dict[str, Any]) -> list[str]:
+    raw = run_doc.get("sns")
+    if isinstance(raw, list) and raw:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            sn = str(item or "").strip()
+            if sn and sn not in seen:
+                seen.add(sn)
+                out.append(sn)
+        if out:
+            return out
+    sn = str(run_doc.get("sn") or "").strip()
+    return [sn] if sn else []
+
+
+def _normalize_platform_kind(value: str) -> str:
+    plat = str(value or "").lower()
+    if plat in ("ios", "iphone", "ipad") or "ios" in plat:
+        return "ios"
+    if plat == "mixed":
+        return "mixed"
+    return "android"
+
+
+def _task_platform_of(kinds: list[str]) -> str:
+    uniq = [k for k in dict.fromkeys(kinds) if k in ("android", "ios")]
+    if len(uniq) == 1:
+        return uniq[0]
+    if len(uniq) > 1:
+        return "mixed"
+    return "android"
+
+
+def _device_platform_of(run_doc: dict[str, Any], sn: str) -> str:
+    plats = run_doc.get("platforms_by_sn")
+    if isinstance(plats, dict):
+        kind = _normalize_platform_kind(str(plats.get(sn) or ""))
+        if kind in ("android", "ios"):
+            return kind
+    kind = _normalize_platform_kind(str(run_doc.get("platform") or ""))
+    return kind if kind in ("android", "ios") else "android"
+
+
+def _package_of(run_doc: dict[str, Any], platform: str) -> str:
+    pkgs = run_doc.get("packages_by_platform")
+    if isinstance(pkgs, dict):
+        pkg = str(pkgs.get(platform) or "").strip()
+        if pkg:
+            return pkg
+    return str(run_doc.get("package") or "").strip()
+
+
+def _resolve_platforms_by_sn(
+    device_sns: list[str],
+    *,
+    db: Optional[Session],
+    fallback: str,
+    given: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    fb = _normalize_platform_kind(fallback)
+    if fb not in ("android", "ios"):
+        fb = "android"
+    out: dict[str, str] = {}
+    if isinstance(given, dict):
+        for sn in device_sns:
+            kind = _normalize_platform_kind(str(given.get(sn) or ""))
+            if kind in ("android", "ios"):
+                out[sn] = kind
+    missing = [sn for sn in device_sns if sn not in out]
+    if missing and db is not None:
+        try:
+            from server.models.mDevice import MDevice
+
+            rows = db.query(MDevice).filter(MDevice.sn.in_(missing)).all()
+            by_sn = {str(r.sn): r for r in rows}
+            for sn in missing:
+                row = by_sn.get(sn)
+                if not row:
+                    continue
+                out[sn] = device_platform_kind(
+                    getattr(row, "device_type", ""),
+                    getattr(row, "channels", None),
+                    sn=sn,
+                )
+        except Exception as exc:
+            SLog.w(TAG, f"resolve platforms_by_sn failed: {exc}")
+    for sn in device_sns:
+        out.setdefault(sn, fb)
+    return out
+
+
+def _report_run_id(run_id: str, case_id: str, *, sn: str = "", coverage: str = "once") -> str:
+    if coverage == "per_device" and sn:
+        return f"{run_id}::{case_id}::{sn}"
+    return f"{run_id}::{case_id}"
+
+
+def _row_matches(row: dict[str, Any], entry: dict[str, Any]) -> bool:
+    erid = str(entry.get("report_run_id") or "")
+    rrid = str(row.get("report_run_id") or "")
+    if erid and rrid:
+        return erid == rrid
+    cid = str(entry.get("case_id") or "")
+    if not cid or str(row.get("case_id") or "") != cid:
+        return False
+    esn = str(entry.get("sn") or "")
+    if esn:
+        return str(row.get("sn") or "") == esn
+    return True
+
+
+def _upsert_case(run_doc: dict[str, Any], entry: dict[str, Any]) -> None:
+    """按 report_run_id（否则 case_id+sn）更新 cases 列表项。调用方需已持 _LOCK。"""
     from server.services.regression.task_store import norm_case_status
 
     if "status" in entry:
         entry = {**entry, "status": norm_case_status(entry.get("status"))}
-    cid = str(entry.get("case_id") or "")
     rows = run_doc.setdefault("cases", [])
     merged = entry
     for i, row in enumerate(rows):
-        if str(row.get("case_id") or "") == cid:
+        if _row_matches(row, entry):
             merged = {**row, **entry}
             rows[i] = merged
             break
@@ -120,13 +233,20 @@ def _upsert_case(run_doc: dict[str, Any], entry: dict[str, Any]) -> None:
         _emit_task(run_doc, "case_finished", merged)
 
 
-def _mark_case_running(run_doc: dict[str, Any], case_id: str, *, name: str = "") -> None:
-    """把某用例标为 running（进入执行）。调用方需已持 _LOCK。"""
+def _mark_case_running(
+    run_doc: dict[str, Any], case_id: str, *, name: str = "", sn: str = "", report_run_id: str = "",
+) -> None:
+    """把某执行单元标为 running。调用方需已持 _LOCK。"""
+    rid = report_run_id or _report_run_id(
+        str(run_doc.get("run_id") or ""), case_id, sn=sn, coverage=_coverage_of(run_doc),
+    )
     entry = {
         "case_id": case_id,
         "name": name,
+        "sn": sn,
+        "device_platform": _device_platform_of(run_doc, sn) if sn else "",
         "status": "running",
-        "report_run_id": f"{run_doc.get('run_id')}::{case_id}",
+        "report_run_id": rid,
         "summary": "执行中",
         "hitl": False,
         "started_at": datetime.now().isoformat(timespec="seconds"),
@@ -147,16 +267,21 @@ def _finish_run(run_doc: dict[str, Any], status: str, *, error: str = "") -> Non
 
 
 def _terminate_remaining_cases(
-    run_doc: dict[str, Any], reason: str, *, status: str = "fail",
+    run_doc: dict[str, Any], reason: str, *, status: str = "fail", sn: str = "",
 ) -> int:
-    """把还没跑的用例（pending/running）打成终态，并同步任务计数。
+    """把还没跑完的执行单元打成终态，并同步任务计数。
 
     闸门失败要让 completed 追上 total，否则详情页会停在「0/3 已失败」这种自相矛盾
-    的进度上。取消场景传 status="cancelled"。调用方需已持 _LOCK。
+    的进度上。取消场景传 status="cancelled"。`sn` 非空时只收该设备上的单元
+    （全机覆盖一台掉线；加速拆分未领取的 sn 为空，不会被误杀）。
+    调用方需已持 _LOCK。
     """
     changed = 0
+    only_sn = str(sn or "").strip()
     for row in run_doc.get("cases") or []:
         if str(row.get("status") or "") not in ("pending", "running"):
+            continue
+        if only_sn and str(row.get("sn") or "") != only_sn:
             continue
         row["status"] = status
         row["summary"] = reason
@@ -292,19 +417,29 @@ def mark_case_hitl(report_run_id: str, waiting: bool, *, question: str = "") -> 
     rid = str(report_run_id or "")
     if "::" not in rid:
         return
-    task_id, case_id = rid.split("::", 1)
+    task_id = rid.split("::", 1)[0]
     with _LOCK:
         run_doc = _RUNS.get(task_id)
         if run_doc is None:
             return
         entry = None
         for row in run_doc.get("cases") or []:
-            if str(row.get("case_id") or "") == case_id:
+            if str(row.get("report_run_id") or "") == rid:
                 row["hitl"] = bool(waiting)
                 if waiting and question:
                     row["summary"] = question[:200]
                 entry = dict(row)
                 break
+        if entry is None:
+            # 旧数据：report_run_id 可能还没写上，退回 task::case 切分
+            case_key = rid.split("::", 1)[1]
+            for row in run_doc.get("cases") or []:
+                if str(row.get("case_id") or "") == case_key:
+                    row["hitl"] = bool(waiting)
+                    if waiting and question:
+                        row["summary"] = question[:200]
+                    entry = dict(row)
+                    break
         if entry is None:
             return
     _persist(run_doc)
@@ -399,11 +534,54 @@ def to_case_spec(
 # ---------- 主入口 ----------
 
 
+def _normalize_sns(sn: str = "", sns: Optional[list[str]] = None) -> list[str]:
+    raw: list[str] = []
+    if sn:
+        raw.append(str(sn).strip())
+    for item in sns or []:
+        raw.append(str(item or "").strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _seed_unit(
+    run_id: str, raw: dict[str, Any], index: int, *, sn: str, coverage: str,
+    device_platform: str = "",
+) -> dict[str, Any]:
+    cid = str(raw.get("case_id") or "").strip() or f"case-{index}"
+    return {
+        "case_id": cid,
+        "name": str(raw.get("name") or raw.get("title") or "").strip(),
+        "sn": sn,
+        "status": "pending",
+        "report_run_id": _report_run_id(run_id, cid, sn=sn, coverage=coverage),
+        "summary": "",
+        "elapsed_ms": 0,
+        "hitl": False,
+        "module": str(raw.get("module") or "").strip(),
+        "precondition": str(raw.get("precondition") or raw.get("precondition_raw") or "").strip(),
+        "steps": list(raw.get("steps") or []),
+        "expected": list(raw.get("expected") or []),
+        "steps_raw": str(raw.get("steps_raw") or "").strip(),
+        "expected_raw": str(raw.get("expected_raw") or "").strip(),
+        "platform": str(raw.get("platform") or raw.get("client") or raw.get("terminal") or "").strip(),
+        "device_platform": str(device_platform or "").strip(),
+    }
+
+
 def run_cases(
     app: Any,
     *,
-    sn: str,
+    sn: str = "",
+    sns: Optional[list[str]] = None,
+    coverage: str = "",
     platform: str = "android",
+    platforms_by_sn: Optional[dict[str, str]] = None,
     case_ids: Optional[list[str]] = None,
     start_index: int = 0,
     db: Optional[Session] = None,
@@ -414,19 +592,24 @@ def run_cases(
     execution_mode: str = "auto",
     run_type: str = "manual",
 ) -> dict[str, Any]:
-    """启动一次 AI-led 回归。
+    """启动一次 AI-led 回归（可多设备）。
 
-    返回 run snapshot dict（含 run_id 与初始状态），无论同步 / 异步。
-    异步模式下 _RUNS[run_id] 持续被 worker 线程更新；调 get_run 读取。
-
-    真设备闸门
-    ----------
-    worker 会先 build_run_context()，若 adb=remote=false 立刻把 run 标 failed，
-    不调任何 LLM、不写 trace。
+    coverage=once：每条用例只跑一次，设备抢队列。
+    coverage=per_device：每台设备各跑完整用例列表。
+    单机或缺省覆盖方式都按 once。
     """
     from server.services import app_automation_service as aas
     from server.services import feishu_regression_service as frs
     from server.services.ai.regression.llm_client import resolve_regression_provider
+
+    device_sns = _normalize_sns(sn, sns)
+    if not device_sns:
+        raise ValueError("请选择执行设备")
+    cov = str(coverage or "").strip().lower()
+    if cov not in ("", "once", "per_device"):
+        raise ValueError("coverage 必须是 once 或 per_device")
+    if not cov or len(device_sns) == 1:
+        cov = "once"
 
     if use_cache:
         payload = frs.list_cases_for_app(app, refresh=False)
@@ -445,44 +628,55 @@ def run_cases(
         cases = cases[start_index:]
 
     env_profile = aas.resolve_env_profile(app)
-    package = aas.package_for_app(app, env_profile) or ""
+    packages_by_platform = {
+        "android": aas.package_for_app(app, env_profile, platform="android") or "",
+        "ios": aas.package_for_app(app, env_profile, platform="ios") or "",
+    }
+    resolved_platforms = _resolve_platforms_by_sn(
+        device_sns, db=db, fallback=platform, given=platforms_by_sn,
+    )
+    task_platform = _task_platform_of([resolved_platforms[s] for s in device_sns])
+    package = packages_by_platform.get(
+        task_platform if task_platform in ("android", "ios") else "android",
+        "",
+    ) or packages_by_platform.get("android") or ""
     app_id = getattr(app, "id", "") or ""
     app_name = getattr(app, "name", "") or ""
 
     run_id = f"cr-{uuid.uuid4().hex[:12]}"
-    # 启动即预置全部用例为 pending，前端可立刻展示待执行 / 执行中 / 已完成
-    seeded_cases = [
-        {
-            "case_id": str(c.get("case_id") or "").strip() or f"case-{i}",
-            "name": str(c.get("name") or c.get("title") or "").strip(),
-            "status": "pending",
-            "report_run_id": f"{run_id}::{str(c.get('case_id') or '').strip() or f'case-{i}'}",
-            "summary": "",
-            "elapsed_ms": 0,
-            "hitl": False,
-            "module": str(c.get("module") or "").strip(),
-            "precondition": str(c.get("precondition") or c.get("precondition_raw") or "").strip(),
-            "steps": list(c.get("steps") or []),
-            "expected": list(c.get("expected") or []),
-            "steps_raw": str(c.get("steps_raw") or "").strip(),
-            "expected_raw": str(c.get("expected_raw") or "").strip(),
-        }
-        for i, c in enumerate(cases)
-    ]
+    if cov == "per_device":
+        seeded_cases = [
+            _seed_unit(
+                run_id, c, i, sn=dsn, coverage=cov,
+                device_platform=resolved_platforms.get(dsn, ""),
+            )
+            for dsn in device_sns
+            for i, c in enumerate(cases)
+        ]
+    else:
+        seeded_cases = [
+            _seed_unit(run_id, c, i, sn="", coverage=cov)
+            for i, c in enumerate(cases)
+        ]
+
     run_doc: dict[str, Any] = {
         "run_id": run_id,
         "engine": "ai_led",
         "run_type": run_type,
         "app_id": app_id,
         "app_name": app_name,
-        "sn": sn,
-        "platform": platform,
+        "sn": device_sns[0],
+        "sns": device_sns,
+        "coverage": cov,
+        "platform": task_platform,
+        "platforms_by_sn": resolved_platforms,
         "env_profile": env_profile,
         "package": package,
+        "packages_by_platform": packages_by_platform,
         "provider_id": "",
         "provider_name": "",
         "model_name": "",
-        "total": len(cases),
+        "total": len(seeded_cases),
         "completed": 0,
         "passed": 0,
         "failed": 0,
@@ -494,11 +688,13 @@ def run_cases(
         "cases": seeded_cases,
         "error": "",
         "connectivity": {},
+        "connectivity_by_sn": {},
+        "_workers_alive": len(device_sns),
     }
     with _LOCK:
         _RUNS[run_id] = run_doc
-    _persist(run_doc)                      # BE-P0-1 落库（seed pending）
-    _emit_task(run_doc, "task_created")    # BE-P0-4 广播
+    _persist(run_doc)
+    _emit_task(run_doc, "task_created")
 
     if not cases:
         SLog.w(TAG, f"run {run_id} no cases to execute (app={app_id})")
@@ -522,35 +718,40 @@ def run_cases(
     run_doc["model_name"] = model_name
 
     options = options or OrchestratorOptions()
+    worker_kw = dict(
+        run_doc=run_doc,
+        env_profile=env_profile,
+        app_id=app_id,
+        app_name=app_name,
+        use_persisted_baseline=use_persisted_baseline,
+        provider_id=provider_id,
+        model_name=model_name,
+        options=options,
+        execution_mode=execution_mode,
+    )
 
-    def _worker() -> None:
-        try:
-            _execute(
-                run_doc=run_doc,
-                cases=cases,
-                sn=sn,
-                platform=platform,
-                env_profile=env_profile,
-                package=package,
-                app_id=app_id,
-                app_name=app_name,
-                use_persisted_baseline=use_persisted_baseline,
-                provider_id=provider_id,
-                model_name=model_name,
-                options=options,
-                execution_mode=execution_mode,
-            )
-        except Exception as exc:  # pragma: no cover
-            SLog.e(TAG, f"run {run_id} worker crashed: {exc}")
-            with _LOCK:
-                _terminate_remaining_cases(run_doc, f"worker crashed: {exc}")
-            _finish_run(run_doc, "failed", error=str(exc))
+    def _make_worker(dsn: str):
+        def _worker() -> None:
+            plat = _device_platform_of(run_doc, dsn)
+            pkg = _package_of(run_doc, plat)
+            try:
+                _execute(**worker_kw, sn=dsn, platform=plat, package=pkg)
+            except Exception as exc:  # pragma: no cover
+                SLog.e(TAG, f"run {run_id} worker sn={dsn} crashed: {exc}")
+                with _LOCK:
+                    _terminate_remaining_cases(run_doc, f"worker crashed: {exc}", sn=dsn)
+                _on_worker_exit(run_doc, app_id=app_id)
+        return _worker
 
-    if async_exec:
-        threading.Thread(target=_worker, name=f"case-runner-{run_id}", daemon=True).start()
-        return _snapshot(run_doc)
-
-    _worker()
+    threads = [
+        threading.Thread(target=_make_worker(dsn), name=f"case-runner-{run_id}-{dsn[:12]}", daemon=True)
+        for dsn in device_sns
+    ]
+    for t in threads:
+        t.start()
+    if not async_exec:
+        for t in threads:
+            t.join()
     return _snapshot(run_doc)
 
 
@@ -570,10 +771,73 @@ def _touch_case_trace(
         SLog.w(TAG, f"mark_run_trace_running failed {run_id}: {exc}")
 
 
+def _on_worker_exit(run_doc: dict[str, Any], *, app_id: str) -> None:
+    """设备 worker 退出。只有最后一个负责收口任务。"""
+    run_id = str(run_doc.get("run_id") or "")
+    with _LOCK:
+        already = str(run_doc.get("status") or "") in _TERMINAL_TASK
+        n = int(run_doc.get("_workers_alive") or 1) - 1
+        run_doc["_workers_alive"] = max(0, n)
+        last = n <= 0
+        cancelled = bool(run_doc.get("_cancel"))
+    if already or not last:
+        return
+    if cancelled:
+        with _LOCK:
+            left = _terminate_remaining_cases(run_doc, "任务已取消", status="cancelled")
+        SLog.i(TAG, f"[{run_id}] cancelled after workers, leftover={left}")
+        _emit_task(run_doc, "cancelled")
+        _finish_run(run_doc, "cancelled")
+        return
+    with _LOCK:
+        leftover = _terminate_remaining_cases(run_doc, "未执行：无可用设备或 worker 已退出")
+    if leftover:
+        SLog.w(TAG, f"[{run_id}] leftover {leftover} unit(s) marked fail at worker exit")
+    try:
+        from server.services.knowledge_capture_service import capture_task_knowledge
+
+        with _LOCK:
+            snap = _snapshot(run_doc)
+        task_items = capture_task_knowledge(
+            app_id=app_id,
+            task_id=run_id,
+            cases=snap.get("cases") or [],
+            provider_id=str(snap.get("provider_id") or ""),
+        )
+        if task_items:
+            with _LOCK:
+                run_doc["knowledge_ids"] = [p.get("id") for p in task_items if p.get("id")]
+                run_doc["knowledge_proposals"] = task_items
+    except Exception as exc:
+        SLog.w(TAG, f"[{run_id}] task knowledge capture failed: {exc}")
+    _finish_run(run_doc, "done")
+
+
+def _next_unit(run_doc: dict[str, Any], sn: str, coverage: str) -> Optional[dict[str, Any]]:
+    """领取下一条执行单元。once：抢 pending 且尚未绑 sn 的行；per_device：本机 pending。"""
+    with _LOCK:
+        if run_doc.get("_cancel"):
+            return None
+        rows = run_doc.get("cases") or []
+        if coverage == "per_device":
+            for row in rows:
+                if str(row.get("sn") or "") == sn and str(row.get("status") or "") == "pending":
+                    return dict(row)
+            return None
+        for row in rows:
+            if str(row.get("status") or "") != "pending":
+                continue
+            if str(row.get("sn") or ""):
+                continue
+            row["sn"] = sn
+            row["device_platform"] = _device_platform_of(run_doc, sn)
+            return dict(row)
+        return None
+
+
 def _execute(
     *,
     run_doc: dict[str, Any],
-    cases: list[dict[str, Any]],
     sn: str,
     platform: str,
     env_profile: str,
@@ -586,8 +850,44 @@ def _execute(
     options: OrchestratorOptions,
     execution_mode: str = "auto",
 ) -> None:
-    """同步逐 case 跑；中途更新 _RUNS。"""
+    """单台设备 worker：绑定线程 SN，按 coverage 领取单元并执行。"""
+    from server.services.runtime.device_bind import device_scope
+
+    with device_scope(sn):
+        _execute_on_device(
+            run_doc=run_doc,
+            sn=sn,
+            platform=platform,
+            env_profile=env_profile,
+            package=package,
+            app_id=app_id,
+            app_name=app_name,
+            use_persisted_baseline=use_persisted_baseline,
+            provider_id=provider_id,
+            model_name=model_name,
+            options=options,
+            execution_mode=execution_mode,
+        )
+        _on_worker_exit(run_doc, app_id=app_id)
+
+
+def _execute_on_device(
+    *,
+    run_doc: dict[str, Any],
+    sn: str,
+    platform: str,
+    env_profile: str,
+    package: str,
+    app_id: str,
+    app_name: str,
+    use_persisted_baseline: bool,
+    provider_id: str = "",
+    model_name: str = "",
+    options: OrchestratorOptions,
+    execution_mode: str = "auto",
+) -> None:
     run_id = run_doc["run_id"]
+    coverage = _coverage_of(run_doc)
 
     # 1) 真设备探测 + 闸门
     try:
@@ -605,27 +905,32 @@ def _execute(
         SLog.e(TAG, f"build_run_context failed sn={sn}: {exc}")
         msg = f"build_run_context: {exc}"
         with _LOCK:
-            _terminate_remaining_cases(run_doc, msg)
-        _finish_run(run_doc, "failed", error=msg)
+            if coverage == "per_device":
+                _terminate_remaining_cases(run_doc, msg, sn=sn)
+            elif len(_sns_of(run_doc)) <= 1:
+                _terminate_remaining_cases(run_doc, msg)
         return
 
     flags = ctx.connectivity_flags
+    conn = {
+        "adb": flags.get("adb", False),
+        "remote": flags.get("remote", False),
+        "vlm": flags.get("vlm", False),
+        "hitl": flags.get("hitl", False),
+        "ios_wda": flags.get("ios_wda", False),
+        "device_signature": ctx.device_signature,
+        "channels": {
+            "adb": ctx.adb,
+            "remote": ctx.remote,
+            "ios": ctx.ios,
+            "vlm": ctx.vlm,
+            "hitl": ctx.hitl,
+        },
+    }
     with _LOCK:
-        run_doc["connectivity"] = {
-            "adb": flags.get("adb", False),
-            "remote": flags.get("remote", False),
-            "vlm": flags.get("vlm", False),
-            "hitl": flags.get("hitl", False),
-            "ios_wda": flags.get("ios_wda", False),
-            "device_signature": ctx.device_signature,
-            "channels": {
-                "adb": ctx.adb,
-                "remote": ctx.remote,
-                "ios": ctx.ios,
-                "vlm": ctx.vlm,
-                "hitl": ctx.hitl,
-            },
-        }
+        by = run_doc.setdefault("connectivity_by_sn", {})
+        by[sn] = conn
+        run_doc["connectivity"] = conn
 
     if not flags.get("adb") and not flags.get("remote") and not flags.get("ios_wda"):
         msg = (
@@ -635,8 +940,10 @@ def _execute(
         )
         SLog.e(TAG, f"[{run_id}] {msg}")
         with _LOCK:
-            _terminate_remaining_cases(run_doc, msg)
-        _finish_run(run_doc, "failed", error=msg)
+            if coverage == "per_device":
+                _terminate_remaining_cases(run_doc, msg, sn=sn)
+            elif len(_sns_of(run_doc)) <= 1:
+                _terminate_remaining_cases(run_doc, msg)
         return
 
     ios_run = bool(ctx.connectivity_flags.get("ios_wda"))
@@ -648,18 +955,18 @@ def _execute(
         prefer = ("adb", "remote")
     router = CapabilityRouter(ctx, capture_prefer=prefer)
 
-    # 2) 逐 case 跑
-    for raw_case in cases:
-        # 取消只在 case 边界生效（BE-P1-1）：不打断正在 dispatch 的一步
+    # 2) 领取并执行
+    while True:
         if _cancelled(run_doc):
-            with _LOCK:
-                left = _terminate_remaining_cases(run_doc, "任务已取消", status="cancelled")
-            SLog.i(TAG, f"[{run_id}] cancelled at case boundary, {left} case(s) marked cancelled")
-            _emit_task(run_doc, "cancelled")
-            _finish_run(run_doc, "cancelled")
+            return
+        raw_case = _next_unit(run_doc, sn, coverage)
+        if raw_case is None:
             return
 
         case_started_ts = time.time()
+        unit_rid = str(raw_case.get("report_run_id") or "") or _report_run_id(
+            run_id, str(raw_case.get("case_id") or ""), sn=sn, coverage=coverage,
+        )
         try:
             spec = to_case_spec(
                 raw_case,
@@ -677,8 +984,9 @@ def _execute(
                 _upsert_case(run_doc, {
                     "case_id": cid,
                     "name": raw_case.get("name") or "",
+                    "sn": sn,
                     "status": "fail",
-                    "report_run_id": f"{run_id}::{cid}" if cid != "(unknown)" else "",
+                    "report_run_id": unit_rid if cid != "(unknown)" else "",
                     "summary": f"to_case_spec error: {exc}",
                     "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                 })
@@ -686,10 +994,9 @@ def _execute(
 
         SLog.i(TAG, f"[{run_id}] >>> running case={spec.case_id} ({spec.name}) sn={sn}")
         with _LOCK:
-            _mark_case_running(run_doc, spec.case_id, name=spec.name)
-        # 开跑就在 trace 表留一条 running 行（BE-P0-3），任务未跑完也查得到用例
+            _mark_case_running(run_doc, spec.case_id, name=spec.name, sn=sn, report_run_id=unit_rid)
         _touch_case_trace(
-            run_id=f"{run_id}::{spec.case_id}", case_id=spec.case_id, app_id=app_id,
+            run_id=unit_rid, case_id=spec.case_id, app_id=app_id,
             batch_id=run_id, sn=sn, platform=platform,
             device_signature=ctx.device_signature, ai_provider_id=provider_id,
         )
@@ -718,8 +1025,9 @@ def _execute(
                         _upsert_case(run_doc, {
                             "case_id": spec.case_id,
                             "name": spec.name,
+                            "sn": sn,
                             "status": "fail",
-                            "report_run_id": f"{run_id}::{spec.case_id}",
+                            "report_run_id": unit_rid,
                             "summary": before_res.get("msg") or "前置条件不满足",
                             "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                         })
@@ -740,7 +1048,7 @@ def _execute(
                 options=options,
                 provider_id=provider_id or None,
                 router=router,
-                run_id=f"{run_id}::{spec.case_id}",
+                run_id=unit_rid,
                 use_persisted_baseline=use_persisted_baseline,
                 app_cache_cleared=app_cache_cleared,
                 execution_mode=execution_mode,
@@ -748,11 +1056,6 @@ def _execute(
         except Exception as exc:  # pragma: no cover
             SLog.e(TAG, f"run_case crashed case={spec.case_id}: {exc}")
             if _cancelled(run_doc):
-                with _LOCK:
-                    left = _terminate_remaining_cases(run_doc, "任务已取消", status="cancelled")
-                SLog.i(TAG, f"[{run_id}] cancelled during crash path, {left} case(s)")
-                _emit_task(run_doc, "cancelled")
-                _finish_run(run_doc, "cancelled")
                 return
             with _LOCK:
                 run_doc["completed"] += 1
@@ -760,27 +1063,24 @@ def _execute(
                 _upsert_case(run_doc, {
                     "case_id": spec.case_id,
                     "name": spec.name,
+                    "sn": sn,
                     "status": "fail",
-                    "report_run_id": f"{run_id}::{spec.case_id}",
+                    "report_run_id": unit_rid,
                     "summary": f"run_case crashed: {exc}",
                     "elapsed_ms": int((time.time() - case_started_ts) * 1000),
                 })
             continue
 
         if _cancelled(run_doc):
-            with _LOCK:
-                left = _terminate_remaining_cases(run_doc, "任务已取消", status="cancelled")
-            SLog.i(TAG, f"[{run_id}] cancelled mid-case={spec.case_id}, {left} case(s) marked cancelled")
-            _emit_task(run_doc, "cancelled")
-            _finish_run(run_doc, "cancelled")
             return
 
         with _LOCK:
             entry = {
                 "case_id": spec.case_id,
                 "name": spec.name,
+                "sn": sn,
                 "status": str(report.overall_status),
-                "report_run_id": report.run_id,
+                "report_run_id": report.run_id or unit_rid,
                 "summary": (
                     report.blocked_reason or report.decline_reason
                     or f"events={report.total_events} pass={report.passed} fail={report.failed}"
@@ -832,6 +1132,8 @@ def _execute(
                 with _LOCK:
                     _upsert_case(run_doc, {
                         "case_id": spec.case_id,
+                        "sn": sn,
+                        "report_run_id": unit_rid,
                         "status": str(report.overall_status),
                         "knowledge_ids": [p.get("id") for p in proposals if p.get("id")],
                         "knowledge_proposals": proposals,
@@ -842,37 +1144,8 @@ def _execute(
         SLog.i(
             TAG,
             f"[{run_id}] <<< case={spec.case_id} status={report.overall_status} "
-            f"({report.passed}P/{report.failed}F/{report.blocked}B in {report.elapsed_ms}ms)",
+            f"({report.passed}P/{report.failed}F/{report.blocked}B in {report.elapsed_ms}ms) sn={sn}",
         )
-
-    leftover = 0
-    with _LOCK:
-        cancelled = bool(run_doc.get("_cancel"))
-        if cancelled:
-            leftover = _terminate_remaining_cases(run_doc, "任务已取消", status="cancelled")
-    if cancelled:
-        SLog.i(TAG, f"[{run_id}] cancelled after last case, leftover={leftover}")
-        _emit_task(run_doc, "cancelled")
-        _finish_run(run_doc, "cancelled")
-        return
-    try:
-        from server.services.knowledge_capture_service import capture_task_knowledge
-
-        with _LOCK:
-            snap = _snapshot(run_doc)
-        task_items = capture_task_knowledge(
-            app_id=app_id,
-            task_id=run_id,
-            cases=snap.get("cases") or [],
-            provider_id=str(snap.get("provider_id") or ""),
-        )
-        if task_items:
-            with _LOCK:
-                run_doc["knowledge_ids"] = [p.get("id") for p in task_items if p.get("id")]
-                run_doc["knowledge_proposals"] = task_items
-    except Exception as exc:
-        SLog.w(TAG, f"[{run_id}] task knowledge capture failed: {exc}")
-    _finish_run(run_doc, "done")
 
 
 # ---------- 重跑失败用例（BE-P1-2） ----------
@@ -922,24 +1195,37 @@ def retry_failed(
     if app is None:
         return {"ok": False, "reason": f"app not found: {app_id}", "code": 404}
 
-    target_sn = (sn or str(task.get("sn") or "")).strip()
-    if not target_sn:
+    target_sns = [str(x or "").strip() for x in (task.get("sns") or []) if str(x or "").strip()]
+    if sn:
+        target_sns = [sn]
+    if not target_sns:
+        one = (sn or str(task.get("sn") or "")).strip()
+        target_sns = [one] if one else []
+    if not target_sns:
         return {"ok": False, "reason": "原任务没有记录执行设备，请显式指定 sn", "code": 400}
 
-    busy_task_id = task_store.busy_task_for_sn(target_sn)
-    if busy_task_id:
-        return {
-            "ok": False,
-            "reason": "device busy",
-            "code": 409,
-            "busy_task_id": busy_task_id,
-            "sn": target_sn,
-        }
+    for target_sn in target_sns:
+        busy_task_id = task_store.busy_task_for_sn(target_sn)
+        if busy_task_id:
+            return {
+                "ok": False,
+                "reason": "device busy",
+                "code": 409,
+                "busy_task_id": busy_task_id,
+                "sn": target_sn,
+            }
+
+    cov = str(task.get("coverage") or "once").strip().lower()
+    if cov not in ("once", "per_device"):
+        cov = "once"
 
     snapshot = run_cases(
         app,
-        sn=target_sn,
+        sn=target_sns[0],
+        sns=target_sns,
+        coverage=cov,
         platform=str(task.get("platform") or "android").lower(),
+        platforms_by_sn=task.get("platforms_by_sn") if isinstance(task.get("platforms_by_sn"), dict) else None,
         case_ids=case_ids,
         db=db,
         async_exec=True,

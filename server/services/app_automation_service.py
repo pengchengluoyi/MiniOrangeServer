@@ -16,7 +16,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from script.log import SLog
 from server.models.app_regression_run import AppRegressionRun
 from server.models.project import App
-from server.services.project_env import load_project_env, profile_snapshot, resolve_profile_name
+from server.services.project_env import (
+    load_project_env,
+    profile_snapshot,
+    resolve_profile_name,
+    target_id_from_snapshot,
+)
 
 TAG = "AppAutomation"
 
@@ -213,18 +218,28 @@ def load_project_env_for_app(app) -> dict:
     return normalize_project_env(project.env)
 
 
-def package_for_app(app, env_profile: Optional[str] = None) -> str:
+def package_for_app(app, env_profile: Optional[str] = None, platform: str = "android") -> str:
+    """被测应用启动标识：Android 取 package，iOS 取 bundle。都来自项目环境配置。"""
+    plat = str(platform or "android").lower()
+    want_ios = plat in ("ios", "iphone", "ipad")
     profile = resolve_env_profile(app, env_profile)
-    snap = profile_snapshot(load_project_env_for_app(app), profile)
-    android = snap.get("android") if isinstance(snap.get("android"), dict) else {}
-    pkg = (android.get("package") or "").strip()
+    env_doc = load_project_env_for_app(app)
+    snap = profile_snapshot(env_doc, profile)
+    pkg = target_id_from_snapshot(snap, "ios" if want_ios else "android")
     if pkg:
         return pkg
     legacy = _app_env(app)
-    if isinstance(legacy.get("android"), dict):
-        pkg = (legacy["android"].get("package") or "").strip()
-        if pkg:
-            return pkg
+    pkg = target_id_from_snapshot(legacy, "ios" if want_ios else "android")
+    if pkg:
+        return pkg
+    if want_ios:
+        for prof in ("test", "dev", "pre", "prod"):
+            snap2 = profile_snapshot(env_doc, prof)
+            pkg = target_id_from_snapshot(snap2, "ios")
+            if pkg:
+                SLog.i(TAG, f"package_for_app ios fallback profile={prof}: {pkg}")
+                return pkg
+        return ""
     pkg = (legacy.get("package") or "").strip()
     if pkg:
         return pkg
@@ -237,10 +252,9 @@ def package_for_app(app, env_profile: Optional[str] = None) -> str:
             return pkg
     except Exception as e:
         SLog.w(TAG, f"package_for_app record fallback failed: {e}")
-    env_doc = load_project_env_for_app(app)
     for prof in ("test", "dev", "pre", "prod"):
         snap2 = profile_snapshot(env_doc, prof)
-        pkg = ((snap2.get("android") or {}).get("package") or "").strip()
+        pkg = target_id_from_snapshot(snap2, "android")
         if pkg:
             SLog.i(TAG, f"package_for_app fallback profile={prof}: {pkg}")
             return pkg

@@ -81,13 +81,34 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         if c.get("status") == "running":
             current = current or (c.get("case_id") or "")
             hitl = hitl or bool(c.get("hitl"))
+    sns: list[str] = []
+    seen: set[str] = set()
+    for item in list(doc.get("sns") or []):
+        s = str(item or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            sns.append(s)
+    primary_sn = str(doc.get("sn") or "").strip()
+    if primary_sn and primary_sn not in seen:
+        sns.insert(0, primary_sn)
+        seen.add(primary_sn)
+    if not sns and primary_sn:
+        sns = [primary_sn]
+    coverage = str(doc.get("coverage") or "once").strip().lower()
+    if coverage not in ("once", "per_device"):
+        coverage = "once"
+
     task = {
         "task_id": doc.get("run_id") or doc.get("task_id") or "",
         "app_id": doc.get("app_id", "") or "",
         "app_name": doc.get("app_name", "") or "",
         "run_type": doc.get("run_type") or run_type_col or run_type,
-        "sn": doc.get("sn", "") or "",
+        "sn": sns[0] if sns else "",
+        "sns": sns,
+        "coverage": coverage,
         "platform": doc.get("platform", "android") or "android",
+        "platforms_by_sn": dict(doc.get("platforms_by_sn") or {}) if isinstance(doc.get("platforms_by_sn"), dict) else {},
+        "packages_by_platform": dict(doc.get("packages_by_platform") or {}) if isinstance(doc.get("packages_by_platform"), dict) else {},
         "status": st,
         "total": total,
         "completed": min(completed, total) if total else completed,
@@ -131,6 +152,11 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
         "progress": t["progress"],
         "current_case_id": t["current_case_id"],
         "hitl": t["hitl"],
+        "sn": t.get("sn") or "",
+        "sns": list(t.get("sns") or []),
+        "coverage": t.get("coverage") or "once",
+        "platform": t.get("platform") or "android",
+        "platforms_by_sn": dict(t.get("platforms_by_sn") or {}),
         "knowledge_ids": list(t.get("knowledge_ids") or []),
         "knowledge_proposals": list(t.get("knowledge_proposals") or []),
     }
@@ -139,6 +165,8 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
             "case_id": case.get("case_id"),
             "status": _norm_case_status(case.get("status")),
             "report_run_id": case.get("report_run_id"),
+            "sn": case.get("sn") or "",
+            "device_platform": case.get("device_platform") or "",
             "summary": case.get("summary", ""),
             "hitl": bool(case.get("hitl", False)),
             "knowledge_ids": list(case.get("knowledge_ids") or []),
@@ -231,7 +259,13 @@ def busy_task_for_sn(sn: str) -> str:
     if not sn:
         return ""
     for rid, doc in _memory_runs().items():
-        if str(doc.get("sn") or "") == sn and str(doc.get("status") or "") == "running":
+        if str(doc.get("status") or "") != "running":
+            continue
+        sns = [str(x or "").strip() for x in (doc.get("sns") or []) if str(x or "").strip()]
+        if not sns:
+            one = str(doc.get("sn") or "").strip()
+            sns = [one] if one else []
+        if sn in sns:
             return rid
     return ""
 
@@ -240,8 +274,13 @@ def busy_map() -> dict[str, str]:
     """{sn: 占用它的 task_id}，供 GET /devices 一次性标注 busy_task_id。"""
     out: dict[str, str] = {}
     for rid, doc in _memory_runs().items():
-        sn = str(doc.get("sn") or "")
-        if sn and str(doc.get("status") or "") == "running":
+        if str(doc.get("status") or "") != "running":
+            continue
+        sns = [str(x or "").strip() for x in (doc.get("sns") or []) if str(x or "").strip()]
+        if not sns:
+            one = str(doc.get("sn") or "").strip()
+            sns = [one] if one else []
+        for sn in sns:
             out.setdefault(sn, rid)
     return out
 

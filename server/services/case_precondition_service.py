@@ -75,11 +75,10 @@ def _mobile_engine(sn: str, platform: str):
 
         return get_ios_engine(str(sn))
 
-    import builtins
-
     from driver.agent.Crawl.device_bootstrap import bootstrap_mobile_engine
+    from server.services.runtime.device_bind import bind_device_sn
 
-    builtins.TARGET_DEVICE_SN = str(sn)
+    bind_device_sn(str(sn))
     engine, _ = bootstrap_mobile_engine(str(sn), platform)
     return engine
 

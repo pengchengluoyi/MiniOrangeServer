@@ -84,6 +84,17 @@ def profile_snapshot(env_doc: dict, env_profile: Optional[str] = None) -> dict:
     return copy.deepcopy(EMPTY_PLATFORM)
 
 
+def target_id_from_snapshot(snap: dict, platform: str = "android") -> str:
+    """从某一环境 profile 快照取启动标识：Android 包名 / iOS Bundle。"""
+    data = snap if isinstance(snap, dict) else {}
+    plat = str(platform or "android").lower()
+    if plat in ("ios", "iphone", "ipad"):
+        ios = data.get("ios") if isinstance(data.get("ios"), dict) else {}
+        return str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
+    android = data.get("android") if isinstance(data.get("android"), dict) else {}
+    return str(android.get("package") or "").strip()
+
+
 def resolve_project_id_for_flow(session: Session, flow_id: int) -> Optional[str]:
     wf = session.query(Workflow).filter(Workflow.id == int(flow_id)).first()
     if not wf:
