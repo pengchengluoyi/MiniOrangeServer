@@ -3,7 +3,9 @@
 """应用自动化配置 API（Skills、图标目标、用例缓存）。"""
 from __future__ import annotations
 
+import logging
 import os
+import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -100,7 +102,7 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
     cfg = aas.get_automation_config(app)
     pkg = aas.package_for_app(app)
     icon_page = its.list_icon_targets(db, app_id, page=1, page_size=1)
-    cache = aas.get_feishu_cases_cache(app) or {}
+    cases = aas.list_app_cases(app)
     env_doc = load_project_env(db, app.project_id) if app.project_id else None
     return {
         "code": 200,
@@ -112,10 +114,10 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
             "env_profiles": profile_keys(env_doc) if env_doc is not None else ["test", "pre", "prod"],
             "package": pkg,
             "automation": cfg,
-            "feishu_cases_cache": cache,
             "stats": {
                 "icon_targets": icon_page.get("total", 0),
-                "feishu_cases": len(cache.get("cases") or []),
+                "case_count": len(cases),
+                "feishu_cases": len(cases),
             },
         },
     }
@@ -173,6 +175,306 @@ def qa_process_assist(app_id: str, body: QaProcessAssistBody, db: Session = Depe
         suites=body.suites or [],
     )
     return {"code": 200, "ok": True, "data": {"artifact": art}}
+
+
+class QaProcessTickBody(BaseModel):
+    requirement_id: str = ""
+    user_note: str = ""
+    force: bool = False
+    jobs: List[str] = []
+
+
+class AtlasPatchBody(BaseModel):
+    patch_id: str
+    action: str = "accept"
+    after: dict | None = None
+    reason: str = ""
+    note: str = ""
+    rerun: bool = True
+    run_pipeline: bool = True
+    release_id: str = ""
+
+
+def _followup_in_background(
+    *,
+    app_id: str,
+    qa_process: dict,
+    cases: list,
+    requirement_ids: list,
+    trigger: str,
+    app_name: str,
+    pipeline_id: str,
+    force: bool,
+) -> None:
+    from server.core.database import SessionLocal
+    from server.services.qa_role_jobs import run_followup_pipeline
+
+    try:
+        result = run_followup_pipeline(
+            qa_process=qa_process,
+            cases=cases,
+            requirement_ids=requirement_ids,
+            trigger=trigger,
+            app_id=app_id,
+            app_name=app_name,
+            pipeline_id=pipeline_id,
+            force=force,
+        )
+        with SessionLocal() as db:
+            app = db.query(App).filter(App.id == app_id).first()
+            if not app:
+                return
+            aas.save_automation_config(app, {"qa_process": result.get("qa_process") or qa_process})
+            db.commit()
+    except Exception:
+        logging.exception("atlas followup failed for %s", app_id)
+        try:
+            from server.services.ai import dispatch_log as dispatch
+
+            err_tok = dispatch.bind(
+                trigger=trigger,
+                app_id=app_id,
+                app_name=app_name,
+                pipeline_id=pipeline_id,
+                role="req-analyst",
+                job="atlas_followup",
+            )
+            dispatch.record_job(status="error", job="atlas_followup", role="req-analyst", error="后台补脑图/用例失败")
+            dispatch.reset(err_tok)
+        except Exception:
+            pass
+
+
+def _reanalyze_in_background(
+    *,
+    app_id: str,
+    qa_process: dict,
+    cases: list,
+    requirement_ids: list,
+    user_note: str,
+    app_name: str,
+    pipeline_id: str,
+) -> None:
+    from server.core.database import SessionLocal
+    from server.services.qa_role_jobs import tick
+
+    try:
+        result = tick(
+            qa_process=qa_process,
+            cases=cases,
+            requirement_ids=requirement_ids,
+            app_id=app_id,
+            app_name=app_name,
+            user_note=user_note,
+            force=True,
+        )
+        with SessionLocal() as db:
+            app = db.query(App).filter(App.id == app_id).first()
+            if not app:
+                return
+            aas.save_automation_config(app, {"qa_process": result.get("qa_process") or qa_process})
+            db.commit()
+    except Exception:
+        logging.exception("atlas reject reanalyze failed for %s", app_id)
+        try:
+            from server.services.ai import dispatch_log as dispatch
+
+            err_tok = dispatch.bind(
+                trigger="atlas_reject",
+                app_id=app_id,
+                app_name=app_name,
+                pipeline_id=pipeline_id,
+                role="req-analyst",
+                job="qa_tick",
+            )
+            dispatch.record_job(status="error", job="qa_tick", role="req-analyst", error="按驳回说明重跑分析失败")
+            dispatch.reset(err_tok)
+        except Exception:
+            pass
+
+
+@router.post("/qa-process/atlas-patch/{app_id}")
+def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depends(get_db)):
+    """人审影响范围：确认、驳回，或保存人手改过的骨架。确认后立刻返回，脑图→用例在后台跑。"""
+    from server.services.ai import app_atlas as atlas
+    from server.services.ai import dispatch_log as dispatch
+
+    app = _get_app(db, app_id)
+    cfg = aas.get_automation_config(app)
+    doc = dict(cfg.get("qa_process") or {})
+    action = (body.action or "").strip().lower()
+    hung_ids: list[str] = []
+    if body.after and isinstance(body.after, dict):
+        patches = [dict(x) for x in (doc.get("atlas_patches") or []) if isinstance(x, dict)]
+        for row in patches:
+            if row.get("id") == body.patch_id:
+                row["after"] = atlas.normalize_atlas(body.after)
+                row["diff"] = atlas.diff_atlas(row.get("before"), row["after"])
+                row["lines"] = atlas.diff_lines(row["diff"], doc.get("requirements") or [])
+                if body.reason:
+                    row["reason"] = body.reason
+                break
+        doc["atlas_patches"] = patches
+    if action == "save":
+        found = next((x for x in (doc.get("atlas_patches") or []) if isinstance(x, dict) and x.get("id") == body.patch_id), None)
+        if not found:
+            raise HTTPException(status_code=404, detail="没有这条图谱变更")
+        if found.get("status") == "accepted" and found.get("after"):
+            after = atlas.normalize_atlas(found.get("after"))
+            after["updated_at"] = found.get("decided_at") or ""
+            doc = atlas.stamp_atlas_on_release(doc, after, body.release_id)
+            doc["requirements"] = atlas.apply_hangs_to_reqs(doc.get("requirements") or [], after)
+            doc["features"] = atlas.flatten_features(after, doc.get("requirements") or [])
+        patch = found
+        next_doc = doc
+    elif action == "accept":
+        next_doc, patch = atlas.accept_patch(doc, body.patch_id)
+        if next_doc and patch:
+            next_doc = atlas.stamp_atlas_on_release(next_doc, next_doc.get("app_atlas") or {}, body.release_id)
+    elif action == "reject":
+        next_doc, patch = atlas.reject_patch(doc, body.patch_id, note=body.note)
+        if next_doc and patch:
+            next_doc, hung_ids = atlas.apply_reject_feedback(next_doc, patch, body.note)
+        else:
+            hung_ids = []
+    else:
+        raise HTTPException(status_code=400, detail="action must be accept, reject or save")
+    if not patch:
+        raise HTTPException(status_code=404, detail="没有这条待确认的图谱变更")
+    log = [x for x in (next_doc.get("role_log") or []) if isinstance(x, dict)]
+    log.append(
+        {
+            "at": patch.get("decided_at") or "",
+            "role": "req-analyst",
+            "job": "review_impact" if action != "save" else "edit_atlas",
+            "action": action,
+            "patch_id": body.patch_id,
+        }
+    )
+    next_doc["role_log"] = log[-80:]
+    pipeline_id = ""
+    if body.run_pipeline and action in ("accept", "save"):
+        cases = aas.list_app_cases(app)
+        hung = atlas.patch_followup_req_ids(patch)
+        force = atlas.patch_is_structural(patch)
+        if not hung:
+            hung = [str(r.get("id") or "") for r in (next_doc.get("requirements") or []) if isinstance(r, dict) and r.get("id")]
+            force = False
+        if hung:
+            pipeline_id = dispatch.new_pipeline_id()
+            start = dispatch.bind(
+                trigger="atlas_confirm" if action == "accept" else "atlas_edit",
+                app_id=app.id,
+                app_name=app.name or "",
+                pipeline_id=pipeline_id,
+                role="req-analyst",
+                job="atlas_followup",
+            )
+            dispatch.record_job(
+                status="running",
+                job="atlas_followup",
+                role="req-analyst",
+                detail="确认后正在补脑图和用例",
+                input_data={"requirement_ids": hung},
+            )
+            dispatch.reset(start)
+            threading.Thread(
+                target=_followup_in_background,
+                kwargs={
+                    "app_id": app.id,
+                    "qa_process": next_doc,
+                    "cases": cases,
+                    "requirement_ids": hung,
+                    "trigger": "atlas_confirm" if action == "accept" else "atlas_edit",
+                    "app_name": app.name or "",
+                    "pipeline_id": pipeline_id,
+                    "force": force,
+                },
+                daemon=True,
+            ).start()
+    elif action == "reject" and body.rerun:
+        cases = aas.list_app_cases(app)
+        hung = hung_ids
+        if not hung:
+            hung = atlas.patch_followup_req_ids(patch)
+        if hung:
+            pipeline_id = dispatch.new_pipeline_id()
+            start = dispatch.bind(
+                trigger="atlas_reject",
+                app_id=app.id,
+                app_name=app.name or "",
+                pipeline_id=pipeline_id,
+                role="req-analyst",
+                job="qa_tick",
+            )
+            dispatch.record_job(
+                status="running",
+                job="qa_tick",
+                role="req-analyst",
+                detail="按驳回说明重跑需求分析",
+                input_data={"requirement_ids": hung, "note": (body.note or "")[:240]},
+            )
+            dispatch.reset(start)
+            threading.Thread(
+                target=_reanalyze_in_background,
+                kwargs={
+                    "app_id": app.id,
+                    "qa_process": next_doc,
+                    "cases": cases,
+                    "requirement_ids": hung,
+                    "user_note": body.note or "",
+                    "app_name": app.name or "",
+                    "pipeline_id": pipeline_id,
+                },
+                daemon=True,
+            ).start()
+    saved = aas.save_automation_config(app, {"qa_process": next_doc})
+    db.commit()
+    return {
+        "code": 200,
+        "ok": True,
+        "data": {
+            "qa_process": saved.get("qa_process") or next_doc,
+            "patch": patch,
+            "action": action,
+            "pipeline_id": pipeline_id,
+            "pipeline_pending": bool(pipeline_id),
+            "actions": [],
+        },
+    }
+
+
+@router.post("/qa-process/tick/{app_id}")
+def qa_process_tick(app_id: str, body: QaProcessTickBody, db: Session = Depends(get_db)):
+    """角色自动推进：分析需求、写脑图、补用例草稿。不改验收/发版门禁，不自动下发设备。"""
+    from server.services.qa_role_jobs import tick
+
+    app = _get_app(db, app_id)
+    cfg = aas.get_automation_config(app)
+    cases = aas.list_app_cases(app)
+    result = tick(
+        qa_process=cfg.get("qa_process") or {},
+        cases=cases,
+        requirement_id=body.requirement_id,
+        app_id=app.id,
+        app_name=app.name or "",
+        user_note=body.user_note,
+        force=body.force,
+        jobs=body.jobs or [],
+    )
+    saved = aas.save_automation_config(app, {"qa_process": result.get("qa_process") or {}})
+    qa = saved.get("qa_process") or result.get("qa_process") or {}
+    db.commit()
+    return {
+        "code": 200,
+        "ok": True,
+        "data": {
+            "qa_process": qa,
+            "actions": result.get("actions") or [],
+            "autonomy": result.get("autonomy") or {},
+            "usage": result.get("usage") or {},
+        },
+    }
 
 
 class FigmaSyncBody(BaseModel):
@@ -389,18 +691,8 @@ def import_graph_icon(app_id: str, body: Dict[str, Any], db: Session = Depends(g
 
 @router.get("/cases/{app_id}")
 def list_cached_cases(app_id: str, refresh: bool = False, db: Session = Depends(get_db)):
-    from server.services import feishu_regression_service as frs
-
     app = _get_app(db, app_id)
-    try:
-        if refresh:
-            data = frs.fetch_cases_for_app(app, persist=True)
-            db.commit()
-        else:
-            data = frs.list_cases_for_app(app, refresh=False)
-        return {"code": 200, "data": data}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 200, "data": aas.cases_payload(app)}
 
 
 @router.get("/runs/{app_id}")

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -213,7 +214,158 @@ def normalize_project_env(raw: Any) -> dict:
         "channels": channels,
         "pipeline": pipeline,
         "profiles": profiles,
+        "test_accounts": _norm_test_accounts(raw.get("test_accounts")),
     }
+
+
+def _norm_test_accounts(raw: Any) -> List[dict]:
+    rows = raw if isinstance(raw, list) else []
+    out: List[dict] = []
+    seen: set = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        aid = str(item.get("id") or "").strip() or uuid.uuid4().hex[:12]
+        if aid in seen:
+            continue
+        seen.add(aid)
+        tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+        clean_tags = []
+        for t in tags:
+            s = str(t or "").strip()[:40]
+            if s and s not in clean_tags:
+                clean_tags.append(s)
+        out.append(
+            {
+                "id": aid,
+                "name": str(item.get("name") or "").strip()[:40] or "未命名账号",
+                "env": _slug(item.get("env") or "test", "test"),
+                "kind": str(item.get("kind") or "mixed").strip() or "mixed",
+                "phone": str(item.get("phone") or "").strip()[:32],
+                "email": str(item.get("email") or "").strip()[:80],
+                "username": str(item.get("username") or "").strip()[:80],
+                "password": str(item.get("password") or "").strip()[:120],
+                "tags": clean_tags[:24],
+                "note": str(item.get("note") or "").strip()[:200],
+                "locked": bool(item.get("locked")),
+            }
+        )
+    return out
+
+
+def public_test_accounts(rows: List[dict]) -> List[dict]:
+    out = []
+    for row in rows or []:
+        pwd = str(row.get("password") or "")
+        item = dict(row)
+        item.pop("password", None)
+        item["has_password"] = bool(pwd)
+        item["password_masked"] = ("****" + pwd[-2:]) if len(pwd) >= 4 else ("****" if pwd else "")
+        out.append(item)
+    return out
+
+
+def list_test_accounts(env_doc: dict) -> List[dict]:
+    raw = env_doc.get("test_accounts") if isinstance(env_doc, dict) else []
+    return _norm_test_accounts(raw)
+
+
+def save_test_accounts(env_doc: dict, rows: List[dict]) -> dict:
+    doc = dict(env_doc or {})
+    incoming = _norm_test_accounts(rows)
+    prev = {str(x.get("id")): x for x in list_test_accounts(doc)}
+    merged = []
+    for row in incoming:
+        old = prev.get(row["id"]) or {}
+        if not row.get("password"):
+            row["password"] = str(old.get("password") or "")
+        merged.append(row)
+    doc["test_accounts"] = merged
+    return doc
+
+
+_ENV_HINTS = (
+    ("正式", "prod"),
+    ("生产", "prod"),
+    ("预发", "pre"),
+    ("测试", "test"),
+    ("开发", "dev"),
+)
+
+
+def infer_env_from_prompt(prompt: str) -> str:
+    q = str(prompt or "")
+    for word, key in _ENV_HINTS:
+        if word in q:
+            return key
+    return ""
+
+
+def _prompt_grams(text: str) -> list[str]:
+    s = str(text or "").strip().lower()
+    if not s:
+        return []
+    parts = [t for t in re.split(r"[\s,，、/|；;]+", s) if t]
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(g: str) -> None:
+        if len(g) < 2 or g in seen:
+            return
+        seen.add(g)
+        out.append(g)
+
+    for p in parts:
+        add(p)
+        if len(p) >= 4:
+            for n in (2, 3, 4):
+                for i in range(len(p) - n + 1):
+                    add(p[i : i + n])
+    return out
+
+
+def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> List[dict]:
+    raw = str(prompt or "").strip()
+    q = raw.lower()
+    env_key = _slug(env, "") or infer_env_from_prompt(raw)
+    grams = _prompt_grams(raw)
+    scored = []
+    for row in rows or []:
+        row_env = str(row.get("env") or "")
+        if env_key and row_env and row_env != env_key:
+            continue
+        tags = [str(t or "").strip() for t in (row.get("tags") or []) if str(t or "").strip()]
+        name = str(row.get("name") or "")
+        note = str(row.get("note") or "")
+        blob = " ".join(
+            [name, note, str(row.get("phone") or ""), str(row.get("email") or ""), str(row.get("username") or ""), " ".join(tags)]
+        ).lower()
+        score = 0
+        reasons = []
+        if env_key and row_env == env_key:
+            score += 6
+            reasons.append("环境匹配")
+        if row.get("locked"):
+            score -= 8
+            reasons.append("占用中")
+        if q and q in blob:
+            score += 16
+            reasons.append("整句命中")
+        tag_hits = [t for t in tags if t and (t.lower() in q or any(len(g) >= 2 and g in t.lower() for g in grams))]
+        if tag_hits:
+            score += 10 + 4 * min(3, len(tag_hits))
+            reasons.append("标签「" + "、".join(tag_hits[:3]) + "」")
+        name_hits = [g for g in grams if len(g) >= 2 and g in name.lower()]
+        if name_hits:
+            longest = max(name_hits, key=len)
+            score += 3 * min(6, len(longest))
+            reasons.append("名称含「" + longest + "」")
+        extra = [g for g in grams if len(g) >= 3 and g in blob and g not in name.lower() and not any(g in t.lower() for t in tags)]
+        if extra:
+            score += 2 * min(4, len(extra))
+        scored.append({**row, "score": int(score), "reason": " · ".join(reasons) or "无明显匹配"})
+    scored.sort(key=lambda x: (-int(x.get("score") or 0), x.get("name") or ""))
+    return scored[:12]
 
 
 def profile_keys(env_doc: dict) -> List[str]:
@@ -254,10 +406,45 @@ def profile_snapshot(env_doc: dict, env_profile: Optional[str] = None) -> dict:
     name = resolve_profile_name(env_doc, env_profile)
     profiles = env_doc.get("profiles") or {}
     snap = profiles.get(name)
-    if isinstance(snap, dict):
-        return copy.deepcopy(snap)
     channels = env_doc.get("channels") if isinstance(env_doc.get("channels"), list) else DEFAULT_CHANNELS
-    return empty_profile(channels)
+    if not isinstance(snap, dict):
+        snap = empty_profile(channels)
+    else:
+        snap = copy.deepcopy(snap)
+    order = pipeline_keys(env_doc)
+    for ch in channels or []:
+        cid = str(ch.get("id") or "")
+        field = str(ch.get("field") or "value")
+        if cid not in ("android", "ios"):
+            continue
+        if _profile_value((snap.get(cid) if isinstance(snap.get(cid), dict) else {}), field):
+            continue
+        filled = _inherit_mobile_value(profiles, order, name, cid, field)
+        if filled:
+            snap.setdefault(cid, {})
+            snap[cid][field] = filled
+    return snap
+
+
+def _inherit_mobile_value(profiles: dict, order: List[str], env_key: str, channel_id: str, field: str) -> str:
+    keys = [k for k in (order or []) if k] or list((profiles or {}).keys())
+    for key in keys:
+        snap = profiles.get(key) if isinstance(profiles, dict) else None
+        if not isinstance(snap, dict):
+            continue
+        v = _profile_value(snap.get(channel_id), field)
+        if v:
+            return v
+    other = "ios" if channel_id == "android" else "android"
+    other_field = "bundle" if other == "ios" else "package"
+    for key in [env_key, *keys]:
+        snap = profiles.get(key) if isinstance(profiles, dict) else None
+        if not isinstance(snap, dict):
+            continue
+        v = _profile_value(snap.get(other), other_field)
+        if v:
+            return v
+    return ""
 
 
 def target_id_from_snapshot(snap: dict, platform: str = "android") -> str:
@@ -266,9 +453,17 @@ def target_id_from_snapshot(snap: dict, platform: str = "android") -> str:
     plat = str(platform or "android").lower()
     if plat in ("ios", "iphone", "ipad"):
         ios = data.get("ios") if isinstance(data.get("ios"), dict) else {}
-        return str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
+        bundle = str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
+        if bundle:
+            return bundle
+        android = data.get("android") if isinstance(data.get("android"), dict) else {}
+        return str(android.get("package") or "").strip()
     android = data.get("android") if isinstance(data.get("android"), dict) else {}
-    return str(android.get("package") or "").strip()
+    pkg = str(android.get("package") or "").strip()
+    if pkg:
+        return pkg
+    ios = data.get("ios") if isinstance(data.get("ios"), dict) else {}
+    return str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
 
 
 def resolve_project_id_for_flow(session: Session, flow_id: int) -> Optional[str]:

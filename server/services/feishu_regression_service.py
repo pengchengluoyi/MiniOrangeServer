@@ -16,7 +16,7 @@ from script.log import SLog
 from server.services import copilot_service as cs
 from server.services import app_automation_service as aas
 from server.services.executor.execute_steps import execute_steps
-from server.services.feishu_service import load_cases_from_config, normalize_feishu_case
+from server.services.feishu_service import normalize_feishu_case
 from server.services.shared.execution_profile import ExecutionProfile, resolve_execution_profile
 from server.services.case_precondition_service import (
     has_precondition_phase,
@@ -136,31 +136,13 @@ def save_app_feishu_config(app, config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def fetch_cases_for_app(app, *, persist: bool = True) -> Dict[str, Any]:
-    cfg = _get_app_feishu_config(app)
-    if not cfg.get("doc_url") and not cfg.get("spreadsheet_token"):
-        raise RuntimeError("请先在应用中配置飞书表格链接")
-    payload = load_cases_from_config(cfg)
-    payload["cases"] = [normalize_feishu_case(c) for c in (payload.get("cases") or [])]
-    if persist:
-        cache = aas.save_feishu_cases_cache(app, payload)
-        payload["cached_at"] = cache.get("synced_at")
-    return payload
+    """兼容旧入口：用例只读流程草稿，不再拉飞书表格。"""
+    return aas.cases_payload(app)
 
 
 def list_cases_for_app(app, *, refresh: bool = False) -> Dict[str, Any]:
-    if refresh:
-        return fetch_cases_for_app(app, persist=True)
-    cache = aas.get_feishu_cases_cache(app)
-    if cache and cache.get("cases"):
-        cases = [normalize_feishu_case(c) for c in (cache.get("cases") or [])]
-        return {
-            "cases": cases,
-            "total": cache.get("total") or len(cases),
-            "synced_at": cache.get("synced_at"),
-            "from_cache": True,
-            "resolve_note": cache.get("resolve_note") or "",
-        }
-    return fetch_cases_for_app(app, persist=True)
+    """兼容旧入口：用例只读流程草稿。"""
+    return aas.cases_payload(app)
 
 
 def _normalize_step_line(line: str) -> str:

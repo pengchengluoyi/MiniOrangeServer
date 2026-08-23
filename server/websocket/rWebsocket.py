@@ -77,10 +77,21 @@ async def websocket_endpoint(
         await websocket.accept()
         dm.observers.add(websocket)
     else:
-        # Case 3: 鉴权失败
-        SLog.w(TAG, f"⛔ Connection rejected. Server Token: {str(server_token)[:6]}... Client Sent: {token}")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+        user_ok = False
+        if token:
+            try:
+                from server.services.auth_service import status as auth_status
+                user_ok = bool(auth_status(token).get("logged_in"))
+            except Exception:
+                user_ok = False
+        if user_ok:
+            SLog.i(TAG, "⚡ [WS] Accepted logged-in web session")
+            await websocket.accept()
+            dm.observers.add(websocket)
+        else:
+            SLog.w(TAG, f"⛔ Connection rejected. Server Token: {str(server_token)[:6]}... Client Sent: {token}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
     
     # 发送锁，防止并发任务同时写入 WebSocket 导致协议错误
     send_lock = asyncio.Lock()
@@ -118,12 +129,15 @@ async def websocket_endpoint(
             current_token = SecurityManager.get_token()
             
             if current_token is None:
-                allowed_actions = ["get_server_info", "join_cluster", "get_node_status", "register", "heartbeat", "register_clawnode"]
-                if action not in allowed_actions:
-                    response.update({"code": 403, "msg": "Server not initialized. Please scan QR code first."})
-                    async with send_lock:
-                        await websocket.send_text(json.dumps(response))
-                    return
+                client = getattr(websocket.app.state, "device_client", None)
+                standalone = not client or getattr(client, "role", "") in ("gateway", "server", "")
+                if not standalone:
+                    allowed_actions = ["get_server_info", "join_cluster", "get_node_status", "register", "heartbeat", "register_clawnode"]
+                    if action not in allowed_actions:
+                        response.update({"code": 403, "msg": "节点未绑定集群"})
+                        async with send_lock:
+                            await websocket.send_text(json.dumps(response))
+                        return
             
             # 🔥 [新增] 节点离线检测 (Node Mode Offline Check)
             # 如果本机是 Node 模式且与集群断开，拒绝大部分业务请求，并通知移动端

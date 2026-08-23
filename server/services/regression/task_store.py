@@ -109,6 +109,11 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "platform": doc.get("platform", "android") or "android",
         "platforms_by_sn": dict(doc.get("platforms_by_sn") or {}) if isinstance(doc.get("platforms_by_sn"), dict) else {},
         "packages_by_platform": dict(doc.get("packages_by_platform") or {}) if isinstance(doc.get("packages_by_platform"), dict) else {},
+        "env_profile": doc.get("env_profile", "") or "",
+        "package": doc.get("package", "") or "",
+        "requirement_id": doc.get("requirement_id", "") or "",
+        "release_id": doc.get("release_id", "") or "",
+        "slot_id": doc.get("slot_id", "") or "",
         "status": st,
         "total": total,
         "completed": min(completed, total) if total else completed,
@@ -126,11 +131,16 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "busy": st == "running",
         "current_case_id": current,
         "hitl": hitl,
+        "title": doc.get("title") or "",
+        "role": doc.get("role") or "",
+        "kind": doc.get("kind") or "",
         "knowledge_ids": list(doc.get("knowledge_ids") or []),
         "knowledge_proposals": list(doc.get("knowledge_proposals") or []),
     }
     if include_cases:
         task["cases"] = cases
+        if doc.get("atlas_patch"):
+            task["atlas_patch"] = doc.get("atlas_patch")
     return task
 
 
@@ -224,6 +234,94 @@ def list_tasks(app_id: str, *, status: str = "", limit: int = 30, offset: int = 
     return {"items": items, "total": total}
 
 
+def _patch_proposal_status(doc: dict[str, Any], kid: str, review_status: str) -> bool:
+    changed = False
+
+    def patch_list(items):
+        nonlocal changed
+        for row in items or []:
+            if isinstance(row, dict) and str(row.get("id") or "") == kid:
+                if str(row.get("review_status") or "") != review_status:
+                    row["review_status"] = review_status
+                    changed = True
+
+    patch_list(doc.get("knowledge_proposals"))
+    for case in doc.get("cases") or []:
+        if isinstance(case, dict):
+            patch_list(case.get("knowledge_proposals"))
+    return changed
+
+
+def _hydrate_proposal_review(task: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """用知识库里的审核状态覆盖任务快照，避免已通过的草稿刷新后又冒出来。"""
+    if not task:
+        return task
+    try:
+        from server.services.system_settings_service import list_testing_knowledge
+
+        by_id = {
+            str(x.get("id")): str(x.get("review_status") or "pending")
+            for x in (list_testing_knowledge() or [])
+            if isinstance(x, dict) and x.get("id")
+        }
+    except Exception as exc:
+        SLog.w(TAG, f"hydrate knowledge failed: {exc}")
+        return task
+
+    def apply(items):
+        for row in items or []:
+            if not isinstance(row, dict):
+                continue
+            kid = str(row.get("id") or "")
+            if kid and kid in by_id:
+                row["review_status"] = by_id[kid]
+
+    apply(task.get("knowledge_proposals"))
+    for case in task.get("cases") or []:
+        if isinstance(case, dict):
+            apply(case.get("knowledge_proposals"))
+    return task
+
+
+def mark_knowledge_proposal(task_id: str, kid: str, review_status: str) -> bool:
+    """把审核结果写回任务快照（内存 + 落库），刷新后不再回到待审核。"""
+    from server.services.regression import case_runner
+    from server.core.database import SessionLocal
+    from server.models.app_regression_run import AppRegressionRun
+    from sqlalchemy.orm.attributes import flag_modified
+
+    tid = str(task_id or "").strip()
+    kid = str(kid or "").strip()
+    st = str(review_status or "").strip().lower()
+    if not tid or not kid or st not in ("pending", "approved", "rejected"):
+        return False
+
+    live = None
+    with case_runner._LOCK:  # noqa: SLF001
+        live = case_runner._RUNS.get(tid)  # noqa: SLF001
+        if live is not None:
+            _patch_proposal_status(live, kid, st)
+    if live is not None:
+        case_runner._persist(live)  # noqa: SLF001
+        return True
+
+    try:
+        with SessionLocal() as db:
+            row = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == tid).first()
+            if row is None:
+                return False
+            payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+            if not _patch_proposal_status(payload, kid, st):
+                return False
+            row.payload = payload
+            flag_modified(row, "payload")
+            db.commit()
+            return True
+    except Exception as exc:
+        SLog.w(TAG, f"mark_knowledge_proposal failed {tid} {kid}: {exc}")
+        return False
+
+
 def get_task(task_id: str) -> Optional[dict[str, Any]]:
     """任务详情（含全量 cases）。running 优先内存，否则 DB payload。"""
     from server.services.regression import case_runner
@@ -232,19 +330,19 @@ def get_task(task_id: str) -> Optional[dict[str, Any]]:
 
     mem = case_runner.get_run(task_id)
     if mem is not None:
-        return to_task_json(mem, include_cases=True)
+        return _hydrate_proposal_review(to_task_json(mem, include_cases=True))
     try:
         with SessionLocal() as db:
             r = db.query(AppRegressionRun).filter(AppRegressionRun.run_id == task_id).first()
             if r is None:
                 return None
             payload = r.payload if isinstance(r.payload, dict) else {}
-            return to_task_json(
+            return _hydrate_proposal_review(to_task_json(
                 payload, status=r.status, run_type_col=r.run_type,
                 started_at=r.started_at.isoformat() if r.started_at else "",
                 finished_at=r.finished_at.isoformat() if r.finished_at else "",
                 include_cases=True,
-            )
+            ))
     except Exception as exc:
         SLog.w(TAG, f"get_task db failed {task_id}: {exc}")
         return None

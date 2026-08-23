@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session, joinedload
 from server.models.workflow import Workflow
 from server.models.AppGraph.app_structure import AppGraph, AppSOP, AppNode
 from server.services.device_service import DeviceService
-from server.services.project_env import load_project_env_for_flow, resolve_profile_name
+from server.services.project_env import (
+    list_test_accounts,
+    load_project_env_for_flow,
+    pick_test_accounts,
+    resolve_profile_name,
+)
 from server.core.vision.skeleton_algo import SkeletonAlgo
 
 
@@ -155,6 +160,21 @@ def build_run_context(
         ctx["app"] = app_snap
         ctx["env_profile"] = active
         ctx["env_profiles"] = list(env_doc.get("profiles", {}).keys())
+        ranked = pick_test_accounts(list_test_accounts(env_doc), prompt="", env=active)
+        if ranked:
+            top = ranked[0]
+            ctx["test_account"] = {
+                "id": top.get("id"),
+                "name": top.get("name"),
+                "env": top.get("env"),
+                "kind": top.get("kind"),
+                "phone": top.get("phone"),
+                "email": top.get("email"),
+                "username": top.get("username"),
+                "password": top.get("password"),
+                "tags": top.get("tags") or [],
+                "reason": top.get("reason") or "",
+            }
         empty["app_graph"] = _serialize_app_graph_structure(session, graph)
 
     if sn and DeviceService.get_by_sn(sn):

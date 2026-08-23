@@ -23,6 +23,15 @@ from script.log import SLog
 TAG = "RegressionLLM"
 
 
+def _safe_record_llm(*, messages, parsed=None, raw_text: str = "", meta=None) -> None:
+    try:
+        from server.services.ai.dispatch_log import record_llm
+
+        record_llm(messages=messages, parsed=parsed, raw_text=raw_text, meta=meta)
+    except Exception:
+        pass
+
+
 # ---------- JSON 抽取 ----------
 
 
@@ -75,34 +84,51 @@ def _extract_first_json_object(text: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _parse_openai_chat_completion(resp_json: dict[str, Any]) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
-    """从 OpenAI-compatible response 取 content 并解析成 JSON dict。"""
+def extract_chat_content(resp_json: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """从 OpenAI-compatible response 取出 assistant 文本。"""
     if not isinstance(resp_json, dict):
-        return None, {"reason": "non-dict response"}
+        return "", {"reason": "non-dict response"}
     choices = resp_json.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
-        return None, {"reason": "no choices", "raw_keys": list(resp_json.keys())[:8]}
+        return "", {"reason": "no choices", "raw_keys": list(resp_json.keys())[:8]}
     choice = choices[0]
     message = choice.get("message") or {}
     content = ""
     if isinstance(message, dict):
         content = message.get("content") or ""
         if isinstance(content, list):
-            # vision 风格 multi-part；只取文本块
             content = "\n".join(
                 p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
             )
     if not content:
-        # 兜底：text 字段
         content = choice.get("text") or ""
     content = str(content or "")
-    parsed = _extract_first_json_object(content)
     meta = {
         "finish_reason": choice.get("finish_reason"),
         "content_len": len(content),
         "content_preview": content[:240],
         "usage": resp_json.get("usage"),
+        **parse_token_usage(resp_json.get("usage")),
     }
+    return content, meta
+
+
+def parse_token_usage(usage: Any) -> dict[str, int]:
+    """兼容 OpenAI / 方舟 usage 字段。"""
+    if not isinstance(usage, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total = int(usage.get("total_tokens") or 0) or (prompt + completion)
+    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+
+
+def _parse_openai_chat_completion(resp_json: dict[str, Any]) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """从 OpenAI-compatible response 取 content 并解析成 JSON dict。"""
+    content, meta = extract_chat_content(resp_json)
+    if not content and meta.get("reason"):
+        return None, meta
+    parsed = _extract_first_json_object(content)
     return parsed, meta
 
 
@@ -124,7 +150,7 @@ def _volcengine_extras(provider_id: str = "", model: str = "") -> dict[str, Any]
     return {}
 
 
-def call_chat_text(
+def _post_chat_completions(
     *,
     provider: dict[str, Any],
     messages: list[dict[str, str]],
@@ -133,12 +159,7 @@ def call_chat_text(
     timeout_sec: int = 90,
     extra_payload: Optional[dict[str, Any]] = None,
 ) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
-    """OpenAI-compatible /chat/completions 调用。
-
-    入参 provider 至少要有 base_url / api_key / model。
-    返回 (parsed_json_dict | None, meta)。meta 里包含：
-      - elapsed_ms, http_status, finish_reason, content_len, content_preview, usage, error
-    """
+    """OpenAI-compatible /chat/completions HTTP 调用。成功返回 (resp_json, meta)，失败 (None, meta)。"""
     base = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
     model = str(provider.get("model") or "").strip()
@@ -154,7 +175,6 @@ def call_chat_text(
         meta["error"] = f"provider not configured (base={bool(base)}, key={bool(api_key)}, model={bool(model)})"
         return None, meta
 
-    # 延迟 import，避免无网调用环境的 requests 找不到
     try:
         import requests
     except Exception as e:
@@ -183,11 +203,68 @@ def call_chat_text(
         meta["http_status"] = resp.status_code
         meta["elapsed_ms"] = int((time.time() - started) * 1000)
         resp.raise_for_status()
-        resp_json = resp.json()
+        return resp.json(), meta
     except Exception as e:
         meta["elapsed_ms"] = int((time.time() - started) * 1000)
         meta["error"] = f"http: {e!s}"[:240]
         SLog.w(TAG, f"chat call failed provider={pid} model={model}: {meta['error']}")
+        return None, meta
+
+
+def call_chat_plain(
+    *,
+    provider: dict[str, Any],
+    messages: list[dict[str, str]],
+    temperature: float = 0.3,
+    max_tokens: int = 2048,
+    timeout_sec: int = 90,
+    extra_payload: Optional[dict[str, Any]] = None,
+) -> tuple[str, dict[str, Any]]:
+    """纯文本对话。返回 (assistant_text, meta)，失败时文本为空且 meta.error 有值。"""
+    resp_json, meta = _post_chat_completions(
+        provider=provider,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout_sec=timeout_sec,
+        extra_payload=extra_payload,
+    )
+    if resp_json is None:
+        _safe_record_llm(messages=messages, meta=meta)
+        return "", meta
+    content, parse_meta = extract_chat_content(resp_json)
+    meta.update(parse_meta)
+    if not content:
+        meta["error"] = meta.get("error") or meta.get("reason") or "empty assistant content"
+    _safe_record_llm(messages=messages, raw_text=content, meta=meta)
+    return content, meta
+
+
+def call_chat_text(
+    *,
+    provider: dict[str, Any],
+    messages: list[dict[str, str]],
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    timeout_sec: int = 90,
+    extra_payload: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """OpenAI-compatible /chat/completions 调用。
+
+    入参 provider 至少要有 base_url / api_key / model。
+    返回 (parsed_json_dict | None, meta)。meta 里包含：
+      - elapsed_ms, http_status, finish_reason, content_len, content_preview, usage, error
+    """
+    resp_json, meta = _post_chat_completions(
+        provider=provider,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout_sec=timeout_sec,
+        extra_payload=extra_payload,
+    )
+    if resp_json is None:
+        _safe_record_llm(messages=messages, meta=meta)
         return None, meta
 
     parsed, parse_meta = _parse_openai_chat_completion(resp_json)
@@ -195,9 +272,10 @@ def call_chat_text(
     if parsed is None:
         SLog.w(
             TAG,
-            f"chat JSON parse failed provider={pid} model={model} "
+            f"chat JSON parse failed provider={meta.get('provider_id')} model={meta.get('model')} "
             f"finish={meta.get('finish_reason')!r} preview={meta.get('content_preview')!r}",
         )
+    _safe_record_llm(messages=messages, parsed=parsed, meta=meta)
     return parsed, meta
 
 

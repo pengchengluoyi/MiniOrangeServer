@@ -1,7 +1,7 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from server.core.database import get_db
@@ -68,6 +68,7 @@ def create_app(item: AppCreate, db: Session = Depends(get_db)):
 @router.get("/list")
 def list_projects(db: Session = Depends(get_db)):
     from server.models.app_icon_target import AppIconTarget
+    from server.services import app_automation_service as aas
 
     projects = db.query(Project).options(joinedload(Project.apps)).all()
     out = []
@@ -75,7 +76,7 @@ def list_projects(db: Session = Depends(get_db)):
         apps_out = []
         for a in p.apps or []:
             env = a.env if isinstance(a.env, dict) else {}
-            cache = env.get("feishu_cases_cache") if isinstance(env.get("feishu_cases_cache"), dict) else {}
+            case_n = aas.count_qa_process_cases_from_env(env)
             icon_n = db.query(AppIconTarget).filter(AppIconTarget.app_id == a.id).count()
             apps_out.append(
                 {
@@ -87,8 +88,8 @@ def list_projects(db: Session = Depends(get_db)):
                     "project_id": a.project_id,
                     "automation_stats": {
                         "icon_targets": icon_n,
-                        "feishu_cases": len(cache.get("cases") or []),
-                        "has_feishu": bool(env.get("feishu")),
+                        "case_count": case_n,
+                        "feishu_cases": case_n,
                     },
                 }
             )
@@ -178,18 +179,20 @@ def update_app_env(app_id: str, item: AppEnvUpdate, db: Session = Depends(get_db
 
 @router.get("/{project_id}/env")
 def get_project_env(project_id: str, db: Session = Depends(get_db)):
-    from server.services.project_env import load_project_env, ENV_PROFILE_LABELS
+    from server.services.project_env import load_project_env, ENV_PROFILE_LABELS, list_test_accounts, public_test_accounts
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     doc = load_project_env(db, project_id)
+    safe = dict(doc)
+    safe["test_accounts"] = public_test_accounts(list_test_accounts(doc))
     return {
         "code": 200,
         "data": {
             "project_id": project.id,
             "project_name": project.name,
-            "env": doc,
+            "env": safe,
             "profile_labels": ENV_PROFILE_LABELS,
         },
     }
@@ -202,6 +205,7 @@ def update_project_env(project_id: str, item: ProjectEnvUpdate, db: Session = De
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    prev = project.env if isinstance(project.env, dict) else {}
     doc = normalize_project_env(
         {
             "default_profile": item.default_profile,
@@ -209,6 +213,7 @@ def update_project_env(project_id: str, item: ProjectEnvUpdate, db: Session = De
             "environments": item.environments,
             "channels": item.channels,
             "pipeline": item.pipeline,
+            "test_accounts": prev.get("test_accounts"),
         }
     )
     if not doc.get("environments"):
@@ -218,7 +223,66 @@ def update_project_env(project_id: str, item: ProjectEnvUpdate, db: Session = De
     project.env = doc
     db.commit()
     db.refresh(project)
-    return {"code": 200, "msg": "Project env updated", "data": {"env": project.env}}
+    from server.services.project_env import list_test_accounts, public_test_accounts
+    safe = dict(project.env or {})
+    safe["test_accounts"] = public_test_accounts(list_test_accounts(safe))
+    return {"code": 200, "msg": "Project env updated", "data": {"env": safe}}
+
+
+class TestAccountSaveBody(BaseModel):
+    accounts: List[Dict[str, Any]] = []
+
+
+class TestAccountPickBody(BaseModel):
+    prompt: str = ""
+    env: str = ""
+
+
+@router.get("/{project_id}/accounts")
+def list_project_accounts(project_id: str, env: str = "", db: Session = Depends(get_db)):
+    from server.services.project_env import load_project_env, list_test_accounts, public_test_accounts
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = load_project_env(db, project_id)
+    rows = list_test_accounts(doc)
+    if env:
+        rows = [x for x in rows if str(x.get("env") or "") == env]
+    return {
+        "code": 200,
+        "data": {
+            "accounts": public_test_accounts(rows),
+            "environments": doc.get("environments") or [],
+        },
+    }
+
+
+@router.put("/{project_id}/accounts")
+def save_project_accounts(project_id: str, body: TestAccountSaveBody, db: Session = Depends(get_db)):
+    from server.services.project_env import load_project_env, save_test_accounts, public_test_accounts, list_test_accounts
+    from sqlalchemy.orm.attributes import flag_modified
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = save_test_accounts(load_project_env(db, project_id), body.accounts)
+    project.env = doc
+    flag_modified(project, "env")
+    db.commit()
+    return {"code": 200, "msg": "已保存", "data": {"accounts": public_test_accounts(list_test_accounts(doc))}}
+
+
+@router.post("/{project_id}/accounts/pick")
+def pick_project_accounts(project_id: str, body: TestAccountPickBody, db: Session = Depends(get_db)):
+    from server.services.project_env import load_project_env, list_test_accounts, pick_test_accounts, public_test_accounts
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = load_project_env(db, project_id)
+    ranked = pick_test_accounts(list_test_accounts(doc), prompt=body.prompt, env=body.env)
+    return {"code": 200, "data": {"accounts": public_test_accounts(ranked)}}
 
 
 @router.delete("/{project_id}")

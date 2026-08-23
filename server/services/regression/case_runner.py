@@ -4,8 +4,7 @@
 
 职责
 ====
-- 把 case dict（目前唯一数据源是飞书表格，由 feishu_service.normalize_feishu_case
-  正规化）映射成 CaseSpec
+- 把 case dict（数据源是应用 qa_process.draft_cases）映射成 CaseSpec
 - 启动多 case 回归（同步 / 后台线程两种模式）
 - 真设备闸门：build_run_context 后若 adb=remote=false，立刻把 run 标失败
 - AI provider 固定从「密钥配置 → 大模型 Key」里读取「可用 + 用例」那条，不在请求里覆盖
@@ -591,6 +590,9 @@ def run_cases(
     options: Optional[OrchestratorOptions] = None,
     execution_mode: str = "auto",
     run_type: str = "manual",
+    requirement_id: str = "",
+    release_id: str = "",
+    slot_id: str = "",
 ) -> dict[str, Any]:
     """启动一次 AI-led 回归（可多设备）。
 
@@ -599,7 +601,6 @@ def run_cases(
     单机或缺省覆盖方式都按 once。
     """
     from server.services import app_automation_service as aas
-    from server.services import feishu_regression_service as frs
     from server.services.ai.regression.llm_client import resolve_regression_provider
 
     device_sns = _normalize_sns(sn, sns)
@@ -611,15 +612,11 @@ def run_cases(
     if not cov or len(device_sns) == 1:
         cov = "once"
 
-    if use_cache:
-        payload = frs.list_cases_for_app(app, refresh=False)
-    else:
-        payload = frs.fetch_cases_for_app(app, persist=True)
-    all_cases = list(payload.get("cases") or [])
+    all_cases = aas.list_app_cases(app)
     if case_ids:
-        by_id = {c.get("case_id"): c for c in all_cases if c.get("case_id")}
-        cases = [by_id[cid] for cid in case_ids if cid in by_id]
-        missing = [cid for cid in case_ids if cid not in by_id]
+        by_id = {str(c.get("case_id")): c for c in all_cases if c.get("case_id")}
+        cases = [by_id[str(cid)] for cid in case_ids if str(cid) in by_id]
+        missing = [cid for cid in case_ids if str(cid) not in by_id]
         if missing:
             SLog.w(TAG, f"missing case_ids: {missing[:5]} (total {len(missing)})")
     else:
@@ -673,6 +670,9 @@ def run_cases(
         "env_profile": env_profile,
         "package": package,
         "packages_by_platform": packages_by_platform,
+        "requirement_id": str(requirement_id or "").strip(),
+        "release_id": str(release_id or "").strip(),
+        "slot_id": str(slot_id or "").strip(),
         "provider_id": "",
         "provider_name": "",
         "model_name": "",
@@ -851,24 +851,35 @@ def _execute(
     execution_mode: str = "auto",
 ) -> None:
     """单台设备 worker：绑定线程 SN，按 coverage 领取单元并执行。"""
+    from server.services.ai import dispatch_log as dispatch
     from server.services.runtime.device_bind import device_scope
 
-    with device_scope(sn):
-        _execute_on_device(
-            run_doc=run_doc,
-            sn=sn,
-            platform=platform,
-            env_profile=env_profile,
-            package=package,
-            app_id=app_id,
-            app_name=app_name,
-            use_persisted_baseline=use_persisted_baseline,
-            provider_id=provider_id,
-            model_name=model_name,
-            options=options,
-            execution_mode=execution_mode,
-        )
-        _on_worker_exit(run_doc, app_id=app_id)
+    tok = dispatch.bind(
+        trigger="case_run",
+        app_id=app_id,
+        app_name=app_name,
+        pipeline_id=str(run_doc.get("run_id") or "") or dispatch.new_pipeline_id(),
+        role="test-engineer",
+    )
+    try:
+        with device_scope(sn):
+            _execute_on_device(
+                run_doc=run_doc,
+                sn=sn,
+                platform=platform,
+                env_profile=env_profile,
+                package=package,
+                app_id=app_id,
+                app_name=app_name,
+                use_persisted_baseline=use_persisted_baseline,
+                provider_id=provider_id,
+                model_name=model_name,
+                options=options,
+                execution_mode=execution_mode,
+            )
+            _on_worker_exit(run_doc, app_id=app_id)
+    finally:
+        dispatch.reset(tok)
 
 
 def _execute_on_device(

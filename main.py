@@ -9,9 +9,10 @@ import multiprocessing
 import psutil
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 from zeroconf import IPVersion, ServiceInfo, Zeroconf, ServiceBrowser
 from zeroconf.asyncio import AsyncZeroconf
 from pydantic import BaseModel
@@ -48,6 +49,8 @@ from server.routers import rPacks as packs_router
 from server.routers import rSettings as settings_router
 from server.routers import rClawNode as clawnode_router
 from server.routers import rHitl as hitl_router
+from server.routers import rAuth as auth_router
+from server.routers import rImWebhook as im_webhook_router
 import server.models.app_regression_run  # noqa: F401 — register ORM table
 import server.models.app_icon_target  # noqa: F401 — register ORM table
 import server.models.case_baseline  # noqa: F401 — Step 6: case baseline / run trace
@@ -270,12 +273,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         SLog.w(TAG, f"--- [HITL] bind transport failed: {e} ---")
 
+    try:
+        from server.services.feishu_ws_listener import sync_feishu_event_listener
+
+        sync_feishu_event_listener()
+        SLog.i(TAG, "--- [IM] Feishu long connection synced ---")
+    except Exception as e:
+        SLog.w(TAG, f"--- [IM] Feishu long connection failed: {e} ---")
+
     # 只有主进程才打印这个 Ready
     SLog.i(TAG, "--- [LifeSpan] Backend services & Database ready ---")
 
     yield
 
     SLog.i(TAG, "--- [LifeSpan] Shutting down... ---")
+    try:
+        from server.services.feishu_ws_listener import stop_feishu_event_listener
+
+        stop_feishu_event_listener()
+    except Exception:
+        pass
     from server.core.gateway_beacon import unregister_gateway_beacons
     await unregister_gateway_beacons(getattr(app.state, "gateway_beacon", None))
 
@@ -303,6 +320,20 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.middleware("http")
+async def allow_private_network(request: Request, call_next):
+    if request.method == "OPTIONS" and request.headers.get("access-control-request-private-network") == "true":
+        resp = Response(status_code=204)
+        resp.headers["Access-Control-Allow-Origin"] = request.headers.get("origin") or "*"
+        resp.headers["Access-Control-Allow-Methods"] = "*"
+        resp.headers["Access-Control-Allow-Headers"] = request.headers.get("access-control-request-headers") or "*"
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
+        return resp
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 # 挂载路由
 app.include_router(wf_router.router)
 app.include_router(log_router.router)
@@ -322,6 +353,60 @@ app.include_router(packs_router.router)
 app.include_router(clawnode_router.router)
 app.include_router(hitl_router.router)
 app.include_router(case_runner_router.router)
+app.include_router(auth_router.router)
+app.include_router(im_webhook_router.router)
+
+
+@app.get("/sys/server_info")
+def sys_server_info():
+    return {"code": 200, "ok": True, "data": {"service": "MiniOrange"}}
+
+
+@app.get("/sys/runtime")
+def sys_runtime(request: Request):
+    from server.core.gateway_beacon import build_gateway_identity
+
+    identity = build_gateway_identity()
+    port = 10104
+    client = getattr(request.app.state, "device_client", None)
+    role = getattr(client, "role", None) or "gateway"
+    sn = getattr(client, "sn", "") or ""
+    connected = True
+    if client is not None:
+        client_ws = getattr(client, "websocket", None)
+        if role == "node":
+            connected = client_ws is not None and getattr(client_ws, "open", False)
+        else:
+            connected = True
+    local_url = f"http://127.0.0.1:{port}"
+    mdns_url = f"http://{identity['lan_host']}:{port}"
+    return {
+        "code": 200,
+        "ok": True,
+        "data": {
+            "electron": {"online": False, "pid": None, "version": None, "platform": "web"},
+            "embeddedServer": {"running": True, "pid": None},
+            "endpoints": [
+                {"name": "localhost", "url": local_url, "online": True},
+                {
+                    "name": identity["display_name"],
+                    "url": mdns_url,
+                    "online": True,
+                    "lanHost": identity["lan_host"],
+                    "localIp": identity["local_ip"],
+                    "wsUrl": f"ws://{identity['local_ip']}:{port}/ws",
+                },
+            ],
+            "isLocalGateway": True,
+            "node": {
+                "role": role,
+                "connected": connected,
+                "sn": sn,
+                "is_master": role in ("client", "gateway", "server"),
+                "candidates": getattr(client, "candidate_urls", []) or [],
+            },
+        },
+    }
 
 
 @app.get("/")
@@ -334,7 +419,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.107",
+        "version": "0.0.108",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

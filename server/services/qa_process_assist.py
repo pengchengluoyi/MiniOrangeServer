@@ -1,13 +1,23 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""流程建议：规则版 Job。只产出草稿，不改 gate、不写飞书。"""
+"""流程建议：规则版 Job。只产出草稿，不改 gate。"""
 from __future__ import annotations
 
 import re
 import time
 from typing import Any, Dict, List, Optional
 
-ASSIST_JOBS = ("map_cases", "classify_fail", "draft_sign", "draft_gate", "pick_regression")
+ASSIST_JOBS = (
+    "map_cases",
+    "classify_fail",
+    "draft_sign",
+    "draft_gate",
+    "pick_regression",
+    "analyze_req",
+    "draft_mindmap",
+    "draft_cases",
+    "propose_atlas",
+)
 
 
 def _now() -> str:
@@ -114,10 +124,10 @@ def map_cases(req: dict, cases: list) -> dict:
             gaps.append({
                 "point_id": p.get("id"),
                 "point_text": p.get("text"),
-                "reason": "飞书「需求ID」列没有本需求编号" if not exact else "池里没有能对上的步骤，去飞书表补",
+                "reason": "用例库没有能对上本需求编号的用例" if not exact else "池里没有能对上的步骤，去用例库补或手写草稿",
             })
     if gaps:
-        suggest = f"{len(gaps)} 个测试点还缺用例，去飞书表补或手选"
+        suggest = f"{len(gaps)} 个测试点还缺用例，去用例库补或手选"
     elif mappings:
         suggest = f"{len(mappings)} 个测试点可挂用例，采纳后才算覆盖"
     else:
@@ -272,6 +282,10 @@ def pick_regression(rel: dict, requirements: list, suites: list) -> dict:
 
 
 def run_job(job: str, *, requirement=None, release=None, requirements=None, cases=None, tasks=None, suites=None) -> dict:
+    if job in ("analyze_req", "draft_mindmap", "draft_cases", "propose_atlas"):
+        from server.services.qa_role_jobs import run_llm_job
+
+        return run_llm_job(job, requirement=requirement or {}, cases=cases or [], qa_process={"requirements": requirements or []})
     if job not in ASSIST_JOBS:
         return artifact(job=job, suggest="未知建议任务", payload={}, citations=[])
     if job == "map_cases":

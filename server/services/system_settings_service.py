@@ -211,6 +211,87 @@ def list_ai_provider_settings() -> Dict[str, Any]:
     }
 
 
+_ROLE_PROMPT_MIGRATED = False
+
+
+def _role_prompts_root() -> Dict[str, str]:
+    ai = _ai_root()
+    raw = ai.get("_role_prompts")
+    if not isinstance(raw, dict):
+        raw = {}
+        ai["_role_prompts"] = raw
+    migrate_im_chat_prompts_into_roles()
+    return raw
+
+
+def migrate_im_chat_prompts_into_roles() -> None:
+    global _ROLE_PROMPT_MIGRATED
+    if _ROLE_PROMPT_MIGRATED:
+        return
+    from server.services.im_prompts import DEFAULT_IM_DEFECT_PROMPT, DEFAULT_IM_DIALOGUE_PROMPT
+
+    ai = _ai_root()
+    store = ai.get("_role_prompts")
+    if not isinstance(store, dict):
+        store = {}
+        ai["_role_prompts"] = store
+    mapping = {
+        "im-qa-assistant": ("dialogue_prompt", DEFAULT_IM_DIALOGUE_PROMPT),
+        "im-defect-assistant": ("defect_prompt", DEFAULT_IM_DEFECT_PROMPT),
+    }
+    changed = False
+    for plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+        raw = _raw_plugin_config(plugin_id)
+        if not raw:
+            continue
+        chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
+        if not chat:
+            continue
+        leftover = False
+        for role_id, (key, default) in mapping.items():
+            text = str(chat.pop(key, "") or "").strip()
+            if text:
+                leftover = True
+            if text and text != default and not str(store.get(role_id) or "").strip():
+                store[role_id] = text
+                changed = True
+        if leftover or "dialogue_prompt" in chat or "defect_prompt" in chat:
+            raw["chat"] = {"enabled": bool(chat.get("enabled"))}
+            changed = True
+    _ROLE_PROMPT_MIGRATED = True
+    if changed:
+        SecurityManager.save()
+
+
+def get_role_prompt_override(role_id: str) -> str:
+    rid = str(role_id or "").strip()
+    if not rid:
+        return ""
+    return str(_role_prompts_root().get(rid) or "").strip()
+
+
+def save_role_prompt(role_id: str, *, system_prompt: str = "", reset: bool = False) -> Dict[str, Any]:
+    from server.services.ai.roles_catalog import get_role
+
+    rid = str(role_id or "").strip()
+    role = get_role(rid)
+    if not role:
+        raise ValueError(f"未知角色：{rid}")
+    if not role.get("editable"):
+        raise ValueError("这个角色的 prompt 不能在设置里改")
+    store = _role_prompts_root()
+    if reset:
+        store.pop(rid, None)
+    else:
+        text = str(system_prompt or "").strip()
+        if not text:
+            raise ValueError("prompt 不能为空")
+        store[rid] = text
+    SecurityManager.save()
+    row = get_role(rid)
+    return row or {}
+
+
 def get_ai_usage_settings() -> Dict[str, Any]:
     ai = _ai_root()
     usage = ai.get("_usage") if isinstance(ai.get("_usage"), dict) else {}
@@ -431,7 +512,7 @@ ROBOT_PLATFORM_PRESETS: Dict[str, Dict[str, Any]] = {
     "lark": {
         "label": "飞书",
         "required": ["app_id", "app_secret"],
-        "secret_fields": ["app_secret"],
+        "secret_fields": ["app_secret", "encrypt_key", "verification_token"],
     },
     "wecom": {
         "label": "企业微信",
@@ -655,6 +736,27 @@ def get_feishu_bot(bot_id: str) -> Optional[Dict[str, Any]]:
                 }
             return bot
     return None
+
+
+def get_lark_event_secrets(bot_id: Optional[str] = None) -> Dict[str, str]:
+    rows = [row for row in _list_robot_rows() if (row.get("platform") or "lark") == "lark"]
+    target = None
+    if bot_id:
+        target = next((row for row in rows if str(row.get("id")) == str(bot_id)), None)
+    if not target:
+        for row in rows:
+            creds = row.get("credentials") if isinstance(row.get("credentials"), dict) else {}
+            if str(creds.get("app_id") or "").strip() and str(creds.get("app_secret") or "").strip():
+                target = row
+                break
+    if not target and rows:
+        target = rows[0]
+    creds = target.get("credentials") if isinstance((target or {}).get("credentials"), dict) else {}
+    return {
+        "bot_id": str((target or {}).get("id") or ""),
+        "encrypt_key": str((creds or {}).get("encrypt_key") or "").strip(),
+        "verification_token": str((creds or {}).get("verification_token") or "").strip(),
+    }
 
 
 def get_feishu_credentials(bot_id: Optional[str] = None) -> Tuple[str, str]:
@@ -1047,6 +1149,9 @@ def review_knowledge_item(kid: str, *, action: str, updates: Optional[Dict[str, 
         payload.update({k: v for k, v in updates.items() if v is not None})
     payload["id"] = kid
     payload["review_status"] = "approved"
+    payload["review_method"] = "human"
+    payload["review_decision"] = "approve"
+    payload["reviewed_by"] = "human"
     return upsert_knowledge_item(payload)
 
 
@@ -1206,7 +1311,8 @@ def save_figma_settings(
     *,
     access_token: str = "",
     clear_token: bool = False,
-    default_file_url: str = "",
+    default_file_url: Optional[str] = None,
+    update_file_url: bool = False,
 ) -> Dict[str, Any]:
     root = _testing_root()
     figma = root.setdefault("figma", {})
@@ -1214,7 +1320,1006 @@ def save_figma_settings(
         figma.pop("access_token", None)
     elif access_token and str(access_token).strip():
         figma["access_token"] = str(access_token).strip()
-    if default_file_url is not None:
+    if update_file_url or default_file_url is not None:
         figma["default_file_url"] = str(default_file_url or "").strip()
     SecurityManager.save()
     return get_figma_settings()
+
+
+def get_mail_settings() -> Dict[str, Any]:
+    root = _testing_root()
+    mail = root.get("mail") if isinstance(root.get("mail"), dict) else {}
+    password = str(mail.get("password") or "").strip()
+    host = str(mail.get("host") or "").strip()
+    username = str(mail.get("username") or "").strip()
+    from_email = str(mail.get("from_email") or username).strip()
+    return {
+        "host": host,
+        "port": int(mail.get("port") or 587),
+        "username": username,
+        "password_masked": _mask_secret(password),
+        "from_email": from_email,
+        "from_name": str(mail.get("from_name") or "MiniOrange").strip() or "MiniOrange",
+        "use_tls": mail.get("use_tls") is not False,
+        "configured": bool(host and username and password and from_email),
+    }
+
+
+def get_mail_credentials() -> Dict[str, Any]:
+    root = _testing_root()
+    mail = root.get("mail") if isinstance(root.get("mail"), dict) else {}
+    public = get_mail_settings()
+    return {
+        **public,
+        "password": str(mail.get("password") or "").strip(),
+    }
+
+
+def save_mail_settings(
+    *,
+    host: str = "",
+    port: int = 587,
+    username: str = "",
+    password: str = "",
+    clear_password: bool = False,
+    from_email: str = "",
+    from_name: str = "",
+    use_tls: bool = True,
+) -> Dict[str, Any]:
+    root = _testing_root()
+    mail = root.setdefault("mail", {})
+    if not isinstance(mail, dict):
+        mail = {}
+        root["mail"] = mail
+    if host is not None:
+        mail["host"] = str(host or "").strip()
+    try:
+        mail["port"] = int(port or 587)
+    except (TypeError, ValueError):
+        mail["port"] = 587
+    if username is not None:
+        mail["username"] = str(username or "").strip()
+    if clear_password:
+        mail.pop("password", None)
+    elif password and str(password).strip():
+        mail["password"] = str(password).strip()
+    if from_email is not None:
+        mail["from_email"] = str(from_email or "").strip()
+    if from_name is not None:
+        mail["from_name"] = str(from_name or "").strip() or "MiniOrange"
+    mail["use_tls"] = use_tls is not False
+    SecurityManager.save()
+    return get_mail_settings()
+
+
+# ------------------------------
+# 集成插件（飞书 / 禅道 / Figma / 通知）
+# 与 device plugins/ 目录无关；配置存在 testing.integrations
+# ------------------------------
+
+INTEGRATION_PLUGIN_CATEGORIES: List[Dict[str, str]] = [
+    {"id": "docs", "label": "文档", "desc": "Wiki 副本"},
+    {"id": "im", "label": "IM", "desc": "群通知、对话与提缺陷"},
+    {"id": "defect", "label": "缺陷", "desc": "缺陷库同步"},
+    {"id": "design", "label": "设计", "desc": "设计稿学习"},
+]
+
+INTEGRATION_PLUGIN_SPECS: List[Dict[str, Any]] = [
+    {
+        "id": "feishu",
+        "name": "飞书",
+        "kind": "docs",
+        "categories": ["docs", "im"],
+        "color": "#2563eb",
+        "summary": "Wiki、群通知和收发消息。说话方式在角色里改。",
+        "robot_platform": "lark",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "应用凭证", "categories": ["docs", "im"]},
+            {"id": "wiki", "label": "Wiki", "desc": "按版本建文件夹", "categories": ["docs"]},
+            {"id": "notify", "label": "通知", "desc": "失败与待办推群", "categories": ["im"]},
+            {"id": "chat", "label": "对话", "desc": "收消息并回复", "categories": ["im"]},
+        ],
+    },
+    {
+        "id": "zentao",
+        "name": "禅道",
+        "kind": "defect",
+        "categories": ["defect"],
+        "color": "#f59e0b",
+        "summary": "自动化失败与手工发现的缺陷，同步到禅道。MiniOrange 缺陷单是源。",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "地址、账号换 Token", "categories": ["defect"]},
+            {"id": "bind", "label": "产品绑定", "desc": "项目对应禅道产品", "categories": ["defect"]},
+            {"id": "flow", "label": "提单规则", "desc": "失败如何进缺陷", "categories": ["defect"]},
+            {"id": "templates", "label": "提单模板", "desc": "标题和描述怎么填", "categories": ["defect"]},
+        ],
+    },
+    {
+        "id": "figma",
+        "name": "Figma",
+        "kind": "design",
+        "categories": ["design"],
+        "color": "#a259ff",
+        "summary": "用设计稿学习页面结构。Token 在这里，文件链接按应用绑定。",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "Personal Access Token", "categories": ["design"]},
+            {"id": "bind", "label": "应用绑定", "desc": "每个应用的设计稿", "categories": ["design"]},
+        ],
+    },
+    {
+        "id": "wecom",
+        "name": "企业微信",
+        "kind": "im",
+        "categories": ["im"],
+        "color": "#10b981",
+        "summary": "群机器人 webhook。收消息稍后接入，说话方式在角色里改。",
+        "robot_platform": "wecom",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "Webhook", "categories": ["im"]},
+            {"id": "chat", "label": "对话", "desc": "试对话", "categories": ["im"]},
+        ],
+    },
+    {
+        "id": "dingtalk",
+        "name": "钉钉",
+        "kind": "im",
+        "categories": ["im"],
+        "color": "#0ea5e9",
+        "summary": "群机器人。收消息稍后接入，说话方式在角色里改。",
+        "robot_platform": "dingtalk",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "Webhook", "categories": ["im"]},
+            {"id": "chat", "label": "对话", "desc": "试对话", "categories": ["im"]},
+        ],
+    },
+    {
+        "id": "slack",
+        "name": "Slack",
+        "kind": "im",
+        "categories": ["im"],
+        "color": "#8b5cf6",
+        "summary": "频道消息。收消息稍后接入，说话方式在角色里改。",
+        "robot_platform": "slack",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "Webhook / Bot Token", "categories": ["im"]},
+            {"id": "chat", "label": "对话", "desc": "试对话", "categories": ["im"]},
+        ],
+    },
+]
+
+
+def _plugin_spec(plugin_id: str) -> Optional[Dict[str, Any]]:
+    return next((x for x in INTEGRATION_PLUGIN_SPECS if x["id"] == plugin_id), None)
+
+
+ZENTAO_BUG_TYPES = (
+    "codeerror",
+    "config",
+    "install",
+    "security",
+    "performance",
+    "standard",
+    "automation",
+    "designdefect",
+    "others",
+)
+DEFAULT_ZENTAO_TITLE_TEMPLATE = "[{project}] {title}"
+DEFAULT_ZENTAO_STEPS_TEMPLATE = (
+    "【项目】{project}\n"
+    "【应用】{app}\n"
+    "【版本】{version}\n"
+    "【模块】{module}\n"
+    "【用例】{case}\n"
+    "【环境】{env}\n"
+    "\n"
+    "【重现步骤】\n"
+    "{steps}\n"
+    "\n"
+    "【期望】\n"
+    "{expected}\n"
+    "\n"
+    "【实际】\n"
+    "{actual}\n"
+    "\n"
+    "【来源】MiniOrange {run}\n"
+)
+
+
+def default_zentao_template_row(
+    *,
+    template_id: str = "tpl-default",
+    name: str = "默认模板",
+    is_default: bool = True,
+    raw: Any = None,
+) -> Dict[str, Any]:
+    body = normalize_zentao_bug_template(raw)
+    return {
+        "id": template_id or f"tpl-{uuid.uuid4().hex[:10]}",
+        "name": name,
+        "is_default": bool(is_default),
+        **body,
+    }
+
+
+def normalize_zentao_templates(raw: Any = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        body = normalize_zentao_bug_template(item)
+        tid = str(item.get("id") or "").strip() or f"tpl-{uuid.uuid4().hex[:10]}"
+        if tid in seen:
+            tid = f"tpl-{uuid.uuid4().hex[:10]}"
+        seen.add(tid)
+        rows.append(
+            {
+                "id": tid,
+                "name": str(item.get("name") or "").strip() or "未命名模板",
+                "is_default": bool(item.get("is_default")),
+                **body,
+            }
+        )
+    if not rows:
+        rows = [default_zentao_template_row()]
+    if not any(row.get("is_default") for row in rows):
+        rows[0]["is_default"] = True
+    seen_default = False
+    for row in rows:
+        if row.get("is_default"):
+            if seen_default:
+                row["is_default"] = False
+            seen_default = True
+    return rows
+
+
+def list_zentao_templates(cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    stored = cfg if isinstance(cfg, dict) else _raw_plugin_config("zentao")
+    stored_list = stored.get("templates") if isinstance(stored.get("templates"), list) else None
+    stored_flow = stored.get("flow") if isinstance(stored.get("flow"), dict) else {}
+    legacy = stored_flow.get("template") if isinstance(stored_flow.get("template"), dict) else None
+    if stored_list:
+        return normalize_zentao_templates(stored_list)
+    if legacy:
+        return [default_zentao_template_row(raw=legacy)]
+    return [default_zentao_template_row()]
+
+
+def _deep_merge(base: Dict[str, Any], overlay: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(base or {})
+    for key, value in (overlay or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _default_plugin_config(plugin_id: str) -> Dict[str, Any]:
+    spec = _plugin_spec(plugin_id) or {}
+    cap_on = {c["id"]: True for c in (spec.get("capabilities") or [])}
+    if plugin_id == "feishu":
+        cap_on["wiki"] = False
+        cap_on["notify"] = False
+        cap_on["writeback"] = False
+        return {
+            "enabled": True,
+            "capabilities": cap_on,
+            "wiki": {
+                "space_id": "",
+                "root_node_token": "",
+                "folder_pattern": "{project}/版本/{version}",
+                "children": ["测试报告", "测试用例", "需求", "缺陷"],
+            },
+            "notify": {
+                "bot_id": "",
+                "chat_id": "",
+                "on_run_fail": True,
+                "on_atlas_pending": True,
+                "on_verdict": True,
+            },
+            "writeback": {
+                "enabled": False,
+                "status_column": "状态",
+            },
+            "chat": _default_im_chat(),
+        }
+    if plugin_id == "zentao":
+        return {
+            "enabled": False,
+            "url": "",
+            "account": "",
+            "token": "",
+            "capabilities": cap_on,
+            "flow": {
+                "auto_create_local": False,
+                "push_requires_confirm": True,
+                "list_default": "current_version",
+            },
+            "templates": [default_zentao_template_row()],
+            "bindings": [],
+        }
+    if plugin_id == "figma":
+        return {"enabled": True, "capabilities": cap_on}
+    if plugin_id in ("wecom", "dingtalk", "slack"):
+        return {"enabled": True, "capabilities": cap_on, "chat": _default_im_chat()}
+    return {"enabled": True, "capabilities": cap_on}
+
+
+def _integrations_root() -> Dict[str, Any]:
+    root = _testing_root()
+    integrations = root.setdefault("integrations", {})
+    if not isinstance(integrations, dict):
+        integrations = {}
+        root["integrations"] = integrations
+    return integrations
+
+
+def _raw_plugin_config(plugin_id: str) -> Dict[str, Any]:
+    stored = _integrations_root().get(plugin_id)
+    return stored if isinstance(stored, dict) else {}
+
+
+def _default_im_chat() -> Dict[str, Any]:
+    from server.services.im_bot_service import default_im_chat
+
+    return default_im_chat()
+
+
+def _normalize_im_chat(raw: Any = None) -> Dict[str, Any]:
+    from server.services.im_bot_service import normalize_im_chat
+
+    return normalize_im_chat(raw)
+
+
+def _merged_plugin_config(plugin_id: str) -> Dict[str, Any]:
+    cfg = _deep_merge(_default_plugin_config(plugin_id), _raw_plugin_config(plugin_id))
+    if plugin_id == "zentao":
+        cfg["templates"] = list_zentao_templates(_raw_plugin_config(plugin_id))
+        flow = dict(cfg.get("flow") or {})
+        flow.pop("template", None)
+        cfg["flow"] = flow
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+        migrate_im_chat_prompts_into_roles()
+        cfg["chat"] = _normalize_im_chat(cfg.get("chat"))
+    return cfg
+
+
+def _plugin_configured(plugin_id: str, cfg: Dict[str, Any]) -> bool:
+    if plugin_id == "feishu":
+        return any(b.get("configured") for b in list_feishu_bots())
+    if plugin_id in ("wecom", "dingtalk", "slack"):
+        return any(
+            (b.get("platform") == plugin_id and b.get("configured"))
+            for b in list_robot_integrations()
+        )
+    if plugin_id == "figma":
+        return bool(get_figma_settings().get("configured"))
+    if plugin_id == "zentao":
+        return bool((cfg.get("url") or "").strip() and (cfg.get("token") or "").strip())
+    return False
+
+
+def _plugin_public_config(plugin_id: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    public = dict(cfg)
+    if plugin_id == "zentao":
+        token = str(public.pop("token", "") or "")
+        public.pop("password", None)
+        public["token_masked"] = _mask_secret(token)
+        public["has_token"] = bool(token)
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+        public["chat"] = _normalize_im_chat(cfg.get("chat"))
+        public["chat_roles"] = {
+            "dialogue": "im-qa-assistant",
+            "defect": "im-defect-assistant",
+        }
+        if plugin_id == "feishu":
+            from server.services.feishu_ws_listener import feishu_ws_status
+            from server.services.im_bot_service import get_im_inbound
+
+            public["chat_webhook"] = {
+                "path": "/webhooks/feishu",
+                "event": "im.message.receive_v1",
+                "mode": "long_connection",
+            }
+            public["chat_listener"] = {**feishu_ws_status(), "last": get_im_inbound()}
+    return public
+
+
+def _plugin_status(enabled: bool, configured: bool) -> str:
+    if not enabled:
+        return "off"
+    if configured:
+        return "ready"
+    return "need_connect"
+
+
+def list_integration_plugins() -> Dict[str, Any]:
+    robots = list_robot_integrations()
+    figma = get_figma_settings()
+    out = []
+    for spec in INTEGRATION_PLUGIN_SPECS:
+        pid = spec["id"]
+        cfg = _merged_plugin_config(pid)
+        configured = _plugin_configured(pid, cfg)
+        robot_n = 0
+        platform = spec.get("robot_platform")
+        if platform:
+            robot_n = sum(1 for b in robots if b.get("platform") == platform and b.get("configured"))
+        if pid == "figma" and figma.get("configured"):
+            robot_n = 1
+        if pid == "zentao" and configured:
+            robot_n = 1
+        out.append(
+            {
+                "id": pid,
+                "name": spec["name"],
+                "kind": spec["kind"],
+                "categories": list(spec.get("categories") or [spec["kind"]]),
+                "color": spec["color"],
+                "summary": spec["summary"],
+                "capabilities": spec["capabilities"],
+                "enabled": bool(cfg.get("enabled", True)),
+                "configured": configured,
+                "status": _plugin_status(bool(cfg.get("enabled", True)), configured),
+                "ready_count": robot_n,
+            }
+        )
+    return {"categories": INTEGRATION_PLUGIN_CATEGORIES, "plugins": out}
+
+
+def get_integration_plugin(plugin_id: str) -> Dict[str, Any]:
+    spec = _plugin_spec(plugin_id)
+    if not spec:
+        raise ValueError(f"未知插件: {plugin_id}")
+    cfg = _merged_plugin_config(plugin_id)
+    configured = _plugin_configured(plugin_id, cfg)
+    data: Dict[str, Any] = {
+        "id": plugin_id,
+        "name": spec["name"],
+        "kind": spec["kind"],
+        "categories": list(spec.get("categories") or [spec["kind"]]),
+        "color": spec["color"],
+        "summary": spec["summary"],
+        "capabilities": spec["capabilities"],
+        "enabled": bool(cfg.get("enabled", True)),
+        "configured": configured,
+        "status": _plugin_status(bool(cfg.get("enabled", True)), configured),
+        "config": _plugin_public_config(plugin_id, cfg),
+    }
+    platform = spec.get("robot_platform")
+    if platform:
+        data["robots"] = [b for b in list_robot_integrations() if b.get("platform") == platform]
+        data["robot_platform"] = platform
+    if plugin_id == "figma":
+        data["figma"] = get_figma_settings()
+    return data
+
+
+def save_integration_plugin(plugin_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    spec = _plugin_spec(plugin_id)
+    if not spec:
+        raise ValueError(f"未知插件: {plugin_id}")
+    current = _merged_plugin_config(plugin_id)
+    incoming = body if isinstance(body, dict) else {}
+
+    if "enabled" in incoming:
+        current["enabled"] = bool(incoming.get("enabled"))
+    if isinstance(incoming.get("capabilities"), dict):
+        caps = current.setdefault("capabilities", {})
+        for key, value in incoming["capabilities"].items():
+            caps[str(key)] = bool(value)
+
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack") and isinstance(incoming.get("chat"), dict):
+        migrate_im_chat_prompts_into_roles()
+        prev = current.get("chat") if isinstance(current.get("chat"), dict) else {}
+        current["chat"] = {
+            "enabled": bool(incoming["chat"].get("enabled", prev.get("enabled"))),
+        }
+    if plugin_id == "feishu":
+        for key in ("wiki", "notify", "writeback"):
+            if isinstance(incoming.get(key), dict):
+                current[key] = _deep_merge(current.get(key) or {}, incoming[key])
+    elif plugin_id == "zentao":
+        if "url" in incoming:
+            current["url"] = str(incoming.get("url") or "").strip().rstrip("/")
+        if "account" in incoming:
+            current["account"] = str(incoming.get("account") or "").strip()
+        if incoming.get("clear_token"):
+            current["token"] = ""
+        elif str(incoming.get("token") or "").strip():
+            current["token"] = str(incoming.get("token") or "").strip()
+        if isinstance(incoming.get("flow"), dict):
+            incoming_flow = dict(incoming["flow"])
+            incoming_flow.pop("template", None)
+            current["flow"] = _deep_merge(current.get("flow") or {}, incoming_flow)
+            if isinstance(current.get("flow"), dict):
+                current["flow"].pop("template", None)
+        if isinstance(incoming.get("templates"), list):
+            current["templates"] = normalize_zentao_templates(incoming["templates"])
+            if isinstance(current.get("flow"), dict):
+                current["flow"].pop("template", None)
+        if isinstance(incoming.get("bindings"), list):
+            rows = []
+            for row in incoming["bindings"]:
+                if not isinstance(row, dict):
+                    continue
+                pid = str(row.get("project_id") or "").strip()
+                if not pid:
+                    continue
+                rows.append(
+                    {
+                        "project_id": pid,
+                        "project_name": str(row.get("project_name") or "").strip(),
+                        "product_id": str(row.get("product_id") or "").strip(),
+                        "product_name": str(row.get("product_name") or "").strip(),
+                    }
+                )
+            current["bindings"] = rows
+    elif plugin_id == "figma":
+        figma_kwargs: Dict[str, Any] = {}
+        if "access_token" in incoming or incoming.get("clear_token"):
+            figma_kwargs["access_token"] = str(incoming.get("access_token") or "")
+            figma_kwargs["clear_token"] = bool(incoming.get("clear_token"))
+        if "default_file_url" in incoming:
+            figma_kwargs["default_file_url"] = str(incoming.get("default_file_url") or "")
+        if figma_kwargs:
+            save_figma_settings(**figma_kwargs)
+
+    root = _integrations_root()
+    to_store = dict(current)
+    root[plugin_id] = to_store
+    SecurityManager.save()
+    if plugin_id == "feishu":
+        try:
+            from server.services.feishu_ws_listener import sync_feishu_event_listener
+
+            sync_feishu_event_listener()
+        except Exception as e:
+            SLog.w(TAG, f"sync feishu listener failed: {e}")
+    return get_integration_plugin(plugin_id)
+
+
+def get_zentao_credentials() -> Dict[str, str]:
+    cfg = _merged_plugin_config("zentao")
+    return {
+        "url": str(cfg.get("url") or "").strip(),
+        "account": str(cfg.get("account") or "").strip(),
+        "token": str(cfg.get("token") or "").strip(),
+    }
+
+
+def _zentao_json(resp) -> Any:
+    try:
+        return resp.json()
+    except Exception:
+        text = str(getattr(resp, "text", "") or "").strip()
+        if not text:
+            return {}
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        try:
+            import json
+
+            return json.loads(text)
+        except Exception:
+            return {}
+
+
+def _zentao_error_text(payload: Any) -> str:
+    if isinstance(payload, str) and payload.strip():
+        return payload.strip()
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("message", "error", "msg"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    data = payload.get("data")
+    if isinstance(data, (dict, str)):
+        nested = _zentao_error_text(data)
+        if nested:
+            return nested
+    return ""
+
+
+def _pick_zentao_token(payload: Any) -> str:
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return ""
+        if text.startswith("{") or text.startswith("["):
+            try:
+                import json
+
+                return _pick_zentao_token(json.loads(text))
+            except Exception:
+                return ""
+        return text if re.fullmatch(r"[A-Za-z0-9._-]{8,}", text) else ""
+    if not isinstance(payload, dict):
+        return ""
+    token = payload.get("token") or payload.get("Token")
+    if isinstance(token, dict):
+        token = token.get("token") or token.get("Token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    for key in ("sessionID", "sessionId", "zentaosid"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    data = payload.get("data")
+    if isinstance(data, (dict, str)):
+        return _pick_zentao_token(data)
+    return ""
+
+
+def fetch_zentao_token(
+    *,
+    url: str = "",
+    account: str = "",
+    password: str = "",
+) -> Dict[str, Any]:
+    import hashlib
+    import requests
+
+    saved = get_zentao_credentials()
+    base = (url or saved.get("url") or "").strip().rstrip("/")
+    account = (account or saved.get("account") or "").strip()
+    password = str(password or "")
+    if not base:
+        raise ValueError("请填写禅道地址")
+    if not re.match(r"^https?://", base, re.I):
+        raise ValueError("禅道地址需要以 http:// 或 https:// 开头")
+    if not account:
+        raise ValueError("请填写账号")
+    if not password:
+        raise ValueError("请填写密码")
+
+    last_error = ""
+    payload = {"account": account, "password": password}
+    for path in ("/api.php/v1/tokens", "/index.php?m=user&f=apilogin&t=json"):
+        endpoint = f"{base}{path}"
+        attempts = (
+            {"json": payload, "headers": {"Content-Type": "application/json", "Accept": "application/json"}},
+            {"data": payload, "headers": {"Accept": "application/json"}},
+        )
+        for kwargs in attempts:
+            try:
+                resp = requests.post(endpoint, timeout=12, **kwargs)
+            except requests.RequestException as e:
+                last_error = str(e)
+                continue
+            body = _zentao_json(resp)
+            token = _pick_zentao_token(body)
+            if token:
+                return {"ok": True, "url": base, "account": account, "token": token, "path": path}
+            ctype = str(resp.headers.get("content-type") or "")
+            if "text/html" in ctype:
+                last_error = "地址能打开，但不是开放接口。请确认禅道已开启 API。"
+            else:
+                last_error = _zentao_error_text(body) or f"HTTP {resp.status_code}"
+            if path.startswith("/api.php/v1/tokens") and resp.status_code in (400, 401, 403) and "text/html" not in ctype:
+                raise ValueError(last_error or "账号或密码不正确")
+
+    session_paths = ("/api-getsessionid.json", "/index.php?m=api&f=getSessionID&t=json")
+    session_id = ""
+    for path in session_paths:
+        try:
+            resp = requests.get(f"{base}{path}", timeout=12)
+        except requests.RequestException as e:
+            last_error = str(e)
+            continue
+        session_id = _pick_zentao_token(_zentao_json(resp))
+        if session_id:
+            break
+    if session_id:
+        digest = hashlib.md5(password.encode("utf-8")).hexdigest()
+        login_paths = (
+            "/user-login.json",
+            "/index.php?m=user&f=login&t=json",
+        )
+        for path in login_paths:
+            for pwd in (password, digest):
+                try:
+                    resp = requests.get(
+                        f"{base}{path}",
+                        params={"account": account, "password": pwd, "zentaosid": session_id},
+                        timeout=12,
+                    )
+                except requests.RequestException as e:
+                    last_error = str(e)
+                    continue
+                body = _zentao_json(resp)
+                status = str(body.get("status") or body.get("result") or "").lower()
+                token = _pick_zentao_token(body) or (session_id if status in {"success", "ok"} else "")
+                if token:
+                    return {
+                        "ok": True,
+                        "url": base,
+                        "account": account,
+                        "token": token,
+                        "path": path,
+                    }
+                last_error = _zentao_error_text(body) or last_error or "账号或密码不正确"
+
+    raise ValueError(last_error or "无法向禅道换取 Token。请确认已开启开放接口，且账号密码正确。")
+
+
+def test_zentao_connection(
+    *,
+    url: str = "",
+    account: str = "",
+    token: str = "",
+) -> Dict[str, Any]:
+    import requests
+
+    saved = get_zentao_credentials()
+    base = (url or saved.get("url") or "").strip().rstrip("/")
+    account = (account or saved.get("account") or "").strip()
+    token = (token or saved.get("token") or "").strip()
+    if not base:
+        raise ValueError("请填写禅道地址")
+    if not re.match(r"^https?://", base, re.I):
+        raise ValueError("禅道地址需要以 http:// 或 https:// 开头")
+    headers = {"Token": token} if token else {}
+    last_error = ""
+    for path in ("/api.php/v1/users", "/api.php/v1", "/api.php"):
+        try:
+            resp = requests.get(f"{base}{path}", headers=headers, timeout=8)
+        except requests.RequestException as e:
+            last_error = str(e)
+            continue
+        if resp.status_code < 500:
+            return {
+                "ok": True,
+                "url": base,
+                "account": account,
+                "http_status": resp.status_code,
+                "path": path,
+                "hint": "已连通。产品 ID 在「产品绑定」里填禅道产品编号。",
+            }
+        last_error = f"HTTP {resp.status_code}"
+    raise ValueError(last_error or "无法连接禅道")
+
+
+def _zentao_headers(token: str) -> Dict[str, str]:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if token:
+        headers["Token"] = token
+    return headers
+
+
+def _pick_zentao_bug_id(payload: Any) -> int:
+    if isinstance(payload, bool):
+        return 0
+    if isinstance(payload, (int, float)) and int(payload) > 0:
+        return int(payload)
+    if isinstance(payload, str) and payload.strip().isdigit():
+        return int(payload.strip())
+    if not isinstance(payload, dict):
+        return 0
+    for key in ("id", "bugID", "bug_id"):
+        found = _pick_zentao_bug_id(payload.get(key))
+        if found:
+            return found
+    for key in ("data", "bug", "result"):
+        found = _pick_zentao_bug_id(payload.get(key))
+        if found:
+            return found
+    return 0
+
+
+def resolve_zentao_product_id(*, project_id: str = "", product_id: str = "") -> str:
+    product_id = str(product_id or "").strip()
+    if product_id:
+        return product_id
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return ""
+    cfg = _merged_plugin_config("zentao")
+    for row in cfg.get("bindings") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("project_id") or "").strip() != project_id:
+            continue
+        return str(row.get("product_id") or "").strip()
+    return ""
+
+
+def normalize_zentao_bug_template(raw: Any = None) -> Dict[str, Any]:
+    src = raw if isinstance(raw, dict) else {}
+
+    def _level(value: Any, default: int = 3) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return number if number in (1, 2, 3, 4) else default
+
+    bug_type = str(src.get("type") or "codeerror").strip() or "codeerror"
+    if bug_type not in ZENTAO_BUG_TYPES:
+        bug_type = "codeerror"
+    return {
+        "title": str(src.get("title") or "").strip() or DEFAULT_ZENTAO_TITLE_TEMPLATE,
+        "steps": str(src.get("steps") or "").strip() or DEFAULT_ZENTAO_STEPS_TEMPLATE,
+        "type": bug_type,
+        "severity": _level(src.get("severity"), 3),
+        "pri": _level(src.get("pri"), 3),
+        "opened_build": str(src.get("opened_build") or "trunk").strip() or "trunk",
+    }
+
+
+def get_zentao_bug_template(template_id: str = "") -> Dict[str, Any]:
+    rows = list_zentao_templates()
+    want = str(template_id or "").strip()
+    picked = next((row for row in rows if want and row.get("id") == want), None)
+    if not picked:
+        picked = next((row for row in rows if row.get("is_default")), None) or rows[0]
+    return normalize_zentao_bug_template(picked)
+
+
+def render_zentao_template(text: str, context: Optional[Dict[str, Any]] = None) -> str:
+    values = context if isinstance(context, dict) else {}
+
+    def repl(match: re.Match) -> str:
+        key = match.group(1)
+        if key not in values:
+            return match.group(0)
+        value = values.get(key)
+        return "" if value is None else str(value)
+
+    return re.sub(r"\{([A-Za-z_]+)\}", repl, text or "")
+
+
+def _as_zentao_steps(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if re.search(r"</?[A-Za-z][^>]*>", raw):
+        return raw
+    escaped = raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return "<p>" + escaped.replace("\n", "<br />") + "</p>"
+
+
+def create_zentao_bug(
+    *,
+    product_id: str = "",
+    project_id: str = "",
+    title: str = "",
+    steps: str = "",
+    template_id: str = "",
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    import requests
+
+    creds = get_zentao_credentials()
+    base = (creds.get("url") or "").strip().rstrip("/")
+    token = (creds.get("token") or "").strip()
+    if not base:
+        raise ValueError("请先在连接页填写禅道地址")
+    if not token:
+        raise ValueError("请先在连接页获取或保存 Token")
+    product_id = resolve_zentao_product_id(project_id=project_id, product_id=product_id)
+    if not product_id:
+        raise ValueError("请选择已绑定的产品，或填写禅道产品 ID")
+    tpl = get_zentao_bug_template(template_id)
+    ctx: Dict[str, Any] = {
+        "title": (title or "").strip() or "未命名缺陷",
+        "project": "",
+        "app": "",
+        "version": "",
+        "case": "",
+        "module": "",
+        "env": "",
+        "steps": (steps or "").strip(),
+        "expected": "",
+        "actual": "",
+        "run": "",
+    }
+    if isinstance(context, dict):
+        for key, value in context.items():
+            if value is None:
+                continue
+            ctx[str(key)] = str(value)
+    rendered_title = render_zentao_template(tpl["title"], ctx).strip() or str(ctx.get("title") or "未命名缺陷")
+    rendered_steps = _as_zentao_steps(render_zentao_template(tpl["steps"], ctx))
+    opened_build = str(tpl.get("opened_build") or "trunk")
+    severity = tpl["severity"]
+    pri = tpl["pri"]
+    for key in ("severity", "pri"):
+        try:
+            num = int(str(ctx.get(key) or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= num <= 4:
+            if key == "severity":
+                severity = num
+            else:
+                pri = num
+    headers = _zentao_headers(token)
+    bodies = (
+        {
+            "title": rendered_title,
+            "severity": severity,
+            "pri": pri,
+            "type": tpl["type"],
+            "openedBuild": [opened_build],
+            "steps": rendered_steps,
+            "product": product_id,
+            "productID": product_id,
+        },
+        {
+            "title": rendered_title,
+            "severity": severity,
+            "pri": pri,
+            "type": tpl["type"],
+            "openedBuild": opened_build,
+            "steps": rendered_steps,
+            "product": product_id,
+            "productID": product_id,
+        },
+    )
+    paths = (
+        f"/api.php/v1/products/{product_id}/bugs",
+        "/api.php/v1/bugs",
+        "/api.php/v2/bugs",
+    )
+    last_error = ""
+    for path in paths:
+        for body in bodies:
+            try:
+                resp = requests.post(f"{base}{path}", headers=headers, json=body, timeout=15)
+            except requests.RequestException as e:
+                last_error = str(e)
+                continue
+            payload = _zentao_json(resp)
+            bug_id = _pick_zentao_bug_id(payload)
+            if bug_id:
+                return {
+                    "ok": True,
+                    "bug_id": bug_id,
+                    "product_id": product_id,
+                    "title": rendered_title,
+                    "url": f"{base}/bug-view-{bug_id}.html",
+                    "path": path,
+                }
+            last_error = _zentao_error_text(payload) or f"HTTP {resp.status_code}"
+            if resp.status_code in (401, 403):
+                raise ValueError(last_error or "禅道拒绝了 Token，请重新获取")
+    raise ValueError(last_error or "禅道没有返回缺陷编号")
+
+
+def create_zentao_test_bug(
+    *,
+    product_id: str = "",
+    project_id: str = "",
+    template_id: str = "",
+) -> Dict[str, Any]:
+    cfg = _merged_plugin_config("zentao")
+    project_name = "MiniOrange"
+    for row in cfg.get("bindings") or []:
+        if not isinstance(row, dict):
+            continue
+        if project_id and str(row.get("project_id") or "").strip() != str(project_id).strip():
+            continue
+        project_name = str(row.get("project_name") or "").strip() or project_name
+        if project_id:
+            break
+    return create_zentao_bug(
+        product_id=product_id,
+        project_id=project_id,
+        template_id=template_id,
+        context={
+            "title": "连通测试，请忽略并关闭",
+            "project": project_name,
+            "app": "插件连通测试",
+            "version": "—",
+            "module": "设置-插件-禅道",
+            "case": "—",
+            "env": "设置页",
+            "steps": "打开设置 → 插件 → 禅道 → 提单模板，点击测试。",
+            "expected": "禅道出现一张可打开的测试单。",
+            "actual": "正在验证提单接口。",
+            "run": "设置页连通测试",
+        },
+    )

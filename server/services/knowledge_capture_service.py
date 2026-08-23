@@ -94,10 +94,15 @@ def _ask_llm(context: str, *, provider_id: str = "") -> list[dict[str, Any]]:
         SLog.w(TAG, f"skip capture, no provider: {gate.get('reason')}")
         return []
     messages = P.build_knowledge_capture_messages(context=context)
-    raw, meta = call_chat_text(
-        provider=provider, messages=messages,
-        temperature=0.2, max_tokens=1200, timeout_sec=45,
-    )
+    from server.services.ai import dispatch_log as dispatch
+    tok = dispatch.bind(trigger="knowledge_capture", role="version-qa-bm", job="knowledge-capture")
+    try:
+        raw, meta = call_chat_text(
+            provider=provider, messages=messages,
+            temperature=0.2, max_tokens=1200, timeout_sec=45,
+        )
+    finally:
+        dispatch.reset(tok)
     if raw is None:
         SLog.w(TAG, f"capture LLM failed: {meta.get('error')}")
         return []
@@ -127,6 +132,13 @@ def _persist(
             saved.append(upsert_knowledge_item(row))
         except Exception as exc:
             SLog.w(TAG, f"upsert draft failed: {exc}")
+    if saved:
+        try:
+            from server.services.knowledge_review_service import review_new_items
+
+            saved = review_new_items(saved)
+        except Exception as exc:
+            SLog.w(TAG, f"auto review failed: {exc}")
     return saved
 
 

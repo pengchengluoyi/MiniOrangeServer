@@ -201,6 +201,9 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
             use_cache=body.use_cache,
             execution_mode=(body.execution_mode or "auto").lower(),
             run_type=(body.run_type or "manual").lower(),
+            requirement_id=body.requirement_id or "",
+            release_id=body.release_id or "",
+            slot_id=body.slot_id or "",
         )
         return {"code": 200, "ok": True, "msg": "AI-led 回归任务已启动", "data": snapshot}
     except Exception as e:

@@ -103,28 +103,20 @@ def update_feishu_config(app_id: str, body: FeishuConfigUpdate, db: Session = De
 
 @router.post("/fetch/{app_id}")
 def fetch_feishu_cases(app_id: str, db: Session = Depends(get_db)):
+    """兼容旧入口：返回流程用例草稿，不再拉飞书表格。"""
+    from server.services import app_automation_service as aas
+
     app = _get_app(db, app_id)
-    try:
-        data = frs.fetch_cases_for_app(app, persist=True)
-        db.commit()
-        return {"code": 200, "data": data}
-    except Exception as e:
-        SLog.e("FeishuRegression", f"fetch failed app={app_id}: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 200, "data": aas.cases_payload(app)}
 
 
 @router.get("/cases/{app_id}")
 def get_feishu_cases_cached(app_id: str, refresh: bool = False, db: Session = Depends(get_db)):
+    """兼容旧入口：返回流程用例草稿。"""
+    from server.services import app_automation_service as aas
+
     app = _get_app(db, app_id)
-    try:
-        if refresh:
-            data = frs.fetch_cases_for_app(app, persist=True)
-            db.commit()
-        else:
-            data = frs.list_cases_for_app(app, refresh=False)
-        return {"code": 200, "data": data}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 200, "data": aas.cases_payload(app)}
 
 
 @router.post("/parse-url")
@@ -136,11 +128,14 @@ def parse_url(body: Dict[str, Any]):
 
 @router.post("/run")
 def run_feishu_regression(body: FeishuRunRequest, db: Session = Depends(get_db)):
+    """兼容旧入口：执行改走 CaseRunner，用例来自流程草稿。"""
     app = _get_app(db, body.app_id)
     if not body.sn:
         raise HTTPException(status_code=400, detail="请选择执行设备")
     try:
-        run_doc = frs.run_cases(
+        from server.services.regression import case_runner as cr
+
+        snapshot = cr.run_cases(
             app,
             sn=body.sn,
             platform=(body.platform or "android").lower(),
@@ -149,7 +144,7 @@ def run_feishu_regression(body: FeishuRunRequest, db: Session = Depends(get_db))
             db=db,
             async_exec=True,
         )
-        return {"code": 200, "data": run_doc, "msg": "回归任务已启动"}
+        return {"code": 200, "data": snapshot, "msg": "回归任务已启动"}
     except Exception as e:
         SLog.e(TAG, f"run failed app={body.app_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))

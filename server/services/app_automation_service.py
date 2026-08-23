@@ -35,7 +35,18 @@ DEFAULT_AUTOMATION = {
     },
     "icon_targets": [],
     "suites": [],
-    "qa_process": {"requirements": [], "releases": [], "schedule": [], "workflow": None, "updated_at": ""},
+    "qa_process": {
+        "requirements": [],
+        "releases": [],
+        "schedule": [],
+        "workflow": None,
+        "features": [],
+        "app_atlas": {"modules": [], "updated_at": ""},
+        "atlas_patches": [],
+        "autonomy": {"enabled": True, "auto_analyze": True, "auto_mindmap": True, "auto_cases": True, "auto_atlas": True, "auto_dispatch": False},
+        "role_log": [],
+        "updated_at": "",
+    },
 }
 
 
@@ -76,6 +87,19 @@ def _normalize_qa_process(raw) -> Dict[str, Any]:
     wf = raw.get("workflow")
     if isinstance(wf, dict):
         out["workflow"] = wf
+    feats = raw.get("features")
+    if isinstance(feats, list):
+        out["features"] = [x for x in feats if isinstance(x, dict)]
+    from server.services.ai.app_atlas import normalize_atlas, normalize_patches
+
+    out["app_atlas"] = normalize_atlas(raw.get("app_atlas"))
+    out["atlas_patches"] = normalize_patches(raw.get("atlas_patches"))
+    auto = raw.get("autonomy")
+    if isinstance(auto, dict):
+        out["autonomy"] = auto
+    log = raw.get("role_log")
+    if isinstance(log, list):
+        out["role_log"] = [x for x in log if isinstance(x, dict)][-80:]
     return out
 
 
@@ -126,6 +150,94 @@ def get_automation_config(app) -> Dict[str, Any]:
             "login_frame": figma.get("login_frame") if isinstance(figma.get("login_frame"), dict) else {},
             "login_reference": figma.get("login_reference") if isinstance(figma.get("login_reference"), dict) else {},
         }
+    return out
+
+
+def generated_cases_from_qa_process(app) -> List[Dict[str, Any]]:
+    """流程里写出来的用例，和下发执行共用同一份结构。"""
+    qp = get_automation_config(app).get("qa_process") or {}
+    rows: List[Dict[str, Any]] = []
+    for req in qp.get("requirements") or []:
+        if not isinstance(req, dict):
+            continue
+        title = str(req.get("title") or req.get("external_id") or "需求").strip() or "需求"
+        for raw in req.get("draft_cases") or []:
+            if not isinstance(raw, dict):
+                continue
+            cid = str(raw.get("case_id") or "").strip()
+            if not cid:
+                continue
+            steps = raw.get("steps")
+            expected = raw.get("expected")
+            if isinstance(steps, list):
+                steps_raw = "\n".join(str(x) for x in steps if str(x).strip())
+            else:
+                steps_raw = str(raw.get("steps_raw") or steps or "")
+            if isinstance(expected, list):
+                expected_raw = "\n".join(str(x) for x in expected if str(x).strip())
+            else:
+                expected_raw = str(raw.get("expected_raw") or expected or "")
+            module = str(raw.get("module") or "").strip()
+            rows.append({
+                **raw,
+                "case_id": cid,
+                "name": str(raw.get("name") or raw.get("title") or cid),
+                "module": f"本需求生成 / {title}" + (f" / {module}" if module else ""),
+                "source": "generated",
+                "requirement_id": str(req.get("id") or ""),
+                "steps": steps if isinstance(steps, list) else [],
+                "expected": expected if isinstance(expected, list) else [],
+                "steps_raw": steps_raw,
+                "expected_raw": expected_raw,
+                "precondition": str(raw.get("precondition") or raw.get("pre") or ""),
+                "platform": str(raw.get("platform") or ""),
+            })
+    return rows
+
+
+def list_app_cases(app) -> List[Dict[str, Any]]:
+    """执行、对照、统计共用：只读流程里的用例草稿。"""
+    return generated_cases_from_qa_process(app)
+
+
+def cases_payload(app) -> Dict[str, Any]:
+    cases = list_app_cases(app)
+    return {
+        "cases": cases,
+        "total": len(cases),
+        "source": "qa_process",
+        "from_cache": True,
+        "synced_at": "",
+        "resolve_note": "",
+    }
+
+
+def count_qa_process_cases_from_env(env: Optional[dict]) -> int:
+    env = env if isinstance(env, dict) else {}
+    auto = env.get("automation") if isinstance(env.get("automation"), dict) else {}
+    qp = auto.get("qa_process") if isinstance(auto.get("qa_process"), dict) else {}
+    n = 0
+    for req in qp.get("requirements") or []:
+        if not isinstance(req, dict):
+            continue
+        drafts = req.get("draft_cases") or []
+        if not isinstance(drafts, list):
+            continue
+        n += sum(1 for x in drafts if isinstance(x, dict) and str(x.get("case_id") or "").strip())
+    return n
+
+
+def merge_run_cases(primary: Optional[List[Dict[str, Any]]], extra: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    by: Dict[str, Dict[str, Any]] = {}
+    out: List[Dict[str, Any]] = []
+    for c in (primary or []) + (extra or []):
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("case_id") or "").strip()
+        if not cid or cid in by:
+            continue
+        by[cid] = c
+        out.append(c)
     return out
 
 

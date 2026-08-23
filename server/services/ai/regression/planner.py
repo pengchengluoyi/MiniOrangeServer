@@ -46,6 +46,16 @@ from server.services.runtime.run_context import RunContext
 TAG = "RegressionPlanner"
 
 
+def _chat(*, job: str, provider, messages, **kwargs):
+    from server.services.ai import dispatch_log as dispatch
+
+    tok = dispatch.bind(role="test-engineer", job=job)
+    try:
+        return call_chat_text(provider=provider, messages=messages, **kwargs)
+    finally:
+        dispatch.reset(tok)
+
+
 # ---------- 输出校验 ----------
 
 
@@ -234,7 +244,8 @@ def generate_overview(
         baseline=baseline,
         baseline_overview_text=baseline_overview_text,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="plan-overview",
         provider=provider,
         messages=messages,
         temperature=0.1,
@@ -298,7 +309,8 @@ def replan_single_step(
         remaining_events=remaining_events,
         baseline=baseline,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="single-step-replan",
         provider=provider,
         messages=messages,
         temperature=0.1,
@@ -408,7 +420,8 @@ def locate_element(
         image_mime=image_mime,
         ai_hint=ai_hint,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="locate-vision",
         provider=provider,
         messages=messages,
         temperature=0.0,
@@ -451,7 +464,8 @@ def assert_visual(
         ai_hint=ai_hint,
         context_block=context_block,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="assert-vision",
         provider=provider,
         messages=messages,
         temperature=0.0,
@@ -582,7 +596,8 @@ def compose_hitl_prompt(
         event_dict=event_dict,
         device_brief=device_brief,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="hitl-composer",
         provider=provider,
         messages=messages,
         temperature=0.2,
@@ -691,7 +706,8 @@ def expand_persona_task(
         image_mime=image_mime,
         template_id=template_id or "PERSONA_TASK",
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="persona-task",
         provider=provider,
         messages=messages,
         temperature=0.1,
@@ -821,7 +837,8 @@ def extract_goal(
             parse_warnings=["provider unavailable"],
         )
     messages = P.build_goal_extract_messages(case_spec=case_spec)
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="goal-extract",
         provider=provider, messages=messages,
         temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
     )
@@ -968,7 +985,8 @@ def decide_next_action(
         "target_package": str(getattr(run_context, "target_package", "") or ""),
         "image": {"width": width, "height": height, "mime": image_mime, "note": "image_base64 omitted"},
     }
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="agent-decide",
         provider=provider, messages=messages,
         temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
     )
@@ -1012,7 +1030,8 @@ def decide_restart_app(
         image_base64=image_base64,
         image_mime=image_mime,
     )
-    raw, meta = call_chat_text(
+    raw, meta = _chat(
+        job="agent-restart",
         provider=provider, messages=messages,
         temperature=0.1, max_tokens=512, timeout_sec=timeout_sec,
     )
