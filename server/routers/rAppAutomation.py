@@ -233,6 +233,7 @@ def _followup_in_background(
 
             err_tok = dispatch.bind(
                 trigger=trigger,
+                source=trigger,
                 app_id=app_id,
                 app_name=app_name,
                 pipeline_id=pipeline_id,
@@ -267,6 +268,7 @@ def _reanalyze_in_background(
             app_name=app_name,
             user_note=user_note,
             force=True,
+            source="atlas_reject",
         )
         with SessionLocal() as db:
             app = db.query(App).filter(App.id == app_id).first()
@@ -281,6 +283,7 @@ def _reanalyze_in_background(
 
             err_tok = dispatch.bind(
                 trigger="atlas_reject",
+                source="atlas_reject",
                 app_id=app_id,
                 app_name=app_name,
                 pipeline_id=pipeline_id,
@@ -364,6 +367,7 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
             pipeline_id = dispatch.new_pipeline_id()
             start = dispatch.bind(
                 trigger="atlas_confirm" if action == "accept" else "atlas_edit",
+                source="atlas_confirm" if action == "accept" else "atlas_edit",
                 app_id=app.id,
                 app_name=app.name or "",
                 pipeline_id=pipeline_id,
@@ -401,6 +405,7 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
             pipeline_id = dispatch.new_pipeline_id()
             start = dispatch.bind(
                 trigger="atlas_reject",
+                source="atlas_reject",
                 app_id=app.id,
                 app_name=app.name or "",
                 pipeline_id=pipeline_id,

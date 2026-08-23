@@ -95,7 +95,7 @@ def _ask_llm(context: str, *, provider_id: str = "") -> list[dict[str, Any]]:
         return []
     messages = P.build_knowledge_capture_messages(context=context)
     from server.services.ai import dispatch_log as dispatch
-    tok = dispatch.bind(trigger="knowledge_capture", role="version-qa-bm", job="knowledge-capture")
+    tok = dispatch.bind(trigger="knowledge_capture", source="knowledge_capture", role="version-qa-bm", job="knowledge-capture")
     try:
         raw, meta = call_chat_text(
             provider=provider, messages=messages,

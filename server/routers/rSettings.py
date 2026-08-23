@@ -522,6 +522,31 @@ def route_ai_role(body: RoleRouteBody):
     return {"code": 200, "data": data}
 
 
+class LayerStackBody(BaseModel):
+    skill_drivers: Dict[str, List[str]] | None = None
+    role_skills: Dict[str, List[str]] | None = None
+    trigger_roles: Dict[str, Dict[str, str]] | None = None
+    trigger_skills: Dict[str, Dict[str, str]] | None = None
+    reset: bool = False
+
+
+@router.get("/ai/stack")
+def get_ai_layer_stack():
+    from server.services.ai.layer_stack import get_stack
+
+    return {"code": 200, "data": get_stack()}
+
+
+@router.put("/ai/stack")
+def save_ai_layer_stack(body: LayerStackBody):
+    from server.services.ai.layer_stack import save_bindings
+
+    payload = body.model_dump(exclude_none=True)
+    reset = bool(payload.pop("reset", False))
+    data = save_bindings(payload, reset=reset)
+    return {"code": 200, "msg": "已恢复默认" if reset else "已保存", "data": data}
+
+
 class RolePromptBody(BaseModel):
     system_prompt: str = ""
     reset: bool = False
@@ -541,7 +566,7 @@ def chat_ai_role(body: RoleChatBody):
     from server.services.ai.roles_catalog import chat_with_role
     from server.services.ai import dispatch_log as dispatch
 
-    tok = dispatch.bind(trigger="settings_chat", role=body.role_id, job="role_chat")
+    tok = dispatch.bind(trigger="settings_chat", source="settings_role_chat", role=body.role_id, job="role_chat")
     try:
         data = chat_with_role(
             role_id=body.role_id,
@@ -746,11 +771,89 @@ class PluginChatBody(BaseModel):
     history: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class WikiDebugBody(BaseModel):
+    action: str = "ping"
+    space_id: str = ""
+    root_node_token: str = ""
+    folder_pattern: str = ""
+    children: List[str] = Field(default_factory=list)
+    project: str = "MiniOrange"
+    version: str = "调试"
+
+
+@router.post("/plugins/feishu/wiki/debug")
+def debug_feishu_wiki(body: WikiDebugBody):
+    from server.services.feishu_wiki_service import debug_wiki
+
+    try:
+        data = debug_wiki(
+            action=body.action,
+            space_id=body.space_id,
+            root_node_token=body.root_node_token,
+            folder_pattern=body.folder_pattern,
+            children=body.children,
+            project=body.project,
+            version=body.version,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": 200, "data": data}
+
+
 @router.post("/plugins/feishu/listener/sync")
 def sync_feishu_listener():
     from server.services.feishu_ws_listener import sync_feishu_event_listener
 
     return {"code": 200, "data": sync_feishu_event_listener()}
+
+
+class WechatVerifyBody(BaseModel):
+    verify_code: str = ""
+
+
+@router.post("/plugins/wechat/login")
+def start_wechat_login():
+    from server.services.wechat_ilink_service import start_qr_login
+
+    try:
+        return {"code": 200, "data": start_qr_login()}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/plugins/wechat/login")
+def get_wechat_login():
+    from server.services.wechat_ilink_service import login_status
+
+    return {"code": 200, "data": login_status()}
+
+
+@router.post("/plugins/wechat/login/verify")
+def verify_wechat_login(body: WechatVerifyBody):
+    from server.services.wechat_ilink_service import verify_qr_login
+
+    try:
+        return {"code": 200, "data": verify_qr_login(body.verify_code)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/plugins/wechat/logout")
+def logout_wechat_plugin():
+    from server.services.wechat_ilink_service import logout_wechat
+
+    return {"code": 200, "data": logout_wechat()}
+
+
+@router.post("/plugins/wechat/listener/sync")
+def sync_wechat_listener_api():
+    from server.services.wechat_ilink_service import sync_wechat_listener
+
+    return {"code": 200, "data": sync_wechat_listener()}
 
 
 @router.post("/plugins/{plugin_id}/chat")
@@ -766,6 +869,7 @@ def chat_integration_plugin(plugin_id: str, body: PluginChatBody):
             mode=body.mode if body.mode in ("dialogue", "defect") else "",
             plugin_id=plugin_id,
             require_enabled=False,
+            source="plugin_trial",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

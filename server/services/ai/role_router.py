@@ -150,7 +150,7 @@ def route_with_llm(*, scene: str, state: dict | None = None) -> dict[str, Any]:
         fallback["note"] = gate.get("reason") or "未配置模型，使用剧本"
         return fallback
     from server.services.ai import dispatch_log as dispatch
-    tok = dispatch.bind(trigger="conductor_route", role="conductor", job="route")
+    tok = dispatch.bind(trigger="conductor_route", source="analyst_route", role="conductor", job="route")
     try:
         parsed, meta = call_chat_text(
             provider=provider,

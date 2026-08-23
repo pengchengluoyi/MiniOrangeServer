@@ -695,12 +695,12 @@ def _product_roles() -> List[dict[str, Any]]:
         ),
         _role(
             id="im-qa-assistant",
-            label="IM 对话助手",
+            label="IM 总指挥",
             group="product",
             kind="conversational",
             source="server/services/im_prompts.py",
             used_in=["飞书私聊", "群里 @机器人", "角色 · prompt"],
-            summary="IM 通道里的对话角色。prompt 在角色页改，飞书只负责收发。",
+            summary="IM 通道里的总指挥。能做各角色会做的事，并可下令推进、下发任务。人审门禁仍须人点。",
             system_prompt=DEFAULT_IM_DIALOGUE_PROMPT,
             related_ids=["im-defect-assistant"],
             live=True,
@@ -1043,6 +1043,61 @@ RUNTIME_META = {
 }
 
 
+_SKILL_PROMPT_ROLE = {
+    "im.dialogue": "im-qa-assistant",
+    "im.defect": "im-defect-assistant",
+    "analyze_req": "req-analyst",
+    "propose_atlas": "propose_atlas",
+    "draft_mindmap": "mindmap-writer",
+    "draft_cases": "case-writer",
+    "map_cases": "req-qa-bm",
+    "draft_sign": "req-qa-bm",
+    "pick_regression": "version-qa-bm",
+    "draft_gate": "version-qa-bm",
+    "pick_account": "pick_account",
+    "goal-extract": "goal-extract",
+    "agent-decide": "agent-decide",
+    "assert-vision": "assert-vision",
+    "plan-overview": "plan-overview",
+    "locate-vision": "locate-vision",
+    "single-step-replan": "single-step-replan",
+    "hitl-composer": "hitl-composer",
+    "persona-task": "persona-task",
+    "publish_wiki": "doc-keeper",
+}
+
+
+def _load_stack() -> dict[str, Any]:
+    try:
+        from server.services.ai.layer_stack import get_stack
+
+        return get_stack()
+    except Exception:
+        return {}
+
+
+def _attach_skills(product: list[dict[str, Any]], runtime: list[dict[str, Any]], stack: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    stack = stack if isinstance(stack, dict) else _load_stack()
+    skills = [dict(row) for row in (stack.get("skills") or [])]
+    bound = {str(row.get("id") or ""): list(row.get("skill_ids") or []) for row in (stack.get("roles") or [])}
+    by_id = {str(row.get("id") or ""): row for row in product + runtime}
+    for role in product:
+        ids = bound.get(str(role.get("id") or ""), list(role.get("skill_ids") or []))
+        role["skill_ids"] = ids
+        role["skills"] = [row for row in skills if row.get("id") in ids]
+    for skill in skills:
+        prompt_id = _SKILL_PROMPT_ROLE.get(str(skill.get("id") or "")) or str(skill.get("owner") or "")
+        src = by_id.get(prompt_id)
+        if src:
+            skill["system_prompt"] = src.get("system_prompt") or ""
+            skill["prompt_role_id"] = src.get("id") or prompt_id
+            skill["prompt_chars"] = src.get("prompt_chars") or len(str(skill.get("system_prompt") or ""))
+        else:
+            skill.setdefault("system_prompt", "")
+            skill.setdefault("prompt_role_id", prompt_id)
+    return skills
+
+
 def list_roles() -> dict[str, Any]:
     from server.services.ai.role_router import list_playbooks
 
@@ -1055,40 +1110,34 @@ def list_roles() -> dict[str, Any]:
         runtime.append(row)
     abstract = [p for p in product if p.get("group") == "abstract"]
     workers = [p for p in product if p.get("group") != "abstract"]
+    stack = _load_stack()
+    skills = _attach_skills(product, runtime, stack)
     trees = []
     for p in workers:
-        caps = [r for r in runtime if r.get("owner") == p["id"]]
-        if p.get("job") and p["job"] not in {c.get("id") or c.get("job") for c in caps}:
-            caps = [
-                {
-                    "id": p["job"],
-                    "label": p["label"],
-                    "summary": p["summary"],
-                    "called": p.get("called"),
-                    "owner": p["id"],
-                    "job": p.get("job"),
-                },
-                *caps,
-            ]
+        caps = [s for s in skills if s.get("id") in (p.get("skill_ids") or [])] or [r for r in runtime if r.get("owner") == p["id"]]
         trees.append({**p, "capabilities": caps})
     owners = [{"id": t["id"], "label": t["label"], "role_ids": [t["id"], *[c["id"] for c in t.get("capabilities") or []]]} for t in trees]
     called_counts: dict[str, int] = {}
-    for row in product + runtime:
+    for row in product:
         key = str(row.get("called") or "unknown")
         called_counts[key] = called_counts.get(key, 0) + 1
     return {
         "abstract": abstract,
         "product": product,
         "runtime": runtime,
+        "skills": skills,
+        "skill_categories": list(stack.get("skill_categories") or []),
         "trees": trees,
-        "roles": product + runtime,
+        "roles": product,
         "owners": owners,
         "playbooks": list_playbooks(),
         "counts": {
             "product": len(workers),
             "abstract": len(abstract),
             "runtime": len(runtime),
-            "total": len(product) + len(runtime),
+            "skills": len(skills),
+            "roles": len(product),
+            "total": len(product),
             "called": called_counts,
         },
     }
@@ -1140,7 +1189,7 @@ def chat_with_role(
     if not provider:
         raise RuntimeError(gate.get("reason") or "未配置可用的用例执行模型")
 
-    system = str(role.get("system_prompt") or "").strip()
+    system = str(role.get("system_prompt") or role.get("system_prompt") or "").strip()
     if explain_mode:
         system = f"{EXPLAIN_OVERLAY}\n\n{system}".strip()
     payload = [{"role": "system", "content": system}, *history]

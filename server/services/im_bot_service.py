@@ -16,7 +16,15 @@ from server.services.im_prompts import DEFAULT_IM_DEFECT_PROMPT, DEFAULT_IM_DIAL
 from script.log import SLog
 
 TAG = "im_bot"
-IM_PLUGIN_IDS = ("feishu", "wecom", "dingtalk", "slack")
+IM_PLUGIN_IDS = ("feishu", "wecom", "dingtalk", "slack", "wechat")
+IM_PLUGIN_IDS = IM_PLUGIN_IDS
+_PLUGIN_LABEL = {
+    "feishu": "飞书",
+    "wecom": "企业微信",
+    "dingtalk": "钉钉",
+    "slack": "Slack",
+    "wechat": "微信",
+}
 _STORE = os.path.join(APP_DATA_DIR, "im_bot_sessions.json")
 _INBOUND = os.path.join(APP_DATA_DIR, "im_bot_inbound.json")
 _MAX_HISTORY = 12
@@ -46,23 +54,29 @@ def normalize_im_chat(raw: Any = None) -> Dict[str, Any]:
     return {"enabled": bool(src.get("enabled"))}
 
 
-def _im_role_prompts() -> Dict[str, str]:
+def _role_prompt(role_id: str, fallback: str) -> str:
     from server.services.ai.roles_catalog import get_role
 
-    qa = get_role("im-qa-assistant") or {}
-    defect = get_role("im-defect-assistant") or {}
-    return {
-        "dialogue_prompt": str(qa.get("system_prompt") or "").strip() or DEFAULT_IM_DIALOGUE_PROMPT,
-        "defect_prompt": str(defect.get("system_prompt") or "").strip() or DEFAULT_IM_DEFECT_PROMPT,
-    }
+    role = get_role(role_id) or {}
+    return str(role.get("system_prompt") or role.get("system_prompt") or "").strip() or fallback
 
 
 def get_im_chat_config(plugin_id: str = "feishu") -> Dict[str, Any]:
+    from server.services.ai.role_plugin_graph import im_roles_for_plugin, resolve_im
     from server.services.system_settings_service import _merged_plugin_config
 
     pid = plugin_id if plugin_id in IM_PLUGIN_IDS else "feishu"
     cfg = _merged_plugin_config(pid)
-    return {**normalize_im_chat(cfg.get("chat")), **_im_role_prompts()}
+    roles = im_roles_for_plugin(pid)
+    defect = resolve_im(plugin_id=pid, intent="defect")
+    return {
+        **normalize_im_chat(cfg.get("chat")),
+        "dialogue_role": roles["dialogue"],
+        "defect_role": roles["defect"],
+        "dialogue_prompt": _role_prompt(roles["dialogue"], DEFAULT_IM_DIALOGUE_PROMPT),
+        "defect_prompt": _role_prompt(roles["defect"], DEFAULT_IM_DEFECT_PROMPT),
+        "submit_plugin_id": defect.get("submit_plugin_id") or "",
+    }
 
 
 def record_im_inbound(info: Dict[str, Any]) -> None:
@@ -206,6 +220,13 @@ def _match_zentao_project(name: str) -> Dict[str, str]:
     return {}
 
 
+def _submit_defect(draft: Dict[str, Any], plugin_id: str) -> Dict[str, Any]:
+    pid = str(plugin_id or "").strip()
+    if pid != "zentao":
+        return {"ok": False, "error": "这条角色还没有绑定可提单的插件。"}
+    return _submit_zentao_from_draft(draft)
+
+
 def _submit_zentao_from_draft(draft: Dict[str, Any]) -> Dict[str, Any]:
     from server.services.system_settings_service import create_zentao_bug, get_zentao_credentials
 
@@ -246,6 +267,7 @@ def reply_im_message(
     mode: str = "",
     plugin_id: str = "feishu",
     require_enabled: bool = False,
+    source: str = "",
 ) -> Dict[str, Any]:
     user_text = str(text or "").strip()
     if not user_text:
@@ -255,13 +277,40 @@ def reply_im_message(
         raise ValueError("还没开启 IM 对话。到插件「对话」页打开开关。")
     intent = mode if mode in ("dialogue", "defect") else detect_im_intent(user_text)
     rows = [row for row in (history or []) if isinstance(row, dict)]
+    from server.services.ai.role_plugin_graph import resolve_im
+    from server.services.ai import dispatch_log as dispatch
+
+    binding = resolve_im(plugin_id=plugin_id if plugin_id in IM_PLUGIN_IDS else "feishu", intent=intent)
+    source_id = source or ("plugin_trial" if not require_enabled else f"{plugin_id}_im")
+    tok = dispatch.bind(
+        trigger="im_chat",
+        source=source_id,
+        role=binding["role_id"],
+        job=binding["job"],
+        skill=binding.get("skill_id") or "",
+        routed_by="conductor",
+        app_name=_PLUGIN_LABEL.get(plugin_id, plugin_id),
+    )
+    try:
+        return _reply_im_bound(cfg, rows, user_text, binding)
+    finally:
+        dispatch.reset(tok)
+
+
+def _reply_im_bound(
+    cfg: Dict[str, Any],
+    rows: List[Dict[str, str]],
+    user_text: str,
+    binding: Dict[str, Any],
+) -> Dict[str, Any]:
+    intent = str(binding.get("intent") or "dialogue")
     if intent == "defect":
         raw = _call_llm(cfg["defect_prompt"], rows, user_text, conversational=False)
         draft = _parse_json_object(raw)
         action = str(draft.get("action") or "clarify").strip().lower()
         reply = str(draft.get("reply") or "").strip()
         if action == "submit":
-            submitted = _submit_zentao_from_draft(draft)
+            submitted = _submit_defect(draft, str(binding.get("submit_plugin_id") or cfg.get("submit_plugin_id") or ""))
             if submitted.get("ok"):
                 bug_id = submitted.get("bug_id")
                 url = submitted.get("url") or ""
@@ -285,7 +334,14 @@ def reply_im_message(
         if action == "reject":
             return {"ok": True, "mode": "defect", "action": "reject", "reply": reply or "这不像缺陷。直接问我就行，要提单请说「提缺陷」。"}
         return {"ok": True, "mode": "defect", "action": "clarify", "reply": reply or "再补一下标题、重现步骤和实际结果。"}
-    reply = _call_llm(cfg["dialogue_prompt"], rows, user_text, conversational=True)
+    from server.services.im_command import run_commander_turn
+
+    reply = run_commander_turn(
+        base_prompt=cfg["dialogue_prompt"],
+        history=rows,
+        user_text=user_text,
+        call_llm=_call_llm,
+    )
     return {"ok": True, "mode": "dialogue", "action": "chat", "reply": reply}
 
 
@@ -467,3 +523,14 @@ def handle_feishu_event(payload: Any) -> Dict[str, Any]:
     if parsed.get("kind") == "message":
         return reply_feishu_parsed(parsed)
     return {"ok": True, "ignored": parsed.get("reason") or "unknown"}
+
+
+# Routers / listeners historically mixed these spellings.
+IM_PLUGIN_IDS = IM_PLUGIN_IDS
+reply_im_message = reply_im_message
+get_im_chat_config = get_im_chat_config
+record_im_inbound = record_im_inbound
+get_im_inbound = get_im_inbound
+accept_feishu_event = accept_feishu_event
+load_im_history = load_im_history
+append_im_history = append_im_history

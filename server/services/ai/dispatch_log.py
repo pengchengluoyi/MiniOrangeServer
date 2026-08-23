@@ -54,6 +54,53 @@ def ctx() -> dict:
     return dict(_CTX.get() or {})
 
 
+_JOB_TO_SKILL = {
+    "im_dialogue": "im.dialogue",
+    "im_defect": "im.defect",
+    "im.dialogue": "im.dialogue",
+    "im.defect": "im.defect",
+    "review_impact": "propose_atlas",
+    "edit_atlas": "propose_atlas",
+    "agent-restart": "agent-decide",
+    "role_chat": "",
+    "qa_tick": "",
+    "route": "",
+    "atlas_followup": "",
+    "knowledge-capture": "",
+    "knowledge-review": "",
+}
+
+_TRIGGER_SOURCE = {
+    "qa_tick": "continue_analysis",
+    "im_chat": "im_inbound",
+    "settings_chat": "settings_role_chat",
+    "case_run": "case_run",
+    "atlas_confirm": "atlas_confirm",
+    "atlas_edit": "atlas_edit",
+    "atlas_reject": "atlas_reject",
+    "knowledge_capture": "knowledge_capture",
+    "knowledge_review": "knowledge_review",
+    "conductor_route": "analyst_route",
+}
+
+
+def skill_from_job(job: str = "", skill: str = "") -> str:
+    sid = str(skill or "").strip()
+    if sid:
+        return sid
+    jid = str(job or "").strip()
+    if jid in _JOB_TO_SKILL:
+        return _JOB_TO_SKILL[jid]
+    return jid
+
+
+def source_from_trigger(trigger: str = "", source: str = "") -> str:
+    sid = str(source or "").strip()
+    if sid:
+        return sid
+    return _TRIGGER_SOURCE.get(str(trigger or "").strip(), str(trigger or "").strip())
+
+
 def infer_call_meta(row: dict | None = None, *, output: Any = None, system_prompt: str = "") -> dict:
     """从模型输出反推触发 / Job / 角色。执行线程没 bind 时用来补齐。"""
     blob = output if output is not None else (row or {}).get("output")
@@ -67,29 +114,54 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
     sys_l = str(system_prompt or (row or {}).get("system_prompt") or "")
 
     if parsed.get("goal") and (parsed.get("checkpoints") is not None or parsed.get("checkpoint") is not None):
-        return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "restart" in parsed and parsed.get("thought"):
-        return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if parsed.get("thought") and any(k in parsed for k in ("action", "tool", "capability_id", "done", "x", "y")):
-        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if parsed.get("thought"):
-        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if "passed" in parsed and ("confidence" in parsed or parsed.get("ai_reasoning")):
-        return {"trigger": "case_run", "job": "assert-vision", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "assert-vision", "role": "test-engineer", "skill": "assert-vision", "source": "case_run"}
     if isinstance(parsed.get("events"), list) or parsed.get("mode") in ("plan", "decline", "replan", "give_up"):
-        return {"trigger": "case_run", "job": "plan-overview", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "plan-overview", "role": "test-engineer", "skill": "plan-overview", "source": "case_run"}
     if parsed.get("bbox") or ("x" in parsed and "y" in parsed):
-        return {"trigger": "case_run", "job": "locate-vision", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "locate-vision", "role": "test-engineer", "skill": "locate-vision", "source": "case_run"}
     if isinstance(parsed.get("items"), list):
-        return {"trigger": "knowledge_capture", "job": "knowledge-capture", "role": "version-qa-bm"}
+        return {"trigger": "knowledge_capture", "job": "knowledge-capture", "role": "version-qa-bm", "source": "knowledge_capture"}
     if "抽取目标" in sys_l or "goal-extract" in sys_l:
-        return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "是否先重开" in sys_l or "agent-restart" in sys_l:
-        return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if "下一个动作" in sys_l or "agent-decide" in sys_l:
-        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if "检查点" in sys_l or "assert-vision" in sys_l:
-        return {"trigger": "case_run", "job": "assert-vision", "role": "test-engineer"}
+        return {"trigger": "case_run", "job": "assert-vision", "role": "test-engineer", "skill": "assert-vision", "source": "case_run"}
+    if parsed.get("action") in ("submit", "clarify", "reject") and (
+        "title" in parsed or "steps" in parsed or "reply" in parsed
+    ):
+        return {"trigger": "im_chat", "job": "im_defect", "role": "im-defect-assistant", "skill": "im.defect", "source": "im_inbound"}
+    if any(
+        mark in sys_l
+        for mark in (
+            "在飞书 / 企业微信 / 钉钉 / Slack",
+            "不在这套对话里直接建禅道单",
+            "MiniOrange 的测试助手",
+            "MiniOrange 的总指挥",
+            "你排兵，其他角色干活",
+            "请他们说「提缺陷」",
+        )
+    ):
+        return {"trigger": "im_chat", "job": "im_dialogue", "role": "im-qa-assistant", "skill": "im.dialogue", "source": "im_inbound"}
+    if any(
+        mark in sys_l
+        for mark in (
+            "整理一张可提交到禅道的缺陷",
+            "只输出 JSON，不要输出其它文字",
+            '"action": "submit" | "clarify" | "reject"',
+        )
+    ):
+        return {"trigger": "im_chat", "job": "im_defect", "role": "im-defect-assistant", "skill": "im.defect", "source": "im_inbound"}
     return {}
 
 
@@ -102,6 +174,12 @@ def decorate_row(row: dict) -> dict:
         out["job"] = guessed.get("job") or ""
     if not out.get("role"):
         out["role"] = guessed.get("role") or ""
+    if not out.get("skill"):
+        out["skill"] = guessed.get("skill") or skill_from_job(out.get("job") or "")
+    if not out.get("source"):
+        out["source"] = guessed.get("source") or source_from_trigger(out.get("trigger") or "")
+    if not out.get("routed_by") and out.get("trigger") == "qa_tick":
+        out["routed_by"] = "conductor"
     return out
 
 
@@ -264,6 +342,12 @@ def record_llm(*, messages: list | None = None, parsed=None, raw_text: str = "",
         status = "skipped"
     usage = meta.get("usage") if isinstance(meta.get("usage"), dict) else {}
     guessed = infer_call_meta(output=output, system_prompt=system)
+    trigger = env.get("trigger") or guessed.get("trigger") or "unknown"
+    job = env.get("job") or guessed.get("job") or ""
+    role = env.get("role") or guessed.get("role") or ""
+    skill = env.get("skill") or guessed.get("skill") or skill_from_job(job)
+    source = env.get("source") or guessed.get("source") or source_from_trigger(trigger)
+    routed_by = env.get("routed_by") or ("conductor" if trigger == "qa_tick" else "")
     row_id = f"ds-{uuid.uuid4().hex[:12]}"
     system_text, imgs_s = _clip_media(system, stem=f"{row_id}-s")
     input_text, imgs_u = _clip_media(user, stem=f"{row_id}-u")
@@ -273,14 +357,17 @@ def record_llm(*, messages: list | None = None, parsed=None, raw_text: str = "",
             "id": row_id,
             "kind": "llm",
             "status": status,
-            "trigger": env.get("trigger") or guessed.get("trigger") or "unknown",
+            "trigger": trigger,
+            "source": source,
             "app_id": env.get("app_id") or "",
             "app_name": env.get("app_name") or "",
             "pipeline_id": env.get("pipeline_id") or "",
             "step_index": env.get("step_index"),
             "step_total": env.get("step_total"),
-            "role": env.get("role") or guessed.get("role") or "",
-            "job": env.get("job") or guessed.get("job") or "",
+            "role": role,
+            "job": job,
+            "skill": skill,
+            "routed_by": routed_by,
             "model": meta.get("model") or env.get("model") or "",
             "provider_id": meta.get("provider_id") or "",
             "system_prompt": system_text,
@@ -302,41 +389,55 @@ def record_job(
     status: str,
     job: str,
     role: str = "",
+    skill: str = "",
+    source: str = "",
+    routed_by: str = "",
+    routed: list | None = None,
     detail: str = "",
     input_data: Any = None,
     output_data: Any = None,
     error: str = "",
 ) -> dict:
     env = ctx()
+    trigger = env.get("trigger") or "unknown"
+    job_id = job or env.get("job") or ""
+    role_id = role or env.get("role") or ""
+    skill_id = skill or env.get("skill") or skill_from_job(job_id)
+    source_id = source or env.get("source") or source_from_trigger(trigger)
+    router = routed_by or env.get("routed_by") or ("conductor" if trigger == "qa_tick" else "")
     row_id = f"ds-{uuid.uuid4().hex[:12]}"
     input_text, imgs_u = _clip_media(input_data or env.get("input") or "", stem=f"{row_id}-u")
     output_text, imgs_o = _clip_media(output_data or detail, stem=f"{row_id}-o")
-    return _write(
-        {
-            "id": row_id,
-            "kind": "job",
-            "status": status,
-            "trigger": env.get("trigger") or "unknown",
-            "app_id": env.get("app_id") or "",
-            "app_name": env.get("app_name") or "",
-            "pipeline_id": env.get("pipeline_id") or "",
-            "step_index": env.get("step_index"),
-            "step_total": env.get("step_total"),
-            "role": role or env.get("role") or "",
-            "job": job or env.get("job") or "",
-            "system_prompt": "",
-            "input": input_text,
-            "output": output_text,
-            "images": imgs_u + imgs_o,
-            "engine": env.get("engine") or "pipeline",
-            "elapsed_ms": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "error": str(error or ""),
-            "detail": detail,
-        }
-    )
+    row = {
+        "id": row_id,
+        "kind": "job",
+        "status": status,
+        "trigger": trigger,
+        "source": source_id,
+        "app_id": env.get("app_id") or "",
+        "app_name": env.get("app_name") or "",
+        "pipeline_id": env.get("pipeline_id") or "",
+        "step_index": env.get("step_index"),
+        "step_total": env.get("step_total"),
+        "role": role_id,
+        "job": job_id,
+        "skill": skill_id,
+        "routed_by": router,
+        "system_prompt": "",
+        "input": input_text,
+        "output": output_text,
+        "images": imgs_u + imgs_o,
+        "engine": env.get("engine") or "pipeline",
+        "elapsed_ms": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "error": str(error or ""),
+        "detail": detail,
+    }
+    if routed:
+        row["routed"] = routed
+    return _write(row)
 
 
 def new_pipeline_id() -> str:

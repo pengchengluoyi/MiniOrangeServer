@@ -49,7 +49,7 @@ TAG = "RegressionPlanner"
 def _chat(*, job: str, provider, messages, **kwargs):
     from server.services.ai import dispatch_log as dispatch
 
-    tok = dispatch.bind(role="test-engineer", job=job)
+    tok = dispatch.bind(role="test-engineer", job=job, skill=job)
     try:
         return call_chat_text(provider=provider, messages=messages, **kwargs)
     finally:

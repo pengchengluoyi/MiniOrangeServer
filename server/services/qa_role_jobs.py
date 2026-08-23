@@ -129,7 +129,7 @@ def _ask_json(system: str, user: str, *, max_tokens: int = 2500, timeout_sec: in
     from server.services.ai.regression.llm_client import call_chat_text, resolve_regression_provider
 
     provider, gate = resolve_regression_provider()
-    tok = dispatch.bind(role=role, job=job)
+    tok = dispatch.bind(role=role, job=job, skill=job)
     if not provider:
         dispatch.record_job(status="skipped", job=job or "llm", role=role, detail=gate.get("reason") or "未配置模型")
         dispatch.reset(tok)
@@ -1123,9 +1123,69 @@ def _add_usage(total: dict, extra) -> None:
         total[key] = int(total.get(key) or 0) + int(extra.get(key) or 0)
 
 
-def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, app_id: str = "", app_name: str = "", user_note: str = "", force: bool = False, jobs: list | None = None) -> dict:
+_ROLE_CN = {
+    "conductor": "分析师",
+    "req-analyst": "需求分析师",
+    "mindmap-writer": "测试脑图编写",
+    "case-writer": "测试用例编写",
+    "req-qa-bm": "需求QA BM",
+    "version-qa-bm": "版本QA BM",
+    "test-engineer": "测试工程师",
+    "doc-keeper": "文档维护",
+    "report-writer": "报告编写",
+}
+
+_SKILL_CN = {
+    "analyze_req": "拆验收标准",
+    "propose_atlas": "建议图谱",
+    "draft_mindmap": "写测试脑图",
+    "draft_cases": "写用例草稿",
+    "map_cases": "对照用例库",
+    "draft_sign": "验收草稿",
+    "pick_regression": "圈回归范围",
+    "draft_gate": "发版草稿",
+    "pick_account": "筛测试账号",
+}
+
+
+def _routed_from_actions(actions: list) -> list[dict]:
+    out = []
+    seen = set()
+    for item in actions or []:
+        if not isinstance(item, dict):
+            continue
+        skill = str(item.get("action") or item.get("job") or "").strip()
+        role = str(item.get("role") or "").strip()
+        if not skill or skill in ("skip", "skipped", "blocked"):
+            continue
+        key = (role, skill)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"role": role, "skill": skill})
+    return out
+
+
+def _route_detail(routed: list[dict]) -> str:
+    if not routed:
+        return "分析师理解任务后，没有需要调用的技能"
+    bits = [
+        f"{_ROLE_CN.get(row['role'], row['role'] or '角色')} · {_SKILL_CN.get(row['skill'], row['skill'])}"
+        for row in routed
+    ]
+    return "分析师理解任务后调用：" + " → ".join(bits)
+
+
+def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, app_id: str = "", app_name: str = "", user_note: str = "", force: bool = False, jobs: list | None = None, source: str = "") -> dict:
     """推进未完成的分析/脑图/用例草稿。不改验收门禁、不自动下发设备。jobs 指定时按重试处理。"""
-    tok = dispatch.bind(trigger="qa_tick", app_id=app_id, app_name=app_name, pipeline_id=dispatch.new_pipeline_id())
+    tok = dispatch.bind(
+        trigger="qa_tick",
+        source=source or "continue_analysis",
+        routed_by="conductor",
+        app_id=app_id,
+        app_name=app_name,
+        pipeline_id=dispatch.new_pipeline_id(),
+    )
     try:
         result = _tick_body(
             qa_process=qa_process,
@@ -1138,18 +1198,20 @@ def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "
         )
         actions = result.get("actions") or []
         did = [a for a in actions if a.get("action") not in ("skip", "skipped", "blocked", "")]
-        if did:
-            dispatch.record_job(
-                status="done",
-                job="qa_tick",
-                role=did[0].get("role") or "req-analyst",
-                detail="流程推进：" + " → ".join(str(a.get("action") or "") for a in did),
-                input_data={"requirement_id": requirement_id or ""},
-                output_data={"actions": [a.get("action") for a in did]},
-            )
+        routed = _routed_from_actions(did)
+        dispatch.record_job(
+            status="done",
+            job="route",
+            role="conductor",
+            skill="",
+            routed=routed,
+            detail=_route_detail(routed),
+            input_data={"requirement_id": requirement_id or ""},
+            output_data={"actions": [a.get("action") for a in did], "routed": routed},
+        )
         return result
     except Exception as e:
-        dispatch.record_job(status="error", job="qa_tick", role="req-analyst", error=str(e)[:240])
+        dispatch.record_job(status="error", job="route", role="conductor", error=str(e)[:240])
         raise
     finally:
         dispatch.reset(tok)
@@ -1324,6 +1386,8 @@ def run_followup_pipeline(
             planned += 1
     tok = dispatch.bind(
         trigger=trigger,
+        source=trigger,
+        routed_by="conductor",
         app_id=app_id,
         app_name=app_name,
         pipeline_id=pipeline_id,
@@ -1344,7 +1408,7 @@ def run_followup_pipeline(
             has_cases = bool(req.get("draft_cases"))
             if force or not has_map:
                 step += 1
-                dispatch.bind(step_index=step, role="mindmap-writer", job="draft_mindmap")
+                dispatch.bind(step_index=step, role="mindmap-writer", job="draft_mindmap", skill="draft_mindmap")
                 art = draft_mindmap(req, cases or [], doc.get("app_atlas"))
                 req = _apply_cover_art(req, art, job="draft_mindmap", replace=force)
                 actions.append({"role": "mindmap-writer", "req_id": rid, "action": "draft_mindmap", "engine": art.get("engine")})
@@ -1352,7 +1416,7 @@ def run_followup_pipeline(
                 _add_usage(usage, art.get("usage"))
             if force or not has_cases:
                 step += 1
-                dispatch.bind(step_index=step, role="case-writer", job="draft_cases")
+                dispatch.bind(step_index=step, role="case-writer", job="draft_cases", skill="draft_cases")
                 art = draft_cases(req, cases or [], replace=force)
                 req = _apply_cover_art(req, art, job="draft_cases", replace=force)
                 actions.append({"role": "case-writer", "req_id": rid, "action": "draft_cases", "engine": art.get("engine")})

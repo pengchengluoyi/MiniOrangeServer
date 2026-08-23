@@ -281,6 +281,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         SLog.w(TAG, f"--- [IM] Feishu long connection failed: {e} ---")
 
+    try:
+        from server.services.wechat_ilink_service import sync_wechat_listener
+
+        sync_wechat_listener()
+        SLog.i(TAG, "--- [IM] WeChat iLink synced ---")
+    except Exception as e:
+        SLog.w(TAG, f"--- [IM] WeChat iLink failed: {e} ---")
+
     # 只有主进程才打印这个 Ready
     SLog.i(TAG, "--- [LifeSpan] Backend services & Database ready ---")
 
@@ -291,6 +299,12 @@ async def lifespan(app: FastAPI):
         from server.services.feishu_ws_listener import stop_feishu_event_listener
 
         stop_feishu_event_listener()
+    except Exception:
+        pass
+    try:
+        from server.services.wechat_ilink_service import stop_wechat_listener
+
+        stop_wechat_listener()
     except Exception:
         pass
     from server.core.gateway_beacon import unregister_gateway_beacons
@@ -419,7 +433,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.108",
+        "version": "0.0.109",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

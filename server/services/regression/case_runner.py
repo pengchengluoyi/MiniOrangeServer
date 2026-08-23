@@ -856,6 +856,7 @@ def _execute(
 
     tok = dispatch.bind(
         trigger="case_run",
+        source="case_run",
         app_id=app_id,
         app_name=app_name,
         pipeline_id=str(run_doc.get("run_id") or "") or dispatch.new_pipeline_id(),

@@ -228,7 +228,11 @@ def migrate_im_chat_prompts_into_roles() -> None:
     global _ROLE_PROMPT_MIGRATED
     if _ROLE_PROMPT_MIGRATED:
         return
-    from server.services.im_prompts import DEFAULT_IM_DEFECT_PROMPT, DEFAULT_IM_DIALOGUE_PROMPT
+    from server.services.im_prompts import (
+        DEFAULT_IM_DEFECT_PROMPT,
+        DEFAULT_IM_DIALOGUE_PROMPT,
+        LEGACY_IM_DIALOGUE_PROMPT,
+    )
 
     ai = _ai_root()
     store = ai.get("_role_prompts")
@@ -240,7 +244,7 @@ def migrate_im_chat_prompts_into_roles() -> None:
         "im-defect-assistant": ("defect_prompt", DEFAULT_IM_DEFECT_PROMPT),
     }
     changed = False
-    for plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+    for plugin_id in ("feishu", "wecom", "dingtalk", "slack", "wechat"):
         raw = _raw_plugin_config(plugin_id)
         if not raw:
             continue
@@ -258,9 +262,27 @@ def migrate_im_chat_prompts_into_roles() -> None:
         if leftover or "dialogue_prompt" in chat or "defect_prompt" in chat:
             raw["chat"] = {"enabled": bool(chat.get("enabled"))}
             changed = True
+    if str(store.get("im-qa-assistant") or "").strip() == LEGACY_IM_DIALOGUE_PROMPT.strip():
+        store.pop("im-qa-assistant", None)
+        changed = True
     _ROLE_PROMPT_MIGRATED = True
     if changed:
         SecurityManager.save()
+
+
+def get_layer_stack_store() -> Dict[str, Any]:
+    ai = _ai_root()
+    raw = ai.get("_layer_stack")
+    if not isinstance(raw, dict):
+        raw = {}
+        ai["_layer_stack"] = raw
+    return raw
+
+
+def write_layer_stack_store(data: Dict[str, Any]) -> None:
+    ai = _ai_root()
+    ai["_layer_stack"] = data if isinstance(data, dict) else {}
+    SecurityManager.save()
 
 
 def get_role_prompt_override(role_id: str) -> str:
@@ -1411,7 +1433,7 @@ INTEGRATION_PLUGIN_SPECS: List[Dict[str, Any]] = [
         "kind": "docs",
         "categories": ["docs", "im"],
         "color": "#2563eb",
-        "summary": "Wiki、群通知和收发消息。说话方式在角色里改。",
+        "summary": "Wiki、群通知和收发消息。",
         "robot_platform": "lark",
         "capabilities": [
             {"id": "connect", "label": "连接", "desc": "应用凭证", "categories": ["docs", "im"]},
@@ -1452,7 +1474,7 @@ INTEGRATION_PLUGIN_SPECS: List[Dict[str, Any]] = [
         "kind": "im",
         "categories": ["im"],
         "color": "#10b981",
-        "summary": "群机器人 webhook。收消息稍后接入，说话方式在角色里改。",
+        "summary": "群机器人 webhook。收消息稍后接入。",
         "robot_platform": "wecom",
         "capabilities": [
             {"id": "connect", "label": "连接", "desc": "Webhook", "categories": ["im"]},
@@ -1465,7 +1487,7 @@ INTEGRATION_PLUGIN_SPECS: List[Dict[str, Any]] = [
         "kind": "im",
         "categories": ["im"],
         "color": "#0ea5e9",
-        "summary": "群机器人。收消息稍后接入，说话方式在角色里改。",
+        "summary": "群机器人。收消息稍后接入。",
         "robot_platform": "dingtalk",
         "capabilities": [
             {"id": "connect", "label": "连接", "desc": "Webhook", "categories": ["im"]},
@@ -1478,11 +1500,23 @@ INTEGRATION_PLUGIN_SPECS: List[Dict[str, Any]] = [
         "kind": "im",
         "categories": ["im"],
         "color": "#8b5cf6",
-        "summary": "频道消息。收消息稍后接入，说话方式在角色里改。",
+        "summary": "频道消息。收消息稍后接入。",
         "robot_platform": "slack",
         "capabilities": [
             {"id": "connect", "label": "连接", "desc": "Webhook / Bot Token", "categories": ["im"]},
             {"id": "chat", "label": "对话", "desc": "试对话", "categories": ["im"]},
+        ],
+    },
+    {
+        "id": "wechat",
+        "name": "微信",
+        "kind": "im",
+        "categories": ["im"],
+        "color": "#07c160",
+        "summary": "个人微信 ClawBot。扫码后作为联系人收发消息。",
+        "capabilities": [
+            {"id": "connect", "label": "连接", "desc": "微信扫码绑定 ClawBot", "categories": ["im"]},
+            {"id": "chat", "label": "对话", "desc": "收消息并回复", "categories": ["im"]},
         ],
     },
 ]
@@ -1641,7 +1675,7 @@ def _default_plugin_config(plugin_id: str) -> Dict[str, Any]:
         }
     if plugin_id == "figma":
         return {"enabled": True, "capabilities": cap_on}
-    if plugin_id in ("wecom", "dingtalk", "slack"):
+    if plugin_id in ("wecom", "dingtalk", "slack", "wechat"):
         return {"enabled": True, "capabilities": cap_on, "chat": _default_im_chat()}
     return {"enabled": True, "capabilities": cap_on}
 
@@ -1679,7 +1713,7 @@ def _merged_plugin_config(plugin_id: str) -> Dict[str, Any]:
         flow = dict(cfg.get("flow") or {})
         flow.pop("template", None)
         cfg["flow"] = flow
-    if plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack", "wechat"):
         migrate_im_chat_prompts_into_roles()
         cfg["chat"] = _normalize_im_chat(cfg.get("chat"))
     return cfg
@@ -1693,6 +1727,10 @@ def _plugin_configured(plugin_id: str, cfg: Dict[str, Any]) -> bool:
             (b.get("platform") == plugin_id and b.get("configured"))
             for b in list_robot_integrations()
         )
+    if plugin_id == "wechat":
+        from server.services.wechat_ilink_service import is_logged_in
+
+        return is_logged_in()
     if plugin_id == "figma":
         return bool(get_figma_settings().get("configured"))
     if plugin_id == "zentao":
@@ -1707,12 +1745,11 @@ def _plugin_public_config(plugin_id: str, cfg: Dict[str, Any]) -> Dict[str, Any]
         public.pop("password", None)
         public["token_masked"] = _mask_secret(token)
         public["has_token"] = bool(token)
-    if plugin_id in ("feishu", "wecom", "dingtalk", "slack"):
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack", "wechat"):
+        from server.services.ai.role_plugin_graph import im_roles_for_plugin
+
         public["chat"] = _normalize_im_chat(cfg.get("chat"))
-        public["chat_roles"] = {
-            "dialogue": "im-qa-assistant",
-            "defect": "im-defect-assistant",
-        }
+        public["chat_roles"] = im_roles_for_plugin(plugin_id)
         if plugin_id == "feishu":
             from server.services.feishu_ws_listener import feishu_ws_status
             from server.services.im_bot_service import get_im_inbound
@@ -1723,6 +1760,12 @@ def _plugin_public_config(plugin_id: str, cfg: Dict[str, Any]) -> Dict[str, Any]
                 "mode": "long_connection",
             }
             public["chat_listener"] = {**feishu_ws_status(), "last": get_im_inbound()}
+        if plugin_id == "wechat":
+            from server.services.im_bot_service import get_im_inbound
+            from server.services.wechat_ilink_service import listener_status, public_account
+
+            public["wechat_account"] = public_account()
+            public["chat_listener"] = {**listener_status(), "last": get_im_inbound()}
     return public
 
 
@@ -1749,6 +1792,8 @@ def list_integration_plugins() -> Dict[str, Any]:
         if pid == "figma" and figma.get("configured"):
             robot_n = 1
         if pid == "zentao" and configured:
+            robot_n = 1
+        if pid == "wechat" and configured:
             robot_n = 1
         out.append(
             {
@@ -1810,7 +1855,7 @@ def save_integration_plugin(plugin_id: str, body: Dict[str, Any]) -> Dict[str, A
         for key, value in incoming["capabilities"].items():
             caps[str(key)] = bool(value)
 
-    if plugin_id in ("feishu", "wecom", "dingtalk", "slack") and isinstance(incoming.get("chat"), dict):
+    if plugin_id in ("feishu", "wecom", "dingtalk", "slack", "wechat") and isinstance(incoming.get("chat"), dict):
         migrate_im_chat_prompts_into_roles()
         prev = current.get("chat") if isinstance(current.get("chat"), dict) else {}
         current["chat"] = {
@@ -1877,6 +1922,13 @@ def save_integration_plugin(plugin_id: str, body: Dict[str, Any]) -> Dict[str, A
             sync_feishu_event_listener()
         except Exception as e:
             SLog.w(TAG, f"sync feishu listener failed: {e}")
+    if plugin_id == "wechat":
+        try:
+            from server.services.wechat_ilink_service import sync_wechat_listener
+
+            sync_wechat_listener()
+        except Exception as e:
+            SLog.w(TAG, f"sync wechat listener failed: {e}")
     return get_integration_plugin(plugin_id)
 
 
