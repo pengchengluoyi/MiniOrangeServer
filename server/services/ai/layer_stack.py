@@ -23,6 +23,7 @@ SKILL_CATEGORIES: List[Dict[str, str]] = [
     {"id": "device", "label": "设备操作", "desc": "真机上规划、点按、定位和断言"},
     {"id": "channel", "label": "通道对话", "desc": "IM 里回答、下令、提缺陷，或问人"},
     {"id": "sync", "label": "外部同步", "desc": "写到 Wiki 等外部系统"},
+    {"id": "prompt", "label": "提示词辅件", "desc": "user 模板、厂商补丁、遗留与观察叠加"},
 ]
 
 SKILLS: List[Dict[str, Any]] = [
@@ -46,6 +47,21 @@ SKILLS: List[Dict[str, Any]] = [
     {"id": "hitl-composer", "label": "问人话术", "owner": "test-engineer", "summary": "把卡住的步骤改写成问人的话", "intent": "talk", "category": "channel"},
     {"id": "persona-task", "label": "拟人路径", "owner": "test-engineer", "summary": "清缓存等系统路径的拟人展开", "intent": "act", "category": "device"},
     {"id": "publish_wiki", "label": "写入 Wiki", "owner": "doc-keeper", "summary": "人确认后落文件夹", "intent": "act", "category": "sync"},
+    # 提示词辅件（对照用；执行仍可能硬编码常量）
+    {"id": "legacy-im-dialogue", "label": "遗留 · IM 对话", "owner": "im-qa-assistant", "summary": "旧版 IM prompt，已被取代", "intent": "talk", "category": "prompt"},
+    {"id": "explain-overlay", "label": "观察沙盒叠加", "owner": "conductor", "summary": "设置页观察模式叠加层", "intent": "talk", "category": "prompt"},
+    {"id": "volcengine-doubao-coord-append", "label": "补丁 · Doubao 坐标", "owner": "test-engineer", "summary": "0~1000 坐标约束追加段", "intent": "act", "category": "prompt"},
+    {"id": "volcengine-doubao-json-append", "label": "补丁 · Doubao JSON", "owner": "test-engineer", "summary": "仅 JSON 约束追加段", "intent": "act", "category": "prompt"},
+    {"id": "user-plan-overview", "label": "User · 回归规划", "owner": "test-engineer", "summary": "PLAN_OVERVIEW user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-single-step-replan", "label": "User · 单步重规划", "owner": "test-engineer", "summary": "SINGLE_STEP_REPLAN user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-locate-vision", "label": "User · 视觉定位", "owner": "test-engineer", "summary": "LOCATE_VISION user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-assert-vision", "label": "User · 视觉断言", "owner": "test-engineer", "summary": "ASSERT_VISION user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-hitl-composer", "label": "User · 问人话术", "owner": "test-engineer", "summary": "HITL composer user 模板", "intent": "talk", "category": "prompt"},
+    {"id": "user-persona-task", "label": "User · 拟人化", "owner": "test-engineer", "summary": "PERSONA_TASK user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-goal-extract", "label": "User · 目标抽取", "owner": "test-engineer", "summary": "GOAL_EXTRACT user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-agent-decide", "label": "User · 真机决策", "owner": "test-engineer", "summary": "AGENT_DECIDE user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-agent-restart", "label": "User · 开场重启", "owner": "test-engineer", "summary": "AGENT_RESTART user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-ai-plan", "label": "User · Copilot Plan", "owner": "test-engineer", "summary": "AI_PLAN user 模板", "intent": "act", "category": "prompt"},
 ]
 
 ROLES: List[Dict[str, str]] = [

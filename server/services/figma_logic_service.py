@@ -26,7 +26,13 @@ from server.services.system_settings_service import list_testing_knowledge, save
 TAG = "FigmaLogic"
 
 FIGMA_NODE_PREFIX = "figma_page_"
-TAB_LABELS = ["首页", "消息", "我的", "想要", "造物秀"]
+
+
+def _tab_labels() -> list:
+    """主导航 tab 文案来自应用画像（底栏 + 顶栏分段），不写死某个被测应用。"""
+    from server.services.ai import app_profile as ap
+
+    return list(ap.current().home_tabs())
 
 
 def _slug(name: str) -> str:
@@ -234,7 +240,7 @@ def _infer_tab_navigation_edges(
         node_id = page.get("node_id") or ""
         if not node_id:
             continue
-        for tab in TAB_LABELS:
+        for tab in _tab_labels():
             if tab in name:
                 tab_nodes.append((tab, node_id))
                 break

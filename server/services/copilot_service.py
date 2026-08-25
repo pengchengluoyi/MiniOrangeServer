@@ -166,9 +166,13 @@ _NON_BOTTOM_TAB_SHORT = frozenset(
     }
 )
 _LOGIN_DISCLAIMER_MARKERS = ("运营商", "认证服务", "服务由", "条款", "协议", "隐私")
-_SEGMENT_TAB_NAMES = frozenset(
-    {"造物秀", "AI创意", "想要成真", "真造物秀", "怪兽", "艺术家专区"}
-)
+
+
+def _segment_tab_names() -> frozenset:
+    """顶栏分段 tab 文案来自应用画像，不写死某个被测应用。"""
+    from server.services.ai import app_profile as ap
+
+    return frozenset(ap.current().segment_tab_names())
 
 
 def _is_segment_tab_query(label: str) -> bool:
@@ -177,9 +181,9 @@ def _is_segment_tab_query(label: str) -> bool:
         return False
     core = re.sub(r"^(点击|点一下|tap|click|进入|打开)\s*", "", raw, flags=re.I).strip()
     core = re.sub(r"(列表|页面|界面|tab)$", "", core, flags=re.I).strip()
-    if core in _SEGMENT_TAB_NAMES:
+    if core in _segment_tab_names():
         return True
-    return any(name in raw for name in _SEGMENT_TAB_NAMES)
+    return any(name in raw for name in _segment_tab_names())
 
 
 def _is_probable_bottom_tab_query(label: str) -> bool:
@@ -207,7 +211,7 @@ def _is_probable_bottom_tab_query(label: str) -> bool:
 
 
 def _match_bottom_tab_label(query: str, target: str) -> bool:
-    """底栏 Tab 仅精确匹配，禁止「想要」命中「想要成真」。"""
+    """底栏 Tab 仅精确匹配：避免短 tab 名命中更长的分段 tab 名（前缀重叠时会误判）。"""
     q = (query or "").strip()
     t = (target or "").strip()
     if not q or not t:
@@ -232,7 +236,7 @@ def _discover_segment_tab_targets(
     screen_w: int,
     screen_h: int,
 ) -> List[Tuple[Any, str]]:
-    """顶栏分段 Tab（如「造物秀」「AI创意」），y 约在屏高 5%~28%。"""
+    """顶栏分段 Tab（文案见应用画像 ui_profile.segment_tabs），y 约在屏高 5%~28%。"""
     try:
         from driver.agent.Crawl.ui_discovery import (
             discover_clickables_from_hierarchy,
@@ -287,7 +291,7 @@ def _resolve_segment_tab_target(
 ) -> Tuple[Optional[Tuple[int, int]], str, str, Optional[Dict[str, Any]]]:
     raw = (label or "").strip()
     search_names: List[str] = []
-    for name in _SEGMENT_TAB_NAMES:
+    for name in _segment_tab_names():
         if name in raw:
             search_names.append(name)
     if not search_names:
@@ -566,7 +570,7 @@ def _clip_search_params(label: str) -> Tuple[str, List[str], Optional[str]]:
         return parsed_tab, aliases, None
 
     if _is_segment_tab_query(raw):
-        for name in _SEGMENT_TAB_NAMES:
+        for name in _segment_tab_names():
             if name in raw:
                 return name, [raw], None
 
@@ -4279,6 +4283,36 @@ def plan_message(
     planning_mode: str = "local",
 ) -> Dict[str, Any]:
     """统一 Planner：Copilot 与用例执行共享；用例预期检查由调用方额外处理。"""
+    from server.services import system_settings_service as ss
+    from server.services.ai import app_profile as app_profile_ctx
+
+    # 绑定被测应用 UI 画像：分段 tab 识别等应用事实靠它取，深层调用点拿不到 App 对象。
+    # 已在外层（case_runner._execute）绑过时这里是幂等的同值覆盖。
+    _pkg = str((context or {}).get("package") or "")
+    _prof_tok = app_profile_ctx.bind(package=_pkg) if _pkg else None
+    try:
+        return _plan_message_inner(
+            text,
+            sn=sn,
+            context=context,
+            channel=channel,
+            provider_id=provider_id,
+            planning_mode=planning_mode,
+        )
+    finally:
+        if _prof_tok is not None:
+            app_profile_ctx.reset(_prof_tok)
+
+
+def _plan_message_inner(
+    text: str,
+    *,
+    sn: Optional[str] = None,
+    context: Optional[Dict] = None,
+    channel: str = "copilot",
+    provider_id: Optional[str] = None,
+    planning_mode: str = "local",
+) -> Dict[str, Any]:
     from server.services import system_settings_service as ss
 
     mode = (planning_mode or "local").strip().lower()

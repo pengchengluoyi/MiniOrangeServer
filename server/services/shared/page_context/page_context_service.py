@@ -422,8 +422,16 @@ def _collect_screen_text_from_engine(engine) -> str:
     return _collect_full_screen_text(engine)
 
 
-def _identify_page_by_screen_keywords(screen_text: str) -> Optional[Dict[str, Any]]:
-    """基于 OCR/层级关键词的快速页面识别（无需骨架截图）。"""
+def _identify_page_by_screen_keywords(screen_text: str, profile=None) -> Optional[Dict[str, Any]]:
+    """基于 OCR/层级关键词的快速页面识别（无需骨架截图）。
+
+    profile：应用 UI 画像。tab 文案、协议页文案这些是**应用事实**，不能写死在通用服务里 ——
+    写死的话换个应用识别不出首页，导航、断言、恢复整条链都会失准。
+    不传时从 app_profile.current() 取（contextvar 绑定），没绑定就退化成通用信号。
+    """
+    from server.services.ai import app_profile as ap
+
+    prof = profile if profile is not None else ap.current()
     blob = (screen_text or "").strip()
     if not blob:
         return None
@@ -505,12 +513,10 @@ def _identify_page_by_screen_keywords(screen_text: str) -> Optional[Dict[str, An
             "source": "keyword",
         }
 
-    if (
-        sum(1 for k in ("用户协议", "平台用户协议", "造好物 - 平台") if k in blob) >= 1
-        and "不同意" not in blob
-        and "不同意" not in blob
-        and len(blob) > 200
-    ):
+    # 强标记（平台用户协议 / 应用专属协议标题）或泛词「用户协议」+ 正文够长，才算协议全文页。
+    # 泛词单独出现不算 —— 登录页底部也会写「用户协议」。
+    legal_hit = any(k in blob for k in prof.legal_markers()) or "用户协议" in blob
+    if legal_hit and "不同意" not in blob and len(blob) > 200:
         return {
             "matched": True,
             "node_id": None,
@@ -523,10 +529,10 @@ def _identify_page_by_screen_keywords(screen_text: str) -> Optional[Dict[str, An
     if any(k in blob for k in ("登录中", "正在登录", "一键登录", "访客浏览")):
         return None
 
-    home_tabs = ("首页", "消息", "我的", "想要", "造物秀", "AI创意", "想要成真")
+    home_tabs = prof.home_tabs()
     home_hits = sum(1 for k in home_tabs if k in blob)
-    if home_hits >= 2 or (
-        home_hits >= 1 and any(k in blob for k in ("推荐", "关注", "发现", "Feed", "feed"))
+    if home_hits and (
+        home_hits >= 2 or any(k in blob for k in prof.home_marker_labels())
     ):
         return {
             "matched": True,
@@ -680,10 +686,16 @@ def enrich_check_with_page(
             )
             if sum(1 for k in login_markers if k in blob) >= 1:
                 return {"ok": False, "reason": "界面仍为登录页，未进入首页"}
-        if "造物秀" in expected and "造物秀" in (screen_text or ""):
-            cur = (page_ctx or {}).get("label") or ""
-            if cur == "首页" or _is_home_intent(normalize_page_intent(cur), cur):
-                return {"ok": True, "reason": "顶栏已切换至「造物秀」"}
+        # 顶栏分段 tab：预期点名了某个分段 tab、当屏也有它、且当前在首页 ⇒ 算达成。
+        # tab 名字来自画像，不是写死某个应用的（原来这里硬编码了一个具体 tab）。
+        from server.services.ai import app_profile as ap
+
+        for tab in ap.current().segment_tab_names():
+            if tab in expected and tab in (screen_text or ""):
+                cur = (page_ctx or {}).get("label") or ""
+                if cur == "首页" or _is_home_intent(normalize_page_intent(cur), cur):
+                    return {"ok": True, "reason": f"顶栏已切换至「{tab}」"}
+                break
     except Exception:
         pass
     outcome = evaluate_outcome_expectation(

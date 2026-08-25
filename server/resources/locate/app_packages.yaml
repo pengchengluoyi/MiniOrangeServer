@@ -546,6 +546,20 @@ apps:
     aliases:
       - 造好物
       - zaohaowu
+    # 应用专属的页面识别补充。这些词原来漏进了**全局** page_profiles.yaml 的 home /
+    # phone_login profile 里，等于让每个应用都带着造好物的文案跑；而这套 per-app
+    # page_supplements 机制本来就是干这件事的（见 app_packages.py:224）。
+    page_supplements:
+      - profile: home
+        label_patterns:
+          - 造物秀
+        screen_text_patterns:
+          - 造物秀
+          - AI\s*创意
+          - 想要成真
+      - profile: consent
+        screen_text_patterns:
+          - 造物者
 
   # ── 系统 / 商店 ─────────────────────────────────────────
   - key: google_play

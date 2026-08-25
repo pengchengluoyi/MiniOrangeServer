@@ -158,22 +158,27 @@ class QaProcessAssistBody(BaseModel):
 @router.post("/qa-process/assist/{app_id}")
 def qa_process_assist(app_id: str, body: QaProcessAssistBody, db: Session = Depends(get_db)):
     """流程建议。只返回草稿，不改 gate、不写飞书。"""
+    from server.services.ai import app_profile as ap
     from server.services import qa_process_assist as assist
 
-    _get_app(db, app_id)
+    app = _get_app(db, app_id)
     if body.job not in assist.ASSIST_JOBS:
         raise HTTPException(status_code=400, detail="unknown assist job")
     if body.entity not in ("req", "rel"):
         raise HTTPException(status_code=400, detail="entity must be req or rel")
-    art = assist.run_job(
-        body.job,
-        requirement=body.requirement,
-        release=body.release,
-        requirements=body.requirements or [],
-        cases=body.cases or [],
-        tasks=body.tasks or [],
-        suites=body.suites or [],
-    )
+    prof_tok = ap.bind(package=aas.package_for_app(app))
+    try:
+        art = assist.run_job(
+            body.job,
+            requirement=body.requirement,
+            release=body.release,
+            requirements=body.requirements or [],
+            cases=body.cases or [],
+            tasks=body.tasks or [],
+            suites=body.suites or [],
+        )
+    finally:
+        ap.reset(prof_tok)
     return {"code": 200, "ok": True, "data": {"artifact": art}}
 
 
@@ -182,6 +187,17 @@ class QaProcessTickBody(BaseModel):
     user_note: str = ""
     force: bool = False
     jobs: List[str] = []
+    point_ids: List[str] = []
+    rewrite_stubs: bool = False
+    replace_cases: bool = False
+
+
+class CoverImportBody(BaseModel):
+    requirement_id: str = ""
+    kind: str = "mindmap"
+    text: str = ""
+    filename: str = ""
+    replace: bool = False
 
 
 class AtlasPatchBody(BaseModel):
@@ -195,6 +211,31 @@ class AtlasPatchBody(BaseModel):
     release_id: str = ""
 
 
+class AtlasAliasUpdateBody(BaseModel):
+    review_status: str = ""
+    note: str = ""
+
+
+def _learn_patch_aliases(app_id: str, patch: dict | None, *, approved: bool) -> None:
+    """人审图谱变更时沉淀别名：确认 → approved；驳回 → rejected（下次模糊不再提同一对）。"""
+    if not patch or not app_id:
+        return
+    rows = [x for x in (patch.get("aliases") or []) if isinstance(x, dict)]
+    if not rows:
+        return
+    try:
+        from server.services.ai import atlas_alias_repo as alias_repo
+
+        alias_repo.apply_decisions(
+            app_id,
+            rows,
+            review_status="approved" if approved else "rejected",
+            source=str((patch.get("source") or {}).get("kind") or "import"),
+        )
+    except Exception:
+        logging.exception("atlas alias learn failed app=%s patch=%s", app_id, (patch or {}).get("id"))
+
+
 def _followup_in_background(
     *,
     app_id: str,
@@ -203,12 +244,17 @@ def _followup_in_background(
     requirement_ids: list,
     trigger: str,
     app_name: str,
+    package: str,
     pipeline_id: str,
     force: bool,
 ) -> None:
     from server.core.database import SessionLocal
+    from server.services.ai import app_profile as ap
     from server.services.qa_role_jobs import run_followup_pipeline
 
+    # 画像绑在 contextvar 上，不会跟着线程走，所以后台线程必须自己绑一次。
+    # 漏了就是这条路径上的 prompt 拿不到应用术语表，生成质量悄悄退回通用水平。
+    prof_tok = ap.bind(package=package)
     try:
         result = run_followup_pipeline(
             qa_process=qa_process,
@@ -244,6 +290,8 @@ def _followup_in_background(
             dispatch.reset(err_tok)
         except Exception:
             pass
+    finally:
+        ap.reset(prof_tok)
 
 
 def _reanalyze_in_background(
@@ -254,11 +302,14 @@ def _reanalyze_in_background(
     requirement_ids: list,
     user_note: str,
     app_name: str,
+    package: str,
     pipeline_id: str,
 ) -> None:
     from server.core.database import SessionLocal
+    from server.services.ai import app_profile as ap
     from server.services.qa_role_jobs import tick
 
+    prof_tok = ap.bind(package=package)
     try:
         result = tick(
             qa_process=qa_process,
@@ -294,6 +345,54 @@ def _reanalyze_in_background(
             dispatch.reset(err_tok)
         except Exception:
             pass
+    finally:
+        ap.reset(prof_tok)
+
+
+@router.get("/qa-process/atlas-aliases/{app_id}")
+def list_atlas_aliases(app_id: str, status: str = "", db: Session = Depends(get_db)):
+    """列出该应用学到的图谱别名（按 hits 排序）。"""
+    from server.services.ai import atlas_alias_repo as alias_repo
+
+    _get_app(db, app_id)
+    with alias_repo.session_scope() as session:
+        rows = alias_repo.list_aliases(session, app_id, status=status or "")
+        data = [alias_repo.to_public(r) for r in rows]
+    return {"code": 200, "ok": True, "data": {"items": data}}
+
+
+@router.patch("/qa-process/atlas-aliases/{app_id}/{alias_id}")
+def update_atlas_alias(app_id: str, alias_id: int, body: AtlasAliasUpdateBody, db: Session = Depends(get_db)):
+    from server.services.ai import atlas_alias_repo as alias_repo
+
+    _get_app(db, app_id)
+    with alias_repo.session_scope() as session:
+        row = None
+        if body.review_status:
+            row = alias_repo.set_status(session, app_id, alias_id, body.review_status)
+            if not row:
+                raise HTTPException(status_code=404, detail="没有这条别名")
+        else:
+            rows = alias_repo.list_aliases(session, app_id)
+            row = next((r for r in rows if r.id == alias_id), None)
+            if not row:
+                raise HTTPException(status_code=404, detail="没有这条别名")
+        if body.note:
+            row.note = str(body.note)[:512]
+        data = alias_repo.to_public(row)
+    return {"code": 200, "ok": True, "data": data}
+
+
+@router.delete("/qa-process/atlas-aliases/{app_id}/{alias_id}")
+def delete_atlas_alias(app_id: str, alias_id: int, db: Session = Depends(get_db)):
+    from server.services.ai import atlas_alias_repo as alias_repo
+
+    _get_app(db, app_id)
+    with alias_repo.session_scope() as session:
+        ok = alias_repo.delete_alias(session, app_id, alias_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="没有这条别名")
+    return {"code": 200, "ok": True, "data": {"deleted": True}}
 
 
 @router.post("/qa-process/atlas-patch/{app_id}")
@@ -328,16 +427,20 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
             doc = atlas.stamp_atlas_on_release(doc, after, body.release_id)
             doc["requirements"] = atlas.apply_hangs_to_reqs(doc.get("requirements") or [], after)
             doc["features"] = atlas.flatten_features(after, doc.get("requirements") or [])
+            doc = atlas.relink_all_mindmaps(doc)
         patch = found
         next_doc = doc
     elif action == "accept":
         next_doc, patch = atlas.accept_patch(doc, body.patch_id)
         if next_doc and patch:
             next_doc = atlas.stamp_atlas_on_release(next_doc, next_doc.get("app_atlas") or {}, body.release_id)
+            _learn_patch_aliases(app.id, patch, approved=True)
+            next_doc = atlas.relink_all_mindmaps(next_doc)
     elif action == "reject":
         next_doc, patch = atlas.reject_patch(doc, body.patch_id, note=body.note)
         if next_doc and patch:
             next_doc, hung_ids = atlas.apply_reject_feedback(next_doc, patch, body.note)
+            _learn_patch_aliases(app.id, patch, approved=False)
         else:
             hung_ids = []
     else:
@@ -391,6 +494,7 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
                     "requirement_ids": hung,
                     "trigger": "atlas_confirm" if action == "accept" else "atlas_edit",
                     "app_name": app.name or "",
+                    "package": aas.package_for_app(app),
                     "pipeline_id": pipeline_id,
                     "force": force,
                 },
@@ -429,6 +533,7 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
                     "requirement_ids": hung,
                     "user_note": body.note or "",
                     "app_name": app.name or "",
+                    "package": aas.package_for_app(app),
                     "pipeline_id": pipeline_id,
                 },
                 daemon=True,
@@ -449,37 +554,238 @@ def qa_process_atlas_patch(app_id: str, body: AtlasPatchBody, db: Session = Depe
     }
 
 
+class PublishMindmapBody(BaseModel):
+    requirement_id: str = ""
+    release_id: str = ""
+
+
+class HideMindmapWikiBody(BaseModel):
+    requirement_id: str = ""
+    node_token: str = ""
+
+
+@router.post("/qa-process/publish-mindmap/{app_id}")
+def qa_process_publish_mindmap(app_id: str, body: PublishMindmapBody, db: Session = Depends(get_db)):
+    """在飞书 Wiki 对应目录下建文档，并把当前需求的脑图写进去。"""
+    from server.services.feishu_wiki_service import publish_mindmap
+
+    app = _get_app(db, app_id)
+    cfg = aas.get_automation_config(app)
+    try:
+        result = publish_mindmap(
+            cfg.get("qa_process") or {},
+            requirement_id=body.requirement_id,
+            release_id=body.release_id,
+            app_name=app.name or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = aas.save_automation_config(app, {"qa_process": result.get("qa_process") or {}})
+    db.commit()
+    result["qa_process"] = saved.get("qa_process") or result.get("qa_process") or {}
+    return {"code": 200, "ok": True, "data": result}
+
+
+@router.post("/qa-process/hide-mindmap-wiki/{app_id}")
+def qa_process_hide_mindmap_wiki(app_id: str, body: HideMindmapWikiBody, db: Session = Depends(get_db)):
+    """将当前飞书脑图设为失效：移入失效列表，上一份有效记录变成当前并恢复脑图。"""
+    from server.services.feishu_wiki_service import invalidate_mindmap_wiki
+
+    app = _get_app(db, app_id)
+    cfg = aas.get_automation_config(app)
+    try:
+        result = invalidate_mindmap_wiki(
+            cfg.get("qa_process") or {},
+            requirement_id=body.requirement_id,
+            node_token=body.node_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = aas.save_automation_config(app, {"qa_process": result.get("qa_process") or {}})
+    db.commit()
+    result["qa_process"] = saved.get("qa_process") or result.get("qa_process") or {}
+    return {"code": 200, "ok": True, "data": result}
+
+
+@router.post("/qa-process/import/{app_id}")
+def qa_process_import(app_id: str, body: CoverImportBody, db: Session = Depends(get_db)):
+    """把外部脑图或用例草稿导入当前需求，不走生成模型。"""
+    from server.services.cover_import import import_cover
+
+    app = _get_app(db, app_id)
+    cfg = aas.get_automation_config(app)
+    try:
+        result = import_cover(
+            qa_process=cfg.get("qa_process") or {},
+            requirement_id=body.requirement_id,
+            kind=body.kind,
+            text=body.text,
+            filename=body.filename,
+            replace=body.replace,
+            package=aas.package_for_app(app),
+            app_id=app.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = aas.save_automation_config(app, {"qa_process": result.get("qa_process") or {}})
+    db.commit()
+    result["qa_process"] = saved.get("qa_process") or result.get("qa_process") or {}
+    return {"code": 200, "ok": True, "data": result}
+
+
 @router.post("/qa-process/tick/{app_id}")
 def qa_process_tick(app_id: str, body: QaProcessTickBody, db: Session = Depends(get_db)):
-    """角色自动推进：分析需求、写脑图、补用例草稿。不改验收/发版门禁，不自动下发设备。"""
-    from server.services.qa_role_jobs import tick
+    """投递角色推进任务，立刻返回 job_id。脑图/用例在后台跑，前端轮询进度。"""
+    from server.core.database import SessionLocal
+    from server.services import qa_process_jobs as cover_jobs
 
     app = _get_app(db, app_id)
     cfg = aas.get_automation_config(app)
     cases = aas.list_app_cases(app)
-    result = tick(
-        qa_process=cfg.get("qa_process") or {},
-        cases=cases,
-        requirement_id=body.requirement_id,
-        app_id=app.id,
-        app_name=app.name or "",
-        user_note=body.user_note,
-        force=body.force,
-        jobs=body.jobs or [],
-    )
-    saved = aas.save_automation_config(app, {"qa_process": result.get("qa_process") or {}})
-    qa = saved.get("qa_process") or result.get("qa_process") or {}
-    db.commit()
-    return {
-        "code": 200,
-        "ok": True,
-        "data": {
-            "qa_process": qa,
-            "actions": result.get("actions") or [],
-            "autonomy": result.get("autonomy") or {},
-            "usage": result.get("usage") or {},
+    package = aas.package_for_app(app)
+    try:
+        job = cover_jobs.create(
+            app_id=app.id,
+            requirement_id=body.requirement_id or "",
+            jobs=body.jobs or [],
+        )
+    except cover_jobs.JobConflict as exc:
+        snap = exc.job.public()
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "已有推进任务在跑", "job": snap},
+        ) from exc
+
+    def flush(doc: dict) -> None:
+        with SessionLocal() as session:
+            row = session.query(App).filter(App.id == app.id).first()
+            if not row:
+                return
+            aas.save_automation_config(row, {"qa_process": doc})
+            session.commit()
+
+    job.flush = flush
+    job.report(phase="queued", label="已排队")
+    # 先落一条 cover_job，刷新页面也能看到「推进中」
+    seed = dict(cfg.get("qa_process") or {})
+    job.save(seed)
+
+    threading.Thread(
+        target=_tick_in_background,
+        kwargs={
+            "app_id": app.id,
+            "app_name": app.name or "",
+            "package": package,
+            "qa_process": cfg.get("qa_process") or {},
+            "cases": cases,
+            "job_id": job.id,
+            "requirement_id": body.requirement_id or "",
+            "user_note": body.user_note or "",
+            "force": body.force,
+            "jobs": body.jobs or [],
+            "point_ids": body.point_ids or [],
+            "rewrite_stubs": body.rewrite_stubs,
+            "replace_cases": body.replace_cases,
         },
-    }
+        daemon=True,
+        name=f"qa-tick-{job.id}",
+    ).start()
+    return {"code": 200, "ok": True, "data": {"job_id": job.id, "job": job.public()}}
+
+
+@router.get("/qa-process/job/{job_id}")
+def qa_process_job(job_id: str):
+    """轮询推进任务进度。分片结果已流式落库时，一并带回最新 qa_process。"""
+    from server.services import qa_process_jobs as cover_jobs
+
+    job = cover_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    data = {"job": job.public()}
+    if isinstance(job.doc, dict):
+        data["qa_process"] = job.doc
+    if job.status in ("done", "cancelled", "error") and job.result:
+        data["actions"] = job.result.get("actions") or []
+        data["autonomy"] = job.result.get("autonomy") or {}
+        data["usage"] = job.result.get("usage") or {}
+    return {"code": 200, "ok": True, "data": data}
+
+
+@router.post("/qa-process/job/{job_id}/cancel")
+def qa_process_job_cancel(job_id: str):
+    """取消推进任务。正在进行的那一次模型调用会跑完，之后不再发新请求。"""
+    from server.services import qa_process_jobs as cover_jobs
+
+    job = cover_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    job.cancel()
+    return {"code": 200, "ok": True, "data": {"job": job.public()}}
+
+
+def _tick_in_background(
+    *,
+    app_id: str,
+    app_name: str,
+    package: str,
+    qa_process: dict,
+    cases: list,
+    job_id: str,
+    requirement_id: str,
+    user_note: str,
+    force: bool,
+    jobs: list,
+    point_ids: list,
+    rewrite_stubs: bool,
+    replace_cases: bool,
+) -> None:
+    from server.services.ai import app_profile as ap
+    from server.services import qa_process_jobs as cover_jobs
+    from server.services.qa_role_jobs import tick
+
+    job = cover_jobs.get(job_id)
+    if not job:
+        return
+    # 画像和任务都挂在 contextvar 上，后台线程必须自己绑；漏了就是 prompt 丢术语表、进度条不走。
+    prof_tok = ap.bind(package=package)
+    job_tok = cover_jobs.bind(job)
+    try:
+        job.report(phase="running", label="开始推进")
+        result = tick(
+            qa_process=qa_process,
+            cases=cases,
+            requirement_id=requirement_id,
+            app_id=app_id,
+            app_name=app_name,
+            user_note=user_note,
+            force=force,
+            jobs=jobs,
+            point_ids=point_ids,
+            rewrite_stubs=rewrite_stubs,
+            replace_cases=replace_cases,
+        )
+        job.finish(result)
+    except cover_jobs.Cancelled:
+        logging.info("qa tick cancelled app=%s job=%s", app_id, job_id)
+        if isinstance(job.doc, dict):
+            job.result = {
+                "qa_process": job.doc,
+                "actions": [{"role": "system", "action": "cancelled", "detail": "已取消"}],
+                "autonomy": (job.doc.get("autonomy") if isinstance(job.doc.get("autonomy"), dict) else {}),
+                "usage": {},
+            }
+        job.mark_cancelled()
+    except Exception as exc:
+        logging.exception("qa tick failed app=%s job=%s", app_id, job_id)
+        job.fail(str(exc)[:240])
+    finally:
+        cover_jobs.release(job)
+        cover_jobs.reset(job_tok)
+        ap.reset(prof_tok)
 
 
 class FigmaSyncBody(BaseModel):

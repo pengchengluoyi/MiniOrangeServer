@@ -37,7 +37,6 @@ profiles:
       - 用户协议与隐私
     screen_text_patterns:
       - 不同意
-      - 造物者
       - 隐私条款
       - 用户协议
       - 点击.*同意
@@ -203,7 +202,7 @@ profiles:
       icon_row: 0.10
       anchor: 0.55
     prefer_icon_row: false
-    description: 输入手机号 + 获取验证码；造好物等常见子页
+    description: 输入手机号 + 获取验证码
 
   - key: one_click_login
     title: 一键登录页
@@ -357,12 +356,9 @@ profiles:
       - feed
       - 推荐
       - 发现
-      - 造物秀
     screen_text_patterns:
-      - 造物秀
       - 关注
       - 推荐流
-      - AI\s*创意
     weights:
       clip: 0.28
       ocr: 0.35

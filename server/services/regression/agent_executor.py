@@ -89,6 +89,21 @@ _CATEGORY_LABEL = {
 }
 
 
+# 路径/入口类知识：标题、分类、标签命中即视为「怎么走」说明（与具体业务词无关）
+_PATH_KNOWLEDGE_RE = re.compile(
+    r"如何进入|怎么进|如何打开|怎么打开|入口|路径|操作方式|操作说明|导航|定位方式|步骤说明|怎么去",
+    re.I,
+)
+# 决策看起来在选入口/跳转时，才做「是否遵循路径知识」的纠正
+_NAV_ACT_RE = re.compile(r"进入|点击|打开|前往|切换到|跳到|底部|顶部|导航|tab", re.I)
+_KNOWLEDGE_TOKEN_STOP = {
+    "点击", "输入", "勾选", "页面", "步骤", "进行", "成功", "失败", "登录", "打开",
+    "关闭", "测试", "用例", "操作", "验证", "检查", "进入", "以后", "之后", "然后",
+    "可以", "需要", "当前", "屏幕", "应用", "如何", "怎么", "以及", "或者", "一个",
+    "任意", "说明", "方式", "正确", "本应用", "请按", "实际", "界面", "补充",
+}
+
+
 @dataclass
 class AgentOptions:
     max_steps: int = 25                  # 决策预算（wait 不占）
@@ -253,6 +268,251 @@ def case_text_blob(case_spec: CaseSpec) -> str:
     return "\n".join(parts)
 
 
+def case_steps_text(case_spec: CaseSpec, *, max_chars: int = 1200) -> str:
+    """用例操作步骤原文（优先 steps_raw），供知识库检索带上意图，不只靠 OCR。"""
+    raw = case_spec.raw_row or {}
+    text = ""
+    if isinstance(raw, dict):
+        text = str(raw.get("steps_raw") or "").strip()
+    if not text:
+        lines: list[str] = []
+        for i, step in enumerate(case_spec.steps or [], 1):
+            inst = str(getattr(step, "instruction", "") or "").strip()
+            if inst:
+                lines.append(f"{i}. {inst}")
+        text = "\n".join(lines).strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "…"
+    return text
+
+
+def _clip_knowledge_bit(text: str, max_chars: int) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if len(t) > max_chars:
+        return t[:max_chars].rstrip() + "…"
+    return t
+
+
+def build_case_intent_for_knowledge(
+    *,
+    case_name: str = "",
+    goal: str = "",
+    steps_text: str = "",
+    preconditions: str = "",
+    success_criteria: str = "",
+    open_checkpoints: list[str] | None = None,
+) -> str:
+    """组装稳定的用例意图文本，保证入口类知识能靠步骤/目标命中。"""
+    parts: list[str] = []
+    for bit in (
+        _clip_knowledge_bit(case_name, 200),
+        _clip_knowledge_bit(goal, 400),
+        _clip_knowledge_bit(steps_text, 1200),
+        _clip_knowledge_bit(preconditions, 300),
+    ):
+        if bit:
+            parts.append(bit)
+    open_lines = [str(x).strip() for x in (open_checkpoints or []) if str(x).strip()]
+    if open_lines:
+        joined = "\n".join(open_lines)
+        parts.append(_clip_knowledge_bit(joined, 600))
+    sc = _clip_knowledge_bit(success_criteria, 300)
+    if sc:
+        parts.append(sc)
+    return "\n".join(parts).strip()
+
+
+def build_knowledge_query(
+    *,
+    case_intent: str = "",
+    extra: str = "",
+    last_action: str = "",
+    history: str = "",
+    screen: str = "",
+) -> str:
+    """知识库检索 query：用例意图优先，再叠本步动作/历史/屏幕文案。"""
+    bits = [case_intent, extra, last_action, history, screen]
+    return "\n".join(str(x).strip() for x in bits if str(x).strip())
+
+
+def _knowledge_intent_tokens(text: str) -> list[str]:
+    """从用例意图里抽出可对齐知识的关键短语（中英混合，无业务特判词表）。"""
+    raw = (text or "").strip().lower()
+    if not raw:
+        return []
+    found: list[str] = []
+    # 引号内短语优先（常是控件/页面名）
+    for m in re.finditer(r"[「\"'“](.{1,24})[」\"'”]", raw):
+        t = m.group(1).strip()
+        if len(t) >= 2 and t not in found:
+            found.append(t)
+    for tok in re.split(r"[\s,，、/\|;；:：\n\r\t.。！？\(\)（）\[\]【】]+", raw):
+        t = tok.strip()
+        if len(t) < 2 or t in found or t in _KNOWLEDGE_TOKEN_STOP:
+            continue
+        if re.fullmatch(r"[a-z0-9_\-]{3,}", t) or (len(t) >= 2 and re.search(r"[\u4e00-\u9fff]", t)):
+            found.append(t[:24])
+        if len(found) >= 24:
+            break
+    return found
+
+
+def _distinctive_knowledge_tokens(text: str) -> set[str]:
+    """从知识正文抽出可核对是否被决策引用的控件/路径词。"""
+    raw = (text or "").strip().lower()
+    out: set[str] = set()
+    if not raw:
+        return out
+    for m in re.finditer(r"[「\"'“](.{1,24})[」\"'”]", raw):
+        t = m.group(1).strip()
+        if len(t) >= 2 and t not in _KNOWLEDGE_TOKEN_STOP:
+            out.add(t)
+    for tok in re.split(r"[\s,，、/\|;；:：\n\r\t.。！？\(\)（）\[\]【】\d]+", raw):
+        t = tok.strip()
+        if len(t) < 2 or t in _KNOWLEDGE_TOKEN_STOP:
+            continue
+        if re.fullmatch(r"[a-z0-9_\-]{3,}", t) or (len(t) >= 2 and re.search(r"[\u4e00-\u9fff]", t)):
+            out.add(t[:24])
+        if len(out) >= 40:
+            break
+    return out
+
+
+def _knowledge_placeholder_body(body: str) -> bool:
+    """失败沉淀但尚未补「正确操作方式」的空壳说明，不宜抢路径知识的位。"""
+    text = body or ""
+    if "【本应用正确操作方式】" not in text:
+        return False
+    after = text.split("【本应用正确操作方式】", 1)[-1]
+    compact = re.sub(r"[\s\d\.、．]+", "", after)
+    compact = compact.replace("（请按实际界面补充，保存后规划执行将自动匹配）", "")
+    return len(compact) < 4
+
+
+def is_path_knowledge_item(row: dict[str, Any]) -> bool:
+    """是否像「怎么走/入口/操作路径」说明（通用启发式，不绑业务词）。"""
+    blob = " ".join(
+        str(x) for x in (
+            row.get("title") or "",
+            row.get("category") or "",
+            " ".join(str(t) for t in (row.get("tags") or [])),
+        )
+    )
+    if _PATH_KNOWLEDGE_RE.search(blob):
+        return True
+    cat = str(row.get("category") or "")
+    return "导航" in cat or cat.lower() in {"ui导航", "navigation", "nav"}
+
+
+def rank_knowledge_for_case_intent(
+    rows: list[dict[str, Any]],
+    *,
+    case_intent: str,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """按与用例意图的重叠度重排；空壳失败笔记降权；路径类同重叠时优先。"""
+    tokens = _knowledge_intent_tokens(case_intent)
+    scored: list[tuple[tuple, dict[str, Any]]] = []
+    for row in rows or []:
+        title = str(row.get("title") or "")
+        tags = " ".join(str(t) for t in (row.get("tags") or []))
+        body = str(row.get("content") or row.get("prompt") or "")
+        blob = f"{title} {tags} {body[:400]}".lower()
+        overlap = sum(1 for t in tokens if t and t in blob)
+        placeholder = 1 if _knowledge_placeholder_body(body) else 0
+        used = 1 if row.get("used") else 0
+        pathish = 1 if is_path_knowledge_item(row) else 0
+        pct = int(row.get("match_pct") or 0)
+        score = int(row.get("score") or 0)
+        # used → 意图重叠 → 路径类 → 非空壳 → 原始匹配分
+        key = (used, overlap, pathish, 0 if placeholder else 1, pct, score)
+        scored.append((key, row))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[: max(1, int(limit or 3))]]
+
+
+def build_knowledge_hint_text(
+    rows: list[dict[str, Any]],
+    *,
+    case_intent: str = "",
+) -> str:
+    """组装注入 decide 的知识块：路径类前置；文案不含业务特判。
+
+    case_intent 保留参数以兼容调用方；本步 used 条目已由检索+重排筛过，路径类一律前置。
+    """
+    del case_intent  # 检索阶段已用意图对齐；此处只做路径/非路径分桶
+    used = [r for r in (rows or []) if r.get("used") and r.get("prompt")]
+    if not used:
+        return ""
+    primary: list[str] = []
+    secondary: list[str] = []
+    for r in used:
+        prompt = str(r.get("prompt") or "")
+        if is_path_knowledge_item(r):
+            primary.append(prompt)
+        else:
+            secondary.append(prompt)
+    parts: list[str] = []
+    if primary:
+        parts.append(
+            "【优先执行·操作路径】下列知识写明了与当前目标/检查点相关的入口或步骤，"
+            "请按知识中的控件与路径执行；不要改用知识未写明的替代入口。"
+        )
+        parts.extend(primary)
+    if secondary:
+        if primary:
+            parts.append("【其他相关参考】")
+        parts.extend(secondary)
+    if not parts:
+        parts = [str(r.get("prompt") or "") for r in used if r.get("prompt")]
+    return "\n".join(p for p in parts if p).strip()
+
+
+def build_path_knowledge_nudge(
+    decision,
+    rows: list[dict[str, Any]],
+    *,
+    case_intent: str = "",
+) -> str:
+    """通用纠正：已命中路径类知识，但决策未引用知识中的关键控件/路径词。"""
+    del case_intent  # 本步 used 路径知识已由检索对齐意图
+    path_rows = [
+        r for r in (rows or [])
+        if r.get("used") and is_path_knowledge_item(r) and (r.get("prompt") or r.get("content"))
+    ]
+    if not path_rows:
+        return ""
+    thought = f"{getattr(decision, 'thought', '') or ''} {getattr(decision, 'expected_after', '') or ''}"
+    if not _NAV_ACT_RE.search(thought):
+        return ""
+    kb_tokens: set[str] = set()
+    for r in path_rows:
+        kb_tokens |= _distinctive_knowledge_tokens(
+            f"{r.get('title') or ''}\n{r.get('content') or ''}"
+        )
+    if len(kb_tokens) < 2:
+        return ""
+    thought_l = thought.lower()
+    hit = sum(1 for t in kb_tokens if t in thought_l)
+    # 几乎完全没引用知识里的路径词 → 视为另辟路径
+    if hit >= max(1, len(kb_tokens) // 5):
+        return ""
+    lines = [
+        str(r.get("prompt") or "").strip() or f"「{r.get('title')}」"
+        for r in path_rows
+    ]
+    return (
+        "【纠正】本步已命中与目标相关的操作路径知识，但你刚才的决策未按知识中的控件/入口执行。"
+        "请按下列知识重选下一步；不要改用知识未写明的替代入口"
+        "（仅当知识与当前屏幕明显冲突时可偏离，并在 thought 写明）：\n"
+        + "\n".join(lines)
+    )
+
+
 def case_needs_nested_publish(case_spec: CaseSpec, extra: str = "") -> bool:
     """步骤里嵌「再发一条」整段创作发布时，发帖成功前不占用主决策预算。"""
     blob = case_text_blob(case_spec) + "\n" + (extra or "")
@@ -273,6 +533,8 @@ class AgentExecutor:
         options: Optional[AgentOptions] = None,
         baseline_hint: str = "",
         case_preconditions: str = "",
+        case_name: str = "",
+        case_steps_text: str = "",
         nested_publish: bool = False,
         knowledge_hits: list[dict[str, Any]] | None = None,
     ):
@@ -286,6 +548,8 @@ class AgentExecutor:
         self.opts = options or AgentOptions()
         self.baseline_hint = baseline_hint
         self.case_preconditions = case_preconditions or ""
+        self.case_name = case_name or ""
+        self.case_steps_text = case_steps_text or ""
         self._nested_publish = bool(nested_publish)
         self.knowledge_hits = knowledge_hits or []
         self.shared: dict[str, Any] = {}
@@ -303,6 +567,7 @@ class AgentExecutor:
         self._recovery_rounds = 0  # 本条用例已唤起恢复的轮数
         self._recovery_hits: list[dict[str, Any]] = []  # 命中过的规则，进报告
         self._checked_at_start = False  # 开场是否做过一次恢复检查
+        self._kb_path_retried: set[int] = set()  # 已对「忽略路径知识」做过纠正重决的步号
 
     # ---------- prompt 片段 ----------
 
@@ -348,8 +613,27 @@ class AgentExecutor:
         labels = {"published": "发布", "before": "之前", "fact": "记住", "observed": "观察"}
         return "\n".join(f"- [{labels.get(kind, kind)}] {text}" for kind, text in self._memory)
 
+    def _case_intent_for_knowledge(self) -> str:
+        open_cps = [
+            str(cp.description or "").strip()
+            for cp in (self.goal.checkpoints or [])
+            if not getattr(cp, "done", False) and str(cp.description or "").strip()
+        ]
+        return build_case_intent_for_knowledge(
+            case_name=self.case_name,
+            goal=self.goal.goal or self.case_brief,
+            steps_text=self.case_steps_text,
+            preconditions=self.case_preconditions,
+            success_criteria=self.goal.success_criteria or "",
+            open_checkpoints=open_cps,
+        )
+
     def _knowledge_query(self, *, extra: str = "", dump=None) -> str:
-        """本步上下文：屏幕文案 + 最近动作，不用整条用例文本，避免每步分数一样。"""
+        """本步检索上下文：用例意图（目标/步骤/未完成检查点）+ 最近动作 + 屏幕文案。
+
+        入口类知识（如「如何进入 Agent / 对话历史」）往往不出现在 OCR 里；
+        只靠屏幕会误匹配首页 feed 等无关说明，因此必须把用例意图稳定带进 query。
+        """
         screen = ""
         if dump is not None:
             try:
@@ -368,9 +652,13 @@ class AgentExecutor:
             hist = (self._history_block() or "")[-500:]
         except Exception:
             hist = ""
-        bits = [extra, last, hist, screen]
-        query = "\n".join(str(x).strip() for x in bits if str(x).strip())
-        return query.strip()
+        return build_knowledge_query(
+            case_intent=self._case_intent_for_knowledge(),
+            extra=extra,
+            last_action=last,
+            history=hist,
+            screen=screen,
+        )
 
     def _match_step_knowledge(self, *, extra: str = "", dump=None) -> list[dict[str, Any]]:
         from server.services.system_settings_service import (
@@ -380,10 +668,11 @@ class AgentExecutor:
         )
         query = self._knowledge_query(extra=extra, dump=dump)
         try:
+            # 多取一些再按用例意图重排，避免首页 OCR 噪声挤掉入口类知识
             hits = match_testing_knowledge(
                 query,
                 app_id=str(getattr(self.ctx, "app_id", "") or ""),
-                limit=3,
+                limit=8,
             )
         except Exception as exc:
             SLog.w(TAG, f"[{self.run_id}] step knowledge match failed: {type(exc).__name__}: {exc}")
@@ -409,14 +698,31 @@ class AgentExecutor:
                 "skip_reason": str(item.get("skip_reason") or ""),
                 "prompt": knowledge_prompt_snippet(item) if used else "",
             })
-        self.knowledge_hits = rows
-        return rows
+        ranked = rank_knowledge_for_case_intent(
+            rows,
+            case_intent=self._case_intent_for_knowledge(),
+            limit=3,
+        )
+        self.knowledge_hits = ranked
+        return ranked
 
     def _knowledge_hint(self, rows: list[dict[str, Any]]) -> str:
-        parts = [r["prompt"] for r in rows if r.get("used") and r.get("prompt")]
-        if not parts:
-            return ""
-        return "【knowledge 命中提示（参考，不是脚本）】\n" + "\n".join(parts)
+        return build_knowledge_hint_text(
+            rows,
+            case_intent=self._case_intent_for_knowledge(),
+        )
+
+    def _path_knowledge_nudge(
+        self,
+        decision,
+        rows: list[dict[str, Any]],
+    ) -> str:
+        """路径类知识已命中但决策未引用知识控件时，生成通用纠正提示。"""
+        return build_path_knowledge_nudge(
+            decision,
+            rows,
+            case_intent=self._case_intent_for_knowledge(),
+        )
 
     def _screen_dump(self):
         try:
@@ -585,6 +891,26 @@ class AgentExecutor:
                 memory_block=self._memory_block(),
                 provider_id=self.provider_id, timeout_sec=self.opts.step_timeout_sec,
             )
+            nudge = self._path_knowledge_nudge(decision, step_knowledge)
+            if nudge and step_idx not in self._kb_path_retried:
+                self._kb_path_retried.add(step_idx)
+                SLog.w(
+                    TAG,
+                    f"[{self.run_id}] step{step_idx} 决策未遵循路径知识，纠正重决一次",
+                )
+                decision = planner.decide_next_action(
+                    goal=self.goal.goal,
+                    success_criteria=self.goal.success_criteria,
+                    checkpoints_block=self._checkpoints_block(),
+                    run_context=self.ctx,
+                    history_block=self._history_block(),
+                    width=screen.width, height=screen.height,
+                    image_base64=screen.image_base64, image_mime=screen.image_mime,
+                    baseline_hint=self.baseline_hint,
+                    knowledge_hint=f"{knowledge_hint}\n\n{nudge}".strip(),
+                    memory_block=self._memory_block(),
+                    provider_id=self.provider_id, timeout_sec=self.opts.step_timeout_sec,
+                )
             cap = decision.action.capability_id if decision.action else ""
             self._ingest_decision_memory(decision, cap)
             SLog.i(TAG, f"[{self.run_id}] step{step_idx} status={decision.status} "
@@ -694,6 +1020,11 @@ class AgentExecutor:
                     result = result.model_copy(update={"thumb": thumb})
                 except Exception:
                     pass
+            if step_knowledge:
+                try:
+                    result = result.model_copy(update={"knowledge": list(step_knowledge)})
+                except Exception:
+                    pass
             self.results.append(result)
             self._push_step(step_idx, decision, result_status=str(result.status.value),
                             summary=result.summary or result.error, screen_hash=shot_hash,
@@ -704,6 +1035,7 @@ class AgentExecutor:
                 result_status=str(result.status.value),
                 summary=result.summary or result.error,
                 elapsed_ms=int(getattr(result, "elapsed_ms", 0) or 0),
+                knowledge=step_knowledge,
             )
             # 有实际动作推进 → 清掉上次的 done 反馈
             self._assert_feedback = ""
@@ -1372,6 +1704,8 @@ def run_agent_case(
         run_id=run_id, case_id=case_spec.case_id, case_brief=goal.goal,
         provider_id=provider_id, options=opts, baseline_hint=baseline_hint,
         case_preconditions=case_spec.preconditions,
+        case_name=case_spec.name or "",
+        case_steps_text=case_steps_text(case_spec),
         nested_publish=nested,
     )
     report = ex.run()

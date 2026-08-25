@@ -19,6 +19,9 @@ from server.services.ai.roles_catalog import (
 )
 from server.services.ai import app_atlas as atlas
 from server.services.ai import dispatch_log as dispatch
+from server.services.ai.concurrency import map_llm
+from server.services.ai.cover import checks as cover_checks
+from server.services import qa_process_jobs as cover_jobs
 from server.services.qa_process_assist import artifact
 
 LLM_JOBS = ("analyze_req", "draft_mindmap", "draft_cases", "propose_atlas")
@@ -94,15 +97,17 @@ def _source_text(req: dict) -> str:
         und.get("source_excerpt") or "",
         "\n".join(str(x) for x in (und.get("ac") or []) if x),
     ]
-    seen = set()
-    out = []
+    # 去重必须看包含关系，不能只看相等：understanding.source_excerpt 是 source_text 的
+    # 前 20000 字前缀（见 apply_analyze），原文超过 20000 字时两者不相等，
+    # 纯 == 去重会把同一份 PRD 拼进去两次，直接让 analyze_req 的输入 token 翻倍。
+    kept: list[str] = []
     for x in bits:
         s = str(x).strip()
-        if not s or s in seen:
+        if not s or any(s in k for k in kept):
             continue
-        seen.add(s)
-        out.append(s)
-    return "\n".join(out)
+        kept = [k for k in kept if k not in s]
+        kept.append(s)
+    return "\n".join(kept)
 
 
 def _analysis_bundle(req: dict) -> dict:
@@ -125,21 +130,55 @@ def _analysis_bundle(req: dict) -> dict:
     }
 
 
-def _ask_json(system: str, user: str, *, max_tokens: int = 2500, timeout_sec: int = 90, role: str = "", job: str = "") -> tuple[Optional[dict], dict]:
-    from server.services.ai.regression.llm_client import call_chat_text, resolve_regression_provider
+def _ask_json(
+    system: str,
+    user: str,
+    *,
+    max_tokens: int = 2500,
+    timeout_sec: int = 90,
+    role: str = "",
+    job: str = "",
+    stable: str = "",
+    response_schema: Optional[dict] = None,
+) -> tuple[Optional[dict], dict]:
+    """问一次模型要 JSON。
 
+    stable：逐次调用完全不变的上下文（应用画像、知识库、契约）。单独成一条 message 且
+    排在易变内容之前，这样 provider 的前缀缓存才可能命中 —— 分片并发时收益被放大几十倍。
+
+    应用事实（术语表、主导航）由这里统一从画像取并排在 stable 之前，调用方不用管：
+    prompt 里的应用字面量被摘干净之后，必须有人把它补回来，否则就是把应用知识删了。
+    没接入画像的应用这一段是空的，不会拿别人的事实冒充。
+
+    返回的 meta 里带 truncated / salvaged，调用方**必须**检查：截断意味着结果不完整，
+    当成功处理就会静默丢覆盖。
+    """
+    from server.services.ai.regression.llm_client import call_chat_text, resolve_regression_provider
+    from server.services.ai import app_profile as ap
+
+    # 取消点：正在跑的那一次模型调用会跑完，下一次进这里才停。
+    cover_jobs.check()
     provider, gate = resolve_regression_provider()
     tok = dispatch.bind(role=role, job=job, skill=job)
     if not provider:
         dispatch.record_job(status="skipped", job=job or "llm", role=role, detail=gate.get("reason") or "未配置模型")
         dispatch.reset(tok)
         return None, {"error": gate.get("reason") or "未配置「可用 + 用例」模型", "engine": "none"}
+    messages = [{"role": "system", "content": system}]
+    # 应用事实比图谱更少变，排在它前面，缓存前缀才切得干净
+    facts = ap.current().facts_prompt()
+    if facts:
+        messages.append({"role": "user", "content": facts})
+    if stable:
+        messages.append({"role": "user", "content": stable})
+    messages.append({"role": "user", "content": user})
     parsed, meta = call_chat_text(
         provider=provider,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages=messages,
         temperature=0.2,
         max_tokens=max_tokens,
         timeout_sec=timeout_sec,
+        response_schema=response_schema,
     )
     dispatch.reset(tok)
     if not isinstance(parsed, dict):
@@ -224,20 +263,10 @@ def _looks_app(text: str) -> bool:
 def analyze_req(req: dict, cases: list | None = None, atlas_doc: dict | None = None, *, user_note: str = "") -> dict:
     text = _source_text(req)
     und = req.get("understanding") if isinstance(req.get("understanding"), dict) else {}
-    user = json.dumps(
+    # 稳定块：图谱和用例库是应用级的，一次 tick 里遍历多条需求时逐字节相同 → 命中前缀缓存。
+    stable = json.dumps(
         {
-            "title": req.get("title"),
-            "external_id": req.get("external_id"),
-            "source": text,
             "app_atlas": atlas.compact_atlas(atlas_doc),
-            "human_feedback": str(user_note or req.get("analyst_feedback") or "").strip(),
-            "previous_analysis": {
-                "summary": req.get("summary") or "",
-                "change_kind": und.get("change_kind") or "",
-                "baseline": und.get("baseline") or "",
-                "delta": und.get("delta") or "",
-                "impact": und.get("impact") or {},
-            },
             "existing_cases": [
                 {
                     "case_id": c.get("case_id"),
@@ -246,6 +275,23 @@ def analyze_req(req: dict, cases: list | None = None, atlas_doc: dict | None = N
                 }
                 for c in (cases or [])[:40]
             ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    user = json.dumps(
+        {
+            "title": req.get("title"),
+            "external_id": req.get("external_id"),
+            "source": text,
+            "human_feedback": str(user_note or req.get("analyst_feedback") or "").strip(),
+            "previous_analysis": {
+                "summary": req.get("summary") or "",
+                "change_kind": und.get("change_kind") or "",
+                "baseline": und.get("baseline") or "",
+                "delta": und.get("delta") or "",
+                "impact": und.get("impact") or {},
+            },
             "note": "先对照 app_atlas。必须挖入口（不要默认首页）、新增 vs 维持、上传异常兜底、运营平台/Web。platforms 用 app/web/e2e。human_feedback 必须逐条落实。",
         },
         ensure_ascii=False,
@@ -254,13 +300,39 @@ def analyze_req(req: dict, cases: list | None = None, atlas_doc: dict | None = N
         REQ_ANALYST_SYSTEM_PROMPT,
         user,
         max_tokens=8192,
-        timeout_sec=180,
+        timeout_sec=240,
         role="req-analyst",
         job="analyze_req",
+        stable=stable,
     ) if text else (None, {"error": "没有需求原文"})
     payload = parsed if parsed else _rule_analyze(req)
     engine = "llm" if parsed else "rule"
-    suggest = "已拆验收标准和测试点" if engine == "llm" else f"规则拆点（{meta.get('error') or '无模型'}）"
+    failures: list = []
+    if not parsed:
+        failures.append(
+            {
+                "reason": "llm_failed",
+                "detail": str(meta.get("error") or "没有需求原文")[:160],
+                "fallback": "rule_analyze",
+            }
+        )
+    elif meta.get("truncated"):
+        failures.append(
+            {
+                "reason": "truncated",
+                "detail": "需求分析输出被截断"
+                + ("，已抢救出前面完整的字段，后面的可能缺失" if meta.get("salvaged") else ""),
+                "fallback": "salvaged" if meta.get("salvaged") else "",
+            }
+        )
+    if engine == "llm" and not failures:
+        suggest = f"已拆验收标准和测试点 · {len(payload.get('points') or [])} 个测试点"
+    elif engine == "llm":
+        suggest = f"分析不完整：{failures[0].get('detail')}"
+    else:
+        suggest = f"规则拆点（{meta.get('error') or '无模型'}）"
+    payload = dict(payload)
+    payload["failures"] = failures
     return _with_engine(
         artifact(
             job="analyze_req",
@@ -274,6 +346,431 @@ def analyze_req(req: dict, cases: list | None = None, atlas_doc: dict | None = N
     )
 
 
+def _mindmap_point_digest(prev: dict) -> list:
+    """上一版脑图只回传「点的 id + 文案」，不回传整棵树。
+
+    整棵树（含每个节点的 detail / path / case_ids）动辄几千 token，模型只需要知道
+    上一版有哪些点、不要漏掉，不需要原样看见结构。
+    """
+    return [
+        {"id": p.get("point_id") or p.get("id") or "", "text": str(p.get("text") or "")[:40]}
+        for p in collect_mindmap_points(prev)
+        if str(p.get("text") or "").strip()
+    ][:200]
+
+
+def _compact_mindmap_for_prompt(node: dict, *, max_detail: int = 48) -> dict:
+    """修订模式用的压缩树：保留结构/id，缩短 detail，去掉无用字段。"""
+    if not isinstance(node, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("id", "text", "title", "kind", "platform", "point_id", "path"):
+        if node.get(key) not in (None, "", []):
+            out[key] = node.get(key)
+    detail = str(node.get("detail") or "").strip()
+    if detail:
+        out["detail"] = detail if len(detail) <= max_detail else detail[:max_detail]
+    case_ids = [str(x) for x in (node.get("case_ids") or []) if str(x).strip()]
+    if case_ids:
+        out["case_ids"] = case_ids[:8]
+    kids = [_compact_mindmap_for_prompt(c, max_detail=max_detail) for c in (node.get("children") or []) if isinstance(c, dict)]
+    if kids:
+        out["children"] = kids
+    return out
+
+
+def _find_platform_branch(mindmap: dict, platform: str, label: str = "") -> dict:
+    """从上一版整树里抠出某一端的枝；没有则返回空 platform 根。"""
+    kids = [c for c in ((mindmap or {}).get("children") or []) if isinstance(c, dict)]
+    if not kids:
+        return {
+            "id": f"{platform}-root",
+            "text": label or platform,
+            "kind": "platform",
+            "platform": platform,
+            "children": [],
+        }
+    # 复用抽取逻辑：包一层假根
+    return _extract_platform_branch({"children": kids}, platform, label or platform)
+
+
+def _capture_mindmap_retry_note(*, note: str, req: dict) -> Optional[dict]:
+    """重试脑图对话框里的评论 → 测试知识库，直接 approved。"""
+    text = str(note or "").strip()
+    if not text:
+        return None
+    try:
+        from server.services.system_settings_service import upsert_knowledge_item
+    except Exception:
+        return None
+    title_base = str(req.get("title") or req.get("id") or "需求").strip() or "需求"
+    app_id = str(dispatch.ctx().get("app_id") or "").strip()
+    try:
+        return upsert_knowledge_item(
+            {
+                "title": f"脑图修订·{title_base[:40]}",
+                "content": text,
+                "category": "测试脑图",
+                "tags": ["mindmap-retry", str(req.get("id") or "").strip()],
+                "app_ids": [app_id] if app_id else [],
+                "source": "manual",
+                "review_status": "approved",
+                "enabled": True,
+            }
+        )
+    except Exception:
+        return None
+
+
+MINDMAP_TOKENS = 8192
+MINDMAP_SKELETON_TOKENS = 2048
+MINDMAP_FILL_TOKENS = 2048
+# 填点截断/空白烧 token 时再打一轮：略加预算 + 强制紧凑，避免再刷 2k 制表符。
+MINDMAP_FILL_RETRY_TOKENS = 3072
+MINDMAP_REVISE_TOKENS = 4096
+MINDMAP_SHARD_TIMEOUT_SEC = 90
+MINDMAP_FILL_COMPACT_NOTE = (
+    "上一次输出无效。这次必须输出紧凑 JSON（尽量单行）："
+    '{"points":[{"text":"可判定的一句话","kind":"正向|异常|边界","detail":""}]}。'
+    "禁止缩进、制表符、无意义空白；普通功能 2~4 个点，最多 5 个。不要输出别的字段。"
+)
+
+
+def _mindmap_platforms(req: dict, package: str = "") -> list[tuple[str, str]]:
+    """按需求分析里的端拆脑图调用。整棵树一次吐 8192 token 必然截断。
+
+    端的枚举和别名来自应用画像（`app_profile`），不写死在这里 —— 换个有小程序或桌面端的
+    应用，写死的三个端会让那部分覆盖无处安放。
+    """
+    from server.services.ai import app_profile as ap
+
+    prof = ap.current(package)
+    und = req.get("understanding") if isinstance(req.get("understanding"), dict) else {}
+    found: set[str] = set()
+
+    def add(raw: str) -> None:
+        sid = prof.surface_of(raw)
+        if sid:
+            found.add(sid)
+
+    for row in und.get("surfaces") or []:
+        if isinstance(row, dict):
+            add(row.get("kind") or row.get("platform") or row.get("name") or "")
+        else:
+            add(row)
+    impact = und.get("impact") if isinstance(und.get("impact"), dict) else {}
+    for p in impact.get("platforms") or []:
+        add(p)
+    for j in und.get("journeys") or []:
+        if isinstance(j, dict):
+            add(j.get("platform") or "")
+    if not found:
+        found = set(prof.declared_surfaces())
+    # 两个以上真实端才有「端到端」可测
+    if len({s for s in found if s != ap.E2E_SURFACE}) >= 2:
+        found.add(ap.E2E_SURFACE)
+    return [pair for pair in prof.surface_options() if pair[0] in found]
+
+
+def _prefix_node_ids(node: dict, prefix: str) -> dict:
+    out = dict(node)
+    nid = str(out.get("id") or "").strip()
+    if nid and not nid.startswith(prefix):
+        out["id"] = f"{prefix}{nid}"
+    kids = []
+    for ch in out.get("children") or []:
+        if isinstance(ch, dict):
+            kids.append(_prefix_node_ids(ch, prefix))
+    out["children"] = kids
+    return out
+
+
+def _extract_platform_branch(parsed: dict, platform: str, label: str, package: str = "") -> dict:
+    from server.services.ai import app_profile as ap
+
+    prof = ap.current(package)
+    children = [c for c in (parsed.get("children") or []) if isinstance(c, dict)]
+    hit = None
+    for c in children:
+        # 模型有时不把端写在 platform 字段上，只写在 text 里（而且用的是画像里的别名，
+        # 例如把 Web 那一枝叫「运营平台」）。两边都认，但只认整段就是端名的情况。
+        plat = prof.surface_of(c.get("platform") or "", loose=False)
+        text_plat = prof.surface_of(c.get("text") or "", loose=False)
+        if platform in (plat, text_plat):
+            hit = c
+            break
+    if hit is None and len(children) == 1:
+        hit = children[0]
+    if hit is None:
+        hit = {
+            "id": f"{platform}-root",
+            "text": label,
+            "kind": "platform",
+            "platform": platform,
+            "children": children,
+        }
+    node = dict(hit)
+    node["kind"] = "platform"
+    node["platform"] = platform
+    node["text"] = label
+    return _prefix_node_ids(node, f"{platform}-")
+
+
+def _module_titles(node: dict) -> list[str]:
+    out = []
+
+    def walk(n: dict, depth: int) -> None:
+        text = str(n.get("text") or "").strip()
+        kind = str(n.get("kind") or "")
+        if depth >= 1 and text and kind in ("module", "feature", "platform"):
+            out.append(text)
+        for ch in n.get("children") or []:
+            if isinstance(ch, dict):
+                walk(ch, depth + 1)
+
+    walk(node, 0)
+    return out[:48]
+
+
+def _merge_platform_children(base: dict, extra: dict) -> dict:
+    have = {str(c.get("text") or "") for c in (base.get("children") or []) if isinstance(c, dict)}
+    kids = [c for c in (base.get("children") or []) if isinstance(c, dict)]
+    for ch in extra.get("children") or []:
+        if not isinstance(ch, dict):
+            continue
+        name = str(ch.get("text") or "")
+        if name and name in have:
+            continue
+        kids.append(ch)
+        if name:
+            have.add(name)
+    out = dict(base)
+    out["children"] = kids
+    return out
+
+
+def _point_node(raw: dict, *, platform: str, parent_path: list, index: int) -> dict:
+    text = str(raw.get("text") or raw.get("title") or "").strip()
+    kind = str(raw.get("kind") or raw.get("point_kind") or "正向").strip() or "正向"
+    path = list(parent_path) + [text] if text else list(parent_path)
+    return {
+        "id": str(raw.get("id") or f"pt-{index + 1}"),
+        "text": text[:40],
+        "kind": "point",
+        "point_kind": kind,
+        "point_id": str(raw.get("point_id") or raw.get("id") or ""),
+        "platform": str(raw.get("platform") or platform or ""),
+        "detail": str(raw.get("detail") or "")[:160],
+        "path": path,
+        "case_ids": list(raw.get("case_ids") or []),
+        "children": [],
+    }
+
+
+def _points_payload(parsed: dict, *, platform: str, parent_path: list) -> list[dict]:
+    if not isinstance(parsed, dict):
+        return []
+    raw = parsed.get("points")
+    if not isinstance(raw, list):
+        # 模型偶尔仍吐一棵小树，从里面把测试点抠出来
+        raw = [n for n in cover_checks.collect_points(parsed)]
+    out = []
+    have = set()
+    for i, item in enumerate(raw or []):
+        if not isinstance(item, dict):
+            continue
+        node = _point_node(item, platform=platform, parent_path=parent_path, index=i)
+        key = str(node.get("text") or "")
+        if not key or key in have:
+            continue
+        have.add(key)
+        out.append(node)
+    return out
+
+
+def _attach_points(feat: dict, points: list[dict]) -> int:
+    kids = [c for c in (feat.get("children") or []) if isinstance(c, dict)]
+    have = {str(c.get("text") or "") for c in kids if cover_checks.is_point(c)}
+    added = 0
+    for p in points:
+        text = str(p.get("text") or "")
+        if not text or text in have:
+            continue
+        kids.append(p)
+        have.add(text)
+        added += 1
+    feat["children"] = kids
+    return added
+
+
+def _draft_mindmap_revise(
+    req: dict,
+    prev: dict,
+    atlas_doc: dict | None,
+    *,
+    user_note: str,
+    stable: str,
+    base_payload: dict,
+) -> dict:
+    """有上一版脑图时的修订路径：按端带走 previous_branch，在基线上改，不整树重写。"""
+    note = str(user_note or "").strip()
+    shards = _mindmap_platforms(req)
+    failures: list = []
+    usage_acc: dict = {}
+    cover_jobs.report(phase="mindmap_revise", label="正在按上一版修订脑图", done=0, total=len(shards) or 1)
+
+    def ask_shard(platform: str, label: str, extra: dict) -> tuple[Optional[dict], dict]:
+        user = json.dumps(
+            {
+                **base_payload,
+                "previous_mindmap": _compact_mindmap_for_prompt(prev),
+                "scope": {
+                    "platform": platform,
+                    "label": label,
+                    **extra,
+                },
+            },
+            ensure_ascii=False,
+        )
+        return _ask_json(
+            MINDMAP_WRITER_SYSTEM_PROMPT,
+            user,
+            max_tokens=MINDMAP_REVISE_TOKENS,
+            timeout_sec=MINDMAP_SHARD_TIMEOUT_SEC,
+            role="mindmap-writer",
+            job="draft_mindmap",
+            stable=stable,
+        )
+
+    def revise_one(pair: tuple[str, str]) -> dict:
+        platform, label = pair
+        prev_branch = _find_platform_branch(prev, platform, label)
+        compact_branch = _compact_mindmap_for_prompt(prev_branch)
+        only = (
+            f"在 previous_branch 上修订 {label} 这一枝。"
+            + (f"必须落实：{note}" if note else "对照需求补漏加深，没点名的节点尽量保留 id。")
+            + "不要另起一棵树，不要把新旧两版拼在一起。"
+        )
+        parsed, meta = ask_shard(
+            platform,
+            label,
+            {
+                "mode": "revise",
+                "previous_branch": compact_branch,
+                "only": only,
+            },
+        )
+        local_fail: list = []
+        if not parsed:
+            local_fail.append(
+                {
+                    "reason": "llm_failed",
+                    "detail": f"{label} 修订：{str(meta.get('error') or '模型没有返回可用脑图')[:120]}",
+                    "fallback": "keep_previous",
+                    "platform": platform,
+                }
+            )
+            return {
+                "platform": platform,
+                "label": label,
+                "branch": prev_branch,
+                "meta": meta,
+                "usage": (meta,),
+                "failures": local_fail,
+            }
+        branch = _extract_platform_branch(parsed, platform, label)
+        if meta.get("truncated"):
+            local_fail.append(
+                {
+                    "reason": "truncated",
+                    "detail": f"{label} 修订被 max_tokens 截断，已尽量保留可解析部分；不足处请再评一次",
+                    "fallback": "salvaged" if meta.get("salvaged") else "",
+                    "platform": platform,
+                }
+            )
+        return {
+            "platform": platform,
+            "label": label,
+            "branch": branch,
+            "meta": meta,
+            "usage": (meta,),
+            "failures": local_fail,
+        }
+
+    branches: list[dict] = []
+    last_meta: dict = {}
+    for row in map_llm(revise_one, shards):
+        if isinstance(row, Exception):
+            if isinstance(row, cover_jobs.Cancelled):
+                raise row
+            failures.append({"reason": "llm_failed", "detail": f"修订并发失败：{row}"[:160], "fallback": ""})
+            cover_jobs.inc(1)
+            continue
+        for u in row.get("usage") or (row.get("meta"),):
+            if isinstance(u, dict):
+                _add_usage(usage_acc, u)
+                last_meta = u
+        failures.extend(row.get("failures") or [])
+        if row.get("branch"):
+            branches.append(row["branch"])
+        cover_jobs.inc(1, label=f"修订 · {row.get('label') or row.get('platform') or ''}")
+
+    user = json.dumps({**base_payload, "mode": "revise"}, ensure_ascii=False)
+    if not branches:
+        # 修订全失败：保住上一版，别交空树
+        parsed = _clip_mindmap(prev) if prev else {"title": _short_title(req.get("title") or "需求", 10), "children": []}
+        if not failures:
+            failures.append(
+                {
+                    "reason": "llm_failed",
+                    "detail": str(last_meta.get("error") or "修订失败，已保留上一版脑图")[:160],
+                    "fallback": "keep_previous",
+                }
+            )
+    else:
+        parsed = {"title": _short_title(req.get("title") or prev.get("title") or "需求", 10), "children": branches}
+
+    parsed = _normalize_mindmap_hierarchy(parsed)
+    for gap in cover_checks.gaps(req, parsed):
+        failures.append(
+            {
+                "reason": "coverage_gap",
+                "detail": f"脑图缺少{ {'new_feature': '新功能', 'keep_feature': '回归功能', 'exception': '异常点', 'journey': '路径'} .get(gap['kind'], gap['kind']) }「{gap['name']}」",
+                "gap": gap,
+            }
+        )
+
+    n_points = _count_mindmap_points(parsed)
+    llm_ok = bool(branches) and (usage_acc.get("engine") == "llm" or last_meta.get("engine") == "llm")
+    engine = "llm" if llm_ok else "rule"
+    suggest = f"已按上一版修订测试脑图 · {n_points} 个测试点"
+    if note:
+        suggest += "（已落实评论）"
+    if failures:
+        suggest += f"（{failures[0].get('detail') or '修订不完整'}）"
+    payload = dict(parsed)
+    payload["failures"] = failures
+    payload["stats"] = {
+        "points": n_points,
+        "shards": [p for p, _ in shards],
+        "features": len(cover_checks.feature_nodes(parsed)),
+        "mode": "revise",
+        "gaps": sum(1 for f in failures if f.get("reason") == "coverage_gap"),
+    }
+    meta = {**last_meta, **usage_acc}
+    return _with_engine(
+        artifact(
+            job="draft_mindmap",
+            suggest=suggest,
+            citations=[req.get("id") or ""],
+            payload=payload,
+            input_hash=_hash(user),
+        ),
+        engine,
+        meta,
+    )
+
+
 def draft_mindmap(req: dict, cases: list | None = None, atlas_doc: dict | None = None, *, user_note: str = "") -> dict:
     und = req.get("understanding") if isinstance(req.get("understanding"), dict) else {}
     intent = req.get("atlas_intent") if isinstance(req.get("atlas_intent"), dict) else {}
@@ -281,30 +778,242 @@ def draft_mindmap(req: dict, cases: list | None = None, atlas_doc: dict | None =
     atlas_paths = atlas.paths_for_req(atlas_doc, req.get("id") or "") or hang.get("paths") or []
     bundle = _analysis_bundle(req)
     note = str(user_note or req.get("analyst_feedback") or "").strip()
-    prev = req.get("mindmap") if isinstance(req.get("mindmap"), dict) else {}
-    user = json.dumps(
-        {
-            "title": req.get("title"),
-            **bundle,
-            "atlas_paths": atlas_paths,
-            "app_atlas": atlas.compact_atlas(atlas_doc),
-            "features": req.get("features") or und.get("features") or [],
-            "previous_mindmap": prev if prev.get("children") else {},
-            "retry_note": note,
-            "human_feedback": note,
-            "note": "必须详尽。第一层按端拆，运营平台走 Web。入口跟 journeys，不要默认首页。new_features 加厚，keep_features 回归，exceptions 全部落点。",
-        },
+    prev = _baseline_mindmap(req)
+    # 稳定块：同一个应用的图谱在多次调用 / 多条需求之间不变，单独成 message 命中前缀缓存。
+    stable = json.dumps(
+        {"app_atlas": atlas.compact_atlas(atlas_doc)},
         ensure_ascii=False,
+        sort_keys=True,
     )
-    parsed, meta = _ask_json(
-        MINDMAP_WRITER_SYSTEM_PROMPT,
-        user,
-        max_tokens=8192,
-        timeout_sec=180,
-        role="mindmap-writer",
-        job="draft_mindmap",
-    )
-    if not parsed:
+    has_prev = bool(isinstance(prev, dict) and prev.get("children"))
+    base_payload = {
+        "title": req.get("title"),
+        **bundle,
+        "atlas_paths": atlas_paths,
+        "features": req.get("features") or und.get("features") or [],
+        "previous_points": _mindmap_point_digest(prev),
+        "retry_note": note,
+        "human_feedback": note,
+        "note": (
+            "这是修订不是重写。previous_mindmap / previous_branch 是权威基线；"
+            "评论没点名的尽量保留 id；评论要求改结构就改；禁止新旧两版拼成平行树。"
+            if has_prev
+            else "必须详尽。入口跟 journeys，不要默认首页。new_features 加厚，keep_features 回归，exceptions 全部落点。"
+        ),
+    }
+    if has_prev:
+        return _draft_mindmap_revise(
+            req,
+            prev,
+            atlas_doc,
+            user_note=note,
+            stable=stable,
+            base_payload=base_payload,
+        )
+    # ↓ 首版：骨架 + 填点
+    shards = _mindmap_platforms(req)
+    failures: list = []
+    usage_acc: dict = {}
+    cover_jobs.report(phase="mindmap_skeleton", label="正在写脑图骨架", done=0, total=len(shards) or 1)
+
+    def ask_shard(platform: str, label: str, extra: dict, *, max_tokens: int = MINDMAP_SKELETON_TOKENS) -> tuple[Optional[dict], dict]:
+        user = json.dumps(
+            {
+                **base_payload,
+                "scope": {
+                    "platform": platform,
+                    "label": label,
+                    **extra,
+                },
+            },
+            ensure_ascii=False,
+        )
+        return _ask_json(
+            MINDMAP_WRITER_SYSTEM_PROMPT,
+            user,
+            max_tokens=max_tokens,
+            timeout_sec=MINDMAP_SHARD_TIMEOUT_SEC,
+            role="mindmap-writer",
+            job="draft_mindmap",
+            stable=stable,
+        )
+
+    def skeleton_one(pair: tuple[str, str]) -> dict:
+        platform, label = pair
+        local_fail: list = []
+        parsed, meta = ask_shard(
+            platform,
+            label,
+            {
+                "mode": "skeleton",
+                "only": f"这一轮只输出 {label} 的骨架（模块和功能，不要测试点）。children 里只能有一个 kind=platform 且 platform={platform} 的根。",
+            },
+        )
+        if not parsed:
+            local_fail.append(
+                {
+                    "reason": "llm_failed",
+                    "detail": f"{label} 骨架：{str(meta.get('error') or '模型没有返回可用脑图')[:120]}",
+                    "fallback": "",
+                    "platform": platform,
+                }
+            )
+            return {"platform": platform, "label": label, "branch": None, "meta": meta, "usage": (meta,), "failures": local_fail}
+        branch = _extract_platform_branch(parsed, platform, label)
+        usages = [meta]
+        if meta.get("truncated"):
+            already = _module_titles(branch)
+            parsed2, meta2 = ask_shard(
+                platform,
+                label,
+                {
+                    "mode": "skeleton",
+                    "already": already,
+                    "only": f"上一轮 {label} 骨架被截断。不要重复 already 里的模块，只补骨架，不要测试点。",
+                },
+            )
+            usages.append(meta2)
+            if parsed2:
+                branch = _merge_platform_children(branch, _extract_platform_branch(parsed2, platform, label))
+            if meta2.get("truncated") or not parsed2:
+                local_fail.append(
+                    {
+                        "reason": "truncated",
+                        "detail": f"{label} 骨架仍被 max_tokens 截断，已尽量补全前面的模块",
+                        "fallback": "salvaged" if (meta.get("salvaged") or meta2.get("salvaged")) else "",
+                        "platform": platform,
+                    }
+                )
+        return {
+            "platform": platform,
+            "label": label,
+            "branch": branch,
+            "meta": usages[-1],
+            "usage": tuple(usages),
+            "failures": local_fail,
+        }
+
+    shard_rows = map_llm(skeleton_one, shards)
+    branches: list[dict] = []
+    last_meta: dict = {}
+    for row in shard_rows:
+        if isinstance(row, Exception):
+            if isinstance(row, cover_jobs.Cancelled):
+                raise row
+            failures.append({"reason": "llm_failed", "detail": f"骨架并发失败：{row}"[:160], "fallback": ""})
+            cover_jobs.inc(1)
+            continue
+        for u in row.get("usage") or (row.get("meta"),):
+            if isinstance(u, dict):
+                _add_usage(usage_acc, u)
+                last_meta = u
+        failures.extend(row.get("failures") or [])
+        if row.get("branch"):
+            branches.append(row["branch"])
+        cover_jobs.inc(1, label=f"骨架 · {row.get('label') or row.get('platform') or ''}")
+
+    # 第 2 段：点太少的功能枝并发填点。模型如果在骨架阶段已经写了点，thin_features 会跳过。
+    fill_jobs = []
+    for branch in branches:
+        plat = str(branch.get("platform") or "")
+        for feat in cover_checks.thin_features(branch, min_points=2):
+            fill_jobs.append({"branch": branch, "feat": feat, "platform": plat})
+
+    def fill_one(job: dict) -> dict:
+        feat = job["feat"]
+        platform = job["platform"]
+        path = list(feat.get("path") or [str(feat.get("text") or "")])
+        feat_text = feat.get("text")
+        parsed, meta = ask_shard(
+            platform,
+            platform,
+            {
+                "mode": "fill_points",
+                "branch": {
+                    "text": feat_text,
+                    "kind": feat.get("kind"),
+                    "path": path,
+                    "platform": platform,
+                },
+                "only": f"只给功能「{feat_text}」写测试点，不要输出别的模块。",
+            },
+            max_tokens=MINDMAP_FILL_TOKENS,
+        )
+        meta_first = dict(meta) if isinstance(meta, dict) else {}
+        points = _points_payload(parsed or {}, platform=platform, parent_path=path)
+        added = _attach_points(feat, points)
+        # 截断（常见：开头就把 2048 token 烧在空白上）或解析失败：紧凑格式再打一轮。
+        need_retry = not added and (
+            bool(meta_first.get("truncated"))
+            or str(meta_first.get("fail_kind") or "") in ("parse", "truncated")
+            or bool(meta_first.get("error"))
+        )
+        if need_retry:
+            parsed2, meta2 = ask_shard(
+                platform,
+                platform,
+                {
+                    "mode": "fill_points",
+                    "branch": {
+                        "text": feat_text,
+                        "kind": feat.get("kind"),
+                        "path": path,
+                        "platform": platform,
+                    },
+                    "only": f"只给功能「{feat_text}」写测试点，不要输出别的模块。",
+                    "retry_note": MINDMAP_FILL_COMPACT_NOTE,
+                },
+                max_tokens=MINDMAP_FILL_RETRY_TOKENS,
+            )
+            points2 = _points_payload(parsed2 or {}, platform=platform, parent_path=path)
+            added2 = _attach_points(feat, points2)
+            meta2 = dict(meta2) if isinstance(meta2, dict) else {}
+            merged = {
+                **meta2,
+                "retry_reasons": list(meta_first.get("retry_reasons") or [])
+                + ["fill_compact"]
+                + list(meta2.get("retry_reasons") or []),
+                "attempts": int(meta_first.get("attempts") or 0) + int(meta2.get("attempts") or 0),
+                "elapsed_ms": int(meta_first.get("elapsed_ms") or 0) + int(meta2.get("elapsed_ms") or 0),
+            }
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                merged[k] = int(meta_first.get(k) or 0) + int(meta2.get(k) or 0)
+            if added2:
+                added = added2
+                merged["error"] = ""
+                merged["fail_kind"] = ""
+                merged["truncated"] = bool(meta2.get("truncated"))
+            elif meta2.get("error"):
+                merged["error"] = meta2.get("error")
+                merged["fail_kind"] = meta2.get("fail_kind") or meta_first.get("fail_kind")
+            meta = merged
+        return {"meta": meta, "added": added, "text": feat_text, "platform": platform}
+
+    if fill_jobs:
+        cover_jobs.report(phase="mindmap_fill", label="正在给功能填测试点")
+        cover_jobs.add_total(len(fill_jobs))
+        for row in map_llm(fill_one, fill_jobs):
+            if isinstance(row, Exception):
+                if isinstance(row, cover_jobs.Cancelled):
+                    raise row
+                failures.append({"reason": "llm_failed", "detail": f"填点失败：{row}"[:160], "fallback": ""})
+                cover_jobs.inc(1)
+                continue
+            if isinstance(row.get("meta"), dict):
+                _add_usage(usage_acc, row["meta"])
+                last_meta = row["meta"]
+                if not row.get("added") and row["meta"].get("error"):
+                    failures.append(
+                        {
+                            "reason": "llm_failed",
+                            "detail": f"{row.get('text') or '功能'} 填点：{str(row['meta'].get('error') or '')[:120]}",
+                            "platform": row.get("platform") or "",
+                        }
+                    )
+            cover_jobs.inc(1, label=f"填点 · {row.get('text') or ''}")
+
+    user = json.dumps(base_payload, ensure_ascii=False)
+    if not branches:
         grouped = {}
         for i, p in enumerate(und.get("points") or []):
             if not isinstance(p, dict):
@@ -330,13 +1039,51 @@ def draft_mindmap(req: dict, cases: list | None = None, atlas_doc: dict | None =
             ],
         }]
         parsed = {"title": _short_title(req.get("title") or "需求", 10), "children": children}
-    engine = "llm" if meta.get("engine") == "llm" and parsed.get("children") else "rule"
+        if not failures:
+            failures.append(
+                {
+                    "reason": "llm_failed",
+                    "detail": str(last_meta.get("error") or "模型没有返回可用脑图")[:160],
+                    "fallback": "rule_tree",
+                }
+            )
+    else:
+        parsed = {"title": _short_title(req.get("title") or "需求", 10), "children": branches}
+
+    # 第 3 段：代码校验。缺的功能只记进 failures，下一次定点重试 / 评论重跑时会带着 missing 再问。
+    # 这里不自动再调一轮模型 —— 漏检必须让人看见，静默补齐会把「模型没写」伪装成「已经覆盖」。
+    parsed = _normalize_mindmap_hierarchy(parsed)
+    for gap in cover_checks.gaps(req, parsed):
+        failures.append(
+            {
+                "reason": "coverage_gap",
+                "detail": f"脑图缺少{ {'new_feature': '新功能', 'keep_feature': '回归功能', 'exception': '异常点', 'journey': '路径'} .get(gap['kind'], gap['kind']) }「{gap['name']}」",
+                "gap": gap,
+            }
+        )
+
+    n_points = _count_mindmap_points(parsed)
+    llm_ok = bool(branches) and (usage_acc.get("engine") == "llm" or last_meta.get("engine") == "llm")
+    engine = "llm" if llm_ok else "rule"
+    suggest = f"已生成测试脑图草稿 · {n_points} 个测试点"
+    if failures:
+        suggest += f"（{failures[0].get('detail') or '生成不完整'}，请重试或补充说明）"
+    payload = dict(parsed)
+    payload["failures"] = failures
+    payload["stats"] = {
+        "points": n_points,
+        "shards": [p for p, _ in shards],
+        "features": len(cover_checks.feature_nodes(parsed)),
+        "fill_jobs": len(fill_jobs),
+        "gaps": sum(1 for f in failures if f.get("reason") == "coverage_gap"),
+    }
+    meta = {**last_meta, **usage_acc}
     return _with_engine(
         artifact(
             job="draft_mindmap",
-            suggest="已生成测试脑图草稿",
+            suggest=suggest,
             citations=[req.get("id") or ""],
-            payload=parsed,
+            payload=payload,
             input_hash=_hash(user),
         ),
         engine,
@@ -384,6 +1131,11 @@ def _normalize_draft_case(row: dict, index: int) -> dict:
     out["precondition"] = _case_text(out.get("precondition") or out.get("pre")) or "账号可用，应用可启动"
     out["platform"] = out.get("platform") or "双端"
     out["aspect"] = str(out.get("aspect") or out.get("kind") or "正向").strip() or "正向"
+    # origin：llm | stub | human | import。缺省视为 llm（模型写的）。
+    # 这个字段是「不再静默降级」的基础：桩用例必须能被前端和覆盖率统计区分出来。
+    out["origin"] = str(out.get("origin") or "llm").strip() or "llm"
+    # locked：人工改过的用例，重试时不许被覆盖。
+    out["locked"] = bool(out.get("locked"))
     return out
 
 
@@ -409,6 +1161,159 @@ def _clip_mindmap(node: dict) -> dict:
     if isinstance(kids, list):
         out["children"] = [_clip_mindmap(c) for c in kids if isinstance(c, dict)]
     return out
+
+
+def _node_kind(node: dict) -> str:
+    kind = str((node or {}).get("kind") or "").strip().lower()
+    if kind in ("root", "platform", "module", "feature", "point"):
+        return kind
+    kids = [c for c in ((node or {}).get("children") or []) if isinstance(c, dict)]
+    text = str((node or {}).get("text") or (node or {}).get("title") or "").strip()
+    if not kids and len(text) >= 12:
+        return "point"
+    if not kids:
+        return "point"
+    # 有子节点且文案短 → 更像模块/功能
+    if any(_node_kind(c) == "point" for c in kids) or any(str(c.get("kind") or "") == "point" for c in kids):
+        return "feature"
+    return "module"
+
+
+def _pick_feature_for_point(features: list[dict], point: dict) -> Optional[dict]:
+    """把误挂的测试点归到文案最相关的功能下。"""
+    if not features:
+        return None
+    pt = str(point.get("text") or point.get("title") or "")
+    best = None
+    best_score = 0
+    for feat in features:
+        ft = str(feat.get("text") or feat.get("title") or "")
+        if not ft:
+            continue
+        score = 0
+        if ft in pt or pt in ft:
+            score = max(score, len(ft))
+        # 共享 2+ 字片段
+        for i in range(len(ft) - 1):
+            gram = ft[i : i + 2]
+            if gram and gram in pt:
+                score = max(score, 2)
+                break
+        if score > best_score:
+            best_score = score
+            best = feat
+    return best or features[0]
+
+
+def _normalize_mindmap_hierarchy(tree: dict) -> dict:
+    """纠正「测试点与功能同级」：模块下只留 module/feature，点一律挂到功能下。"""
+    if not isinstance(tree, dict):
+        return tree
+
+    def fix(node: dict) -> dict:
+        out = dict(node)
+        kind = _node_kind(out)
+        if not out.get("kind"):
+            out["kind"] = kind
+        raw_kids = [fix(c) for c in (out.get("children") or []) if isinstance(c, dict)]
+        if kind in ("point",):
+            out["children"] = []
+            out["kind"] = "point"
+            return out
+
+        modules: list[dict] = []
+        features: list[dict] = []
+        points: list[dict] = []
+        for ch in raw_kids:
+            ck = _node_kind(ch)
+            ch["kind"] = ck
+            if ck == "point":
+                points.append(ch)
+            elif ck == "feature":
+                features.append(ch)
+            elif ck == "module":
+                modules.append(ch)
+            elif ck == "platform":
+                modules.append(ch)
+            else:
+                # 有子节点当模块，否则当点
+                (features if ch.get("children") else points).append(ch)
+
+        if points and kind in ("platform", "module", "root", ""):
+            for pt in points:
+                pt["kind"] = "point"
+                pt["children"] = []
+                host = _pick_feature_for_point(features, pt)
+                if host is None:
+                    host = {
+                        "id": f"{out.get('id') or 'n'}-misc",
+                        "text": "未归类",
+                        "kind": "feature",
+                        "path": list(out.get("path") or []) + ["未归类"],
+                        "children": [],
+                    }
+                    features.append(host)
+                kids = [c for c in (host.get("children") or []) if isinstance(c, dict)]
+                # 同文案去重
+                texts = {str(c.get("text") or "") for c in kids}
+                if str(pt.get("text") or "") not in texts:
+                    kids.append(pt)
+                host["children"] = kids
+                host["kind"] = "feature"
+            points = []
+
+        if kind == "feature":
+            # 功能下只留测试点；误塞的功能/模块降成点或展平其子点
+            flat_points: list[dict] = []
+            for ch in features + modules + points:
+                if _node_kind(ch) == "point" or not ch.get("children"):
+                    row = dict(ch)
+                    row["kind"] = "point"
+                    row["children"] = []
+                    flat_points.append(row)
+                else:
+                    for gp in ch.get("children") or []:
+                        if isinstance(gp, dict):
+                            row = dict(gp)
+                            row["kind"] = "point"
+                            row["children"] = []
+                            flat_points.append(row)
+            # 去重
+            seen = set()
+            uniq = []
+            for p in flat_points:
+                key = str(p.get("text") or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(p)
+            out["children"] = uniq
+            out["kind"] = "feature"
+            return out
+
+        out["children"] = modules + features
+        return out
+
+    return fix(tree)
+
+
+def _baseline_mindmap(req: dict) -> dict:
+    """重试应以「当前」飞书脑图对应的快照为准；没有快照再退回 req.mindmap。"""
+    cur = req.get("mindmap_wiki") if isinstance(req.get("mindmap_wiki"), dict) else {}
+    token = str(cur.get("node_token") or "").strip()
+    if token:
+        for row in req.get("mindmap_wiki_history") or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("node_token") or "") != token:
+                continue
+            if row.get("invalid"):
+                continue
+            snap = row.get("mindmap_snapshot")
+            if isinstance(snap, dict) and (snap.get("children") or snap.get("text") or snap.get("title")):
+                return dict(snap)
+    mm = req.get("mindmap") if isinstance(req.get("mindmap"), dict) else {}
+    return dict(mm) if mm else {}
 
 
 def _tree_from_groups(grouped: dict) -> list:
@@ -453,9 +1358,28 @@ def _tree_from_groups(grouped: dict) -> list:
 
 def apply_mindmap(req: dict, payload: dict) -> dict:
     next_req = dict(req)
-    raw = payload if isinstance(payload, dict) else {}
-    next_req["mindmap"] = _clip_mindmap(raw)
+    raw = dict(payload) if isinstance(payload, dict) else {}
+    # failures / stats 是这次生成的元信息，不是脑图节点 —— 单独存，别塞进树里。
+    failures = [x for x in (raw.pop("failures", None) or []) if isinstance(x, dict)]
+    stats = raw.pop("stats", None)
+    next_req["mindmap"] = _clip_mindmap(_normalize_mindmap_hierarchy(raw))
+    next_req["mindmap_failures"] = failures
+    if isinstance(stats, dict):
+        next_req["mindmap_stats"] = stats
     next_req = _sync_points_from_mindmap(next_req)
+    # 脑图换了，测试点 id 可能变。未锁定且挂在已消失测试点上的用例是孤儿，留着只会
+    # 把覆盖率搅乱。锁定的（人工改过 / 导入）永远留下。
+    live = {str(p.get("id") or "") for p in (next_req.get("understanding") or {}).get("points") or []}
+    next_req["draft_cases"] = [
+        row
+        for row in (next_req.get("draft_cases") or [])
+        if isinstance(row, dict)
+        and (
+            row.get("locked")
+            or any(str(x) in live for x in (row.get("point_ids") or []))
+            or not (row.get("point_ids") or [])
+        )
+    ]
     next_req["updated_at"] = _now()
     return next_req
 
@@ -585,7 +1509,11 @@ def _norm_points(items) -> list:
     for i, p in enumerate(items or []):
         if not isinstance(p, dict) or p.get("waived"):
             continue
-        pid = str(p.get("id") or p.get("point_id") or f"tp{i + 1}").strip() or f"tp{i + 1}"
+        # 取 id 的优先级必须和 _sync_points_from_mindmap 完全一致（point_id 优先）。
+        # 曾经这里是 `id or point_id`、那边是 `point_id or id`，同一个脑图叶子算出两个不同 id：
+        # understanding.points[].id = "tp1"，生成的用例 point_ids = ["n1-1-1"]，
+        # apply_cases 里永远匹配不上 → case_ids 恒为空 → 每个测试点都显示成「没挂用例」。
+        pid = str(p.get("point_id") or p.get("id") or f"tp{i + 1}").strip() or f"tp{i + 1}"
         if pid in used:
             pid = f"{pid}-{i + 1}"
         used.add(pid)
@@ -673,23 +1601,33 @@ def _stub_case(req: dict, point: dict, index: int, *, aspect: str = "正向") ->
         "expected": f"1. {expected}",
         "point_ids": [pid],
         "platform": plat,
+        # 模板兜底，不是模型写的。前端据此显红并允许定点补写；覆盖率统计不能把它算成已覆盖。
+        "origin": "stub",
     }
 
 
-def _stub_cases_for_point(req: dict, point: dict, index: int) -> list:
-    blob = f"{point.get('kind') or ''}{point.get('text') or ''}{point.get('detail') or ''}"
-    aspects = ["正向"]
-    if any(k in blob for k in ("上传", "保存", "下单", "提交", "失败", "兜底", "权限", "登录")):
-        aspects.append("异常")
-    if any(k in blob for k in ("上传", "输入", "数量", "空", "格式", "大小")):
-        aspects.append("边界")
-    return [_stub_case(req, point, index, aspect=a) for a in aspects]
+def _stub_cases_for_point(req: dict, point: dict, index: int, aspects: list | None = None) -> list:
+    """给这个点造模板桩用例。aspects 为空时按规范铺全，否则只补指定的情况。"""
+    return [_stub_case(req, point, index, aspect=a) for a in (aspects or _expected_aspects(point))]
+
+
+CASE_WRITER_EXCERPT_CHARS = 4000
 
 
 def _case_writer_context(req: dict) -> dict:
+    """用例编写者的共享上下文。
+
+    以前这里**没有需求原文也没有 AC**，模型只拿到一个 40 字截断的测试点标题就要写出
+    可执行步骤和可判定预期 —— 步骤空泛、预期不可判定是必然结果。
+    原文放进共享上下文（stable 块）而不是每批的变化部分，靠前缀缓存摊薄成本。
+    """
     bundle = _analysis_bundle(req)
     return {
         "title": req.get("title"),
+        "ac": bundle.get("ac") or [],
+        "baseline": bundle.get("baseline") or "",
+        "delta": bundle.get("delta") or "",
+        "source_excerpt": str(bundle.get("source_excerpt") or "")[:CASE_WRITER_EXCERPT_CHARS],
         "journeys": bundle.get("journeys") or [],
         "new_features": bundle.get("new_features") or [],
         "keep_features": bundle.get("keep_features") or [],
@@ -782,66 +1720,294 @@ def _append_unique_cases(rows: list, incoming: list, batch_ids: set | None = Non
 
 
 CASE_BATCH = 4
+CASE_CALL_TIMEOUT_SEC = 120
+# 安全阀，不是覆盖上限。撞到它必须把剩下的测试点显式写进 failures，
+# 绝不允许像以前那样静默补桩（那会让覆盖率虚高）。
+CASE_DEADLINE_SEC = 900
+CASE_MAX_ATTEMPTS = 3
+CASE_MAX_MISSING = 5
+# 一条用例（名称+模块+前置+3~5步步骤+预期）的输出量，实测校准。
+TOKENS_PER_CASE = 320
+CASE_TOKENS_FLOOR = 1200
+CASE_TOKENS_CEIL = 8192
 
 
-def _fill_cases(req: dict, target: list, rows: list, ctx: dict, usage: dict) -> tuple[list, dict, str]:
+def _expected_aspects(point: dict) -> list[str]:
+    """这个测试点按规范必须有哪些情况 —— 代码说了算，不问模型。
+
+    同一份规则同时用于三处：生成时的输出预算、生成后的完整性校验、兜底桩用例。
+    v2 会把关键词表换成 capability_tags 查知识库（见 docs/plan-qa-role-quality-v2.md 3.3），
+    届时只需要换掉本函数的实现。
+    """
+    blob = f"{point.get('kind') or ''}{point.get('text') or ''}{point.get('detail') or ''}"
+    aspects = ["正向"]
+    if any(k in blob for k in ("上传", "保存", "下单", "提交", "失败", "兜底", "权限", "登录")):
+        aspects.append("异常")
+    if any(k in blob for k in ("上传", "输入", "数量", "空", "格式", "大小")):
+        aspects.append("边界")
+    return aspects
+
+
+def _case_token_budget(batch: list) -> int:
+    """按本批预计要写多少条用例算输出预算，留 2 倍余量。
+
+    原来固定 max_tokens=4096 要装下 8 个点铺开后的 15~24 条用例，必然截断；
+    截断后整批退化成模板桩，且不上报 —— 这是「覆盖不全」的头号原因。
+    """
+    n = sum(len(_expected_aspects(p)) for p in batch) or len(batch)
+    return max(CASE_TOKENS_FLOOR, min(CASE_TOKENS_CEIL, 600 + n * TOKENS_PER_CASE * 2))
+
+
+def _failure_detail(reason: str, meta: dict) -> str:
+    if reason == "truncated":
+        return f"输出被 max_tokens 截断（finish_reason=length，已生成 {meta.get('completion_tokens') or '?'} token）"
+    if reason == "parse_failed":
+        return f"模型没有返回可解析的 JSON：{str(meta.get('content_preview') or '')[:80]}"
+    if reason == "llm_error":
+        return str(meta.get("error") or "模型调用失败")[:160]
+    if reason == "deadline":
+        return "撞到生成安全阀"
+    return "模型返回了 JSON 但没有覆盖这些测试点"
+
+
+def _point_aspect_gaps(target: list, rows: list) -> dict:
+    """每个测试点还缺哪些情况。只认非桩用例 —— 模板桩不算覆盖。
+
+    这是覆盖的唯一判据。以前是「这个点有没有任何用例」，于是一个人工只写了正向的点
+    会被整体跳过，异常和边界永远不会被生成 —— 覆盖率显示满格，实际缺一半。
+    """
+    have: dict[str, set] = {}
+    for row in rows or []:
+        if not isinstance(row, dict) or str(row.get("origin") or "llm") == "stub":
+            continue
+        aspect = str(row.get("aspect") or "正向").strip() or "正向"
+        for pid in row.get("point_ids") or []:
+            have.setdefault(str(pid), set()).add(aspect)
+    out: dict[str, list] = {}
+    for p in target or []:
+        pid = str(p.get("id") or "")
+        missing = [a for a in _expected_aspects(p) if a not in have.get(pid, set())]
+        if missing:
+            out[pid] = missing
+    return out
+
+
+def _fill_cases(req: dict, target: list, rows: list, ctx: dict, usage: dict) -> tuple[list, dict, str, list]:
+    """给每个测试点写用例，直到每个点该有的情况都齐。
+
+    返回 (missing_points, last_meta, engine, failures)。failures 是本次**没写成**的
+    测试点清单及原因 —— 以前这里是静默补桩，界面看不出差别，覆盖率照样 100%。
+    """
     last_meta: dict = {}
     engine = "rule"
-    rounds = 0
     missing: list = []
-    pending = [p for p in target if p["id"] not in _case_point_ids(rows)]
-    while pending and rounds < 16:
-        rounds += 1
-        batch = pending[:CASE_BATCH]
-        batch_ids = {p["id"] for p in batch}
+    failures: list = []
+    started = time.monotonic()
+    all_titles = [str(p.get("text") or "")[:40] for p in target if str(p.get("text") or "").strip()][:80]
+    by_id = {str(p.get("id") or ""): p for p in target}
+
+    # 逐批不变的共享上下文单独成一条 message：分片之间逐字节一致，provider 前缀缓存才可能命中。
+    # 以前它和变化的 points 拼在同一个 JSON 里，每批重发一遍且缓存全不命中。
+    stable_ctx = json.dumps({**ctx, "all_points": all_titles}, ensure_ascii=False, sort_keys=True)
+
+    def ask(batch: list) -> tuple[Optional[dict], dict]:
         user = json.dumps(
             {
-                **ctx,
                 "points": batch,
-                "note": "每个测试点按多种情况展开成多条用例，不要一条点一条。发现脑图没有的必须测场景写入 missing_points。",
+                "note": (
+                    "只给本批 points 写用例。每个 point 的 need_aspects 列出这次必须补的情况，"
+                    "每条用例的 aspect 必须取自该点的 need_aspects，一条用例只覆盖一个点的一种情况。"
+                    "missing_points 仅在整张脑图都没有该场景时才报，最多 5 条。"
+                ),
             },
             ensure_ascii=False,
         )
-        parsed, meta = _ask_json(
+        return _ask_json(
             CASE_WRITER_SYSTEM_PROMPT,
             user,
-            max_tokens=4096,
-            timeout_sec=90,
+            max_tokens=_case_token_budget(batch),
+            timeout_sec=CASE_CALL_TIMEOUT_SEC,
             role="case-writer",
             job="draft_cases",
+            stable=stable_ctx,
         )
-        last_meta = meta or {}
-        _add_usage(usage, last_meta)
-        got = []
-        if isinstance(parsed, dict):
-            got = [x for x in (parsed.get("cases") or []) if isinstance(x, dict)]
-            missing.extend([x for x in (parsed.get("missing_points") or []) if isinstance(x, dict)])
-            if last_meta.get("engine") == "llm" and got:
-                engine = "llm"
-        covered_before = _case_point_ids(rows)
-        _append_unique_cases(rows, got, batch_ids)
-        covered_after = _case_point_ids(rows)
-        if not (covered_after - covered_before) & batch_ids:
-            for p in batch:
-                if p["id"] not in covered_after:
-                    _append_unique_cases(rows, _stub_cases_for_point(req, p, len(rows)))
-        pending = [p for p in target if p["id"] not in _case_point_ids(rows)]
-    for p in pending:
-        _append_unique_cases(rows, _stub_cases_for_point(req, p, len(rows)))
-    return missing, last_meta, engine
+
+    def fail_reason(meta: dict) -> str:
+        kind = str((meta or {}).get("fail_kind") or "")
+        if (meta or {}).get("truncated"):
+            return "truncated"
+        if kind == "http":
+            return "llm_error"
+        if kind == "parse":
+            return "parse_failed"
+        return kind or "incomplete"
+
+    pending_ids = list(_point_aspect_gaps(target, rows).keys())
+    work: list[tuple[list, int]] = [
+        (pending_ids[i : i + CASE_BATCH], 0) for i in range(0, len(pending_ids), CASE_BATCH)
+    ]
+    cover_jobs.report(phase="draft_cases", label="正在写用例", done=0, total=len(work) or (1 if pending_ids else 0))
+
+    while work:
+        cover_jobs.check()
+        if time.monotonic() - started > CASE_DEADLINE_SEC:
+            dropped = [pid for ids, _ in work for pid in ids]
+            if dropped:
+                failures.append(
+                    {
+                        "reason": "deadline",
+                        "point_ids": dropped,
+                        "detail": f"超过 {CASE_DEADLINE_SEC}s 安全阀，剩余 {len(dropped)} 个测试点未生成",
+                        "stubbed": False,
+                    }
+                )
+            break
+
+        # 这一轮的缺口快照。并发写入 rows 会打架，所以先并行问、再串行合并。
+        gap_snap = _point_aspect_gaps(target, rows)
+
+        def run(item: tuple[list, int]):
+            ids, attempt = item
+            batch = []
+            for pid in ids:
+                p = by_id.get(pid)
+                if p and pid in gap_snap:
+                    batch.append({**p, "need_aspects": gap_snap[pid]})
+            if not batch:
+                return ids, attempt, batch, None, {}
+            parsed, meta = ask(batch)
+            return ids, attempt, batch, parsed, meta or {}
+
+        next_work: list[tuple[list, int]] = []
+        for result in map_llm(run, work):
+            if isinstance(result, Exception):
+                if isinstance(result, cover_jobs.Cancelled):
+                    raise result
+                failures.append({"reason": "llm_error", "point_ids": [], "detail": str(result)[:160], "stubbed": False})
+                cover_jobs.inc(1)
+                continue
+            ids, attempt, batch, parsed, meta = result
+            last_meta = meta
+            _add_usage(usage, meta)
+            got: list = []
+            if isinstance(parsed, dict):
+                got = [x for x in (parsed.get("cases") or []) if isinstance(x, dict)]
+                for item in parsed.get("missing_points") or []:
+                    if isinstance(item, dict) and len(missing) < CASE_MAX_MISSING:
+                        missing.append(item)
+                if meta.get("engine") == "llm" and got:
+                    engine = "llm"
+            _append_unique_cases(rows, got, {str(p.get("id")) for p in batch})
+            still = _point_aspect_gaps(target, rows)
+            uncovered = [pid for pid in ids if pid in still]
+            cover_jobs.inc(1, label=f"用例 · 已写 {len(rows)} 条")
+            if not uncovered:
+                continue
+            reason = fail_reason(meta)
+            if attempt + 1 < CASE_MAX_ATTEMPTS:
+                if len(uncovered) > 1:
+                    mid = max(1, len(uncovered) // 2)
+                    next_work.append((uncovered[:mid], attempt + 1))
+                    next_work.append((uncovered[mid:], attempt + 1))
+                else:
+                    next_work.append((uncovered, attempt + 1))
+                continue
+            for pid in uncovered:
+                p = by_id.get(pid)
+                if p:
+                    _append_unique_cases(rows, _stub_cases_for_point(req, p, len(rows), aspects=still.get(pid)))
+            failures.append(
+                {
+                    "reason": reason,
+                    "point_ids": uncovered,
+                    "detail": _failure_detail(reason, meta),
+                    "stubbed": True,
+                }
+            )
+        if next_work:
+            cover_jobs.add_total(len(next_work))
+        work = next_work
+
+    return missing, last_meta, engine, failures
 
 
-def draft_cases(req: dict, cases: list | None = None, *, user_note: str = "", replace: bool = False) -> dict:
+def _aspect_gaps(target: list, rows: list) -> list:
+    """情况缺口的展示形态（给前端和 artifact 用）。判据见 _point_aspect_gaps。"""
+    by_id = {str(p.get("id") or ""): p for p in target}
+    return [
+        {
+            "point_id": pid,
+            "text": str((by_id.get(pid) or {}).get("text") or ""),
+            "missing_aspects": aspects,
+        }
+        for pid, aspects in _point_aspect_gaps(target, rows).items()
+    ]
+
+
+def _seed_cases(
+    existing: list,
+    *,
+    replace: bool = False,
+    point_ids: list | None = None,
+    rewrite_stubs: bool = False,
+) -> tuple[list, int]:
+    """重试时哪些旧用例留下。锁定的永远留下。
+
+    - replace：范围内未锁定的全部丢掉（整表重写或定点重写）
+    - rewrite_stubs：范围内的模板桩丢掉，真用例留下 —— 「补写模板」走这条
+    - 都不开：全部留下，只补缺口
+    """
+    want = {str(x).strip() for x in (point_ids or []) if str(x).strip()}
+    kept: list[dict] = []
+    locked_n = 0
+    for row in existing or []:
+        if not isinstance(row, dict):
+            continue
+        pids = {str(x) for x in (row.get("point_ids") or []) if x}
+        in_scope = (not want) or bool(pids & want)
+        if row.get("locked"):
+            kept.append(row)
+            locked_n += 1
+            continue
+        if not in_scope:
+            kept.append(row)
+            continue
+        if replace:
+            continue
+        if rewrite_stubs and str(row.get("origin") or "llm") == "stub":
+            continue
+        kept.append(row)
+    return kept, locked_n
+
+
+def draft_cases(
+    req: dict,
+    cases: list | None = None,
+    *,
+    user_note: str = "",
+    replace: bool = False,
+    point_ids: list | None = None,
+    rewrite_stubs: bool = False,
+) -> dict:
     und = req.get("understanding") if isinstance(req.get("understanding"), dict) else {}
     leaves = collect_mindmap_points(req.get("mindmap"))
     und_points = [p for p in (und.get("points") or []) if isinstance(p, dict)]
     target = _norm_points(leaves or und_points or _gap_points(req))
+    want = {str(x).strip() for x in (point_ids or []) if str(x).strip()}
+    if want:
+        scoped = [p for p in target if str(p.get("id") or "") in want]
+        # 指定的 id 一个都对不上就当没指定 —— 否则会静默写出 0 条，看起来像成功。
+        if scoped:
+            target = scoped
     note = str(user_note or req.get("analyst_feedback") or "").strip()
     ctx = _case_writer_context(req)
     ctx["retry_note"] = note or ctx.get("retry_note") or ""
-    rows: list[dict] = [] if replace else [x for x in (req.get("draft_cases") or []) if isinstance(x, dict)]
+    existing = [x for x in (req.get("draft_cases") or []) if isinstance(x, dict)]
+    rows, kept_locked = _seed_cases(
+        existing, replace=replace, point_ids=list(want) or None, rewrite_stubs=rewrite_stubs
+    )
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    missing, last_meta, engine = _fill_cases(req, target, rows, ctx, usage)
+    missing, last_meta, engine, failures = _fill_cases(req, target, rows, ctx, usage)
     mindmap = req.get("mindmap") if isinstance(req.get("mindmap"), dict) else {}
     if missing:
         mindmap = _graft_missing_points(mindmap, missing)
@@ -850,18 +2016,48 @@ def draft_cases(req: dict, cases: list | None = None, *, user_note: str = "", re
         extra_req = _sync_points_from_mindmap(extra_req)
         extra = _norm_points(collect_mindmap_points(extra_req.get("mindmap")))
         extra = [p for p in extra if p["id"] not in _case_point_ids(rows)]
+        for p in extra:
+            _append_unique_cases(rows, _stub_cases_for_point(extra_req, p, len(rows)))
         if extra:
-            more, meta2, eng2 = _fill_cases(extra_req, extra, rows, ctx, usage)
-            last_meta = meta2 or last_meta
-            if eng2 == "llm":
-                engine = "llm"
-            missing.extend(more)
+            # 反推补出来的点是生成之后才加进脑图的，只有模板桩，必须让人知道要补写。
+            failures.append(
+                {
+                    "reason": "backfilled_point",
+                    "point_ids": [p["id"] for p in extra],
+                    "detail": f"写用例时反推补了 {len(extra)} 个脑图测试点，这些点目前只有模板兜底",
+                    "stubbed": True,
+                }
+            )
     last_meta = {**last_meta, **usage}
-    covered = len(_case_point_ids(rows))
-    suggest = f"按多种情况写了 {len(rows)} 条用例，覆盖 {covered} 个测试点"
+    real_rows = [r for r in rows if str(r.get("origin") or "llm") != "stub"]
+    stub_rows = [r for r in rows if str(r.get("origin") or "llm") == "stub"]
+    covered = len(_case_point_ids(real_rows))
+    gaps = _aspect_gaps(target, rows)
+    fully = len(target) - len(gaps)
+    suggest = f"写了 {len(rows)} 条用例，{fully}/{len(target)} 个测试点情况齐全"
+    if stub_rows:
+        suggest += f"；{len(stub_rows)} 条是模板兜底，需要补写"
+    if gaps:
+        suggest += f"；{len(gaps)} 个点缺情况（正向/异常/边界）"
     if missing:
         suggest += f"；反推补了 {len(missing)} 个脑图测试点"
-    payload = {"cases": rows, "missing_points": missing}
+    if kept_locked:
+        suggest += f"；保留了 {kept_locked} 条人工锁定用例"
+    payload = {
+        "cases": rows,
+        "missing_points": missing,
+        "failures": failures,
+        "aspect_gaps": gaps,
+        "stats": {
+            "points": len(target),
+            "cases": len(rows),
+            "real_cases": len(real_rows),
+            "stub_cases": len(stub_rows),
+            "covered_points": covered,
+            "fully_covered_points": fully,
+            "locked_kept": kept_locked,
+        },
+    }
     if missing:
         payload["mindmap"] = mindmap
     return _with_engine(
@@ -879,6 +2075,7 @@ def draft_cases(req: dict, cases: list | None = None, *, user_note: str = "", re
 
 def apply_analyze(req: dict, payload: dict) -> dict:
     next_req = dict(req)
+    next_req["analyze_failures"] = [x for x in (payload.get("failures") or []) if isinstance(x, dict)]
     und = dict(next_req.get("understanding") or {})
     ac = [str(x).strip() for x in (payload.get("ac") or []) if str(x).strip()]
     if ac:
@@ -977,16 +2174,29 @@ def apply_cases(req: dict, payload: dict, *, replace: bool = False) -> dict:
         if missing:
             next_req = _sync_points_from_mindmap(next_req)
             next_req["mindmap_backfill"] = missing
+        # 生成失败清单和情况缺口落到需求上，前端据此显红并允许定点补写。
+        next_req["case_failures"] = [x for x in (payload.get("failures") or []) if isinstance(x, dict)]
+        next_req["case_aspect_gaps"] = [x for x in (payload.get("aspect_gaps") or []) if isinstance(x, dict)]
+        next_req["case_stats"] = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
     next_req["draft_cases"] = [_normalize_draft_case(row, i) for i, row in enumerate(rows)]
     und = dict(next_req.get("understanding") or {})
     points = []
+    row_ids = {str(r.get("case_id") or "") for r in next_req["draft_cases"]}
     for p in und.get("points") or []:
         if not isinstance(p, dict):
             continue
         p = dict(p)
-        hung = [] if replace else list(p.get("case_ids") or [])
-        if replace:
-            hung = []
+        # 清掉已经不存在的 draft 用例 id（以前会残留，让覆盖率虚高）；
+        # 非 draft 前缀的是用例库里的真用例链接，不动。
+        hung = (
+            []
+            if replace
+            else [
+                cid
+                for cid in (p.get("case_ids") or [])
+                if not str(cid).startswith("draft-") or str(cid) in row_ids
+            ]
+        )
         for row in next_req["draft_cases"]:
             if p.get("id") in (row.get("point_ids") or []) and row.get("case_id") and row.get("case_id") not in hung:
                 hung.append(row.get("case_id"))
@@ -1121,6 +2331,8 @@ def _add_usage(total: dict, extra) -> None:
         return
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         total[key] = int(total.get(key) or 0) + int(extra.get(key) or 0)
+    if extra.get("engine") == "llm":
+        total["engine"] = "llm"
 
 
 _ROLE_CN = {
@@ -1176,7 +2388,7 @@ def _route_detail(routed: list[dict]) -> str:
     return "分析师理解任务后调用：" + " → ".join(bits)
 
 
-def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, app_id: str = "", app_name: str = "", user_note: str = "", force: bool = False, jobs: list | None = None, source: str = "") -> dict:
+def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, app_id: str = "", app_name: str = "", user_note: str = "", force: bool = False, jobs: list | None = None, source: str = "", point_ids: list | None = None, rewrite_stubs: bool = False, replace_cases: bool = False) -> dict:
     """推进未完成的分析/脑图/用例草稿。不改验收门禁、不自动下发设备。jobs 指定时按重试处理。"""
     tok = dispatch.bind(
         trigger="qa_tick",
@@ -1195,6 +2407,9 @@ def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "
             user_note=user_note,
             force=force,
             jobs=jobs,
+            point_ids=point_ids,
+            rewrite_stubs=rewrite_stubs,
+            replace_cases=replace_cases,
         )
         actions = result.get("actions") or []
         did = [a for a in actions if a.get("action") not in ("skip", "skipped", "blocked", "")]
@@ -1210,6 +2425,9 @@ def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "
             output_data={"actions": [a.get("action") for a in did], "routed": routed},
         )
         return result
+    except cover_jobs.Cancelled:
+        dispatch.record_job(status="cancelled", job="route", role="conductor", detail="已取消")
+        raise
     except Exception as e:
         dispatch.record_job(status="error", job="route", role="conductor", error=str(e)[:240])
         raise
@@ -1217,7 +2435,17 @@ def tick(*, qa_process: dict, cases: list | None = None, requirement_id: str = "
         dispatch.reset(tok)
 
 
-def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, user_note: str = "", force: bool = False, jobs: list | None = None) -> dict:
+def _tick_flush(doc: dict, reqs: list, req: dict, rid: str) -> None:
+    """分片写完就回写，进程崩了也不丢已经生成的脑图/用例。"""
+    for i, row in enumerate(reqs):
+        if str(row.get("id") or "") == rid:
+            reqs[i] = req
+            break
+    doc["requirements"] = reqs
+    cover_jobs.save(doc)
+
+
+def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: str = "", requirement_ids: list | None = None, user_note: str = "", force: bool = False, jobs: list | None = None, point_ids: list | None = None, rewrite_stubs: bool = False, replace_cases: bool = False) -> dict:
     """推进未完成的分析/脑图/用例草稿。不改验收门禁、不自动下发设备。"""
     doc = dict(qa_process or {})
     reqs = [dict(r) for r in (doc.get("requirements") or []) if isinstance(r, dict)]
@@ -1231,11 +2459,12 @@ def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: s
         want.add(target)
     note = str(user_note or "").strip()
     retry_jobs = {str(x).strip() for x in (jobs or []) if str(x).strip() in LLM_JOBS}
-    cover_retry = bool(retry_jobs & {"draft_mindmap", "draft_cases"})
-    if cover_retry and note:
-        retry_jobs.add("analyze_req")
-        if "draft_mindmap" in retry_jobs:
-            retry_jobs.add("draft_cases")
+    # jobs 写了就只跑写了的那些。以前「重试脑图 + 评论」会自动扩散成
+    # analyze_req → draft_mindmap → draft_cases 且 replace=True，把人改过的用例整表删掉，
+    # 一轮 10 分钟。评论作为 user_note 交给被点的那个角色就够了。
+    rewrite_stubs = bool(rewrite_stubs)
+    replace_cases = bool(replace_cases)
+    scope_ids = [str(x).strip() for x in (point_ids or []) if str(x).strip()]
 
     if not auto["enabled"]:
         return {"qa_process": doc, "actions": [{"role": "system", "action": "skipped", "detail": "autonomy.enabled=false"}]}
@@ -1260,6 +2489,7 @@ def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: s
         if "analyze_req" in allowed and (bool(retry_jobs) or auto["auto_analyze"]) and (
             force or retry_jobs or und.get("source_hash") != src_hash
         ):
+            cover_jobs.report(phase="analyze_req", label="正在分析需求")
             art = analyze_req(req, cases or [], doc.get("app_atlas"), user_note=note)
             req = apply_analyze(req, art.get("payload") or {})
             und = dict(req.get("understanding") or {})
@@ -1270,24 +2500,50 @@ def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: s
             actions.append({"role": "req-analyst", "req_id": rid, "action": "analyze_req", "engine": art.get("engine"), "step_id": gate})
             log.append({"at": _now(), "role": "req-analyst", "job": "analyze_req", "req_id": rid, "engine": art.get("engine"), "step_id": gate, "output": art.get("suggest") or "已拆验收标准"})
             _add_usage(usage, art.get("usage"))
+            _tick_flush(doc, reqs, req, rid)
 
         want_map = "draft_mindmap" in allowed and (bool(retry_jobs) or auto["auto_mindmap"])
         empty_map = not (isinstance(req.get("mindmap"), dict) and req["mindmap"].get("children"))
         if want_map and (retry_jobs or (not force and empty_map)):
+            # 重试对话框里的评论 → 知识库直接过审（不是脑图快照）
+            if note and "draft_mindmap" in retry_jobs:
+                saved = _capture_mindmap_retry_note(note=note, req=req)
+                if saved:
+                    actions.append(
+                        {
+                            "role": "knowledge",
+                            "req_id": rid,
+                            "action": "capture_retry_note",
+                            "knowledge_id": saved.get("id") or "",
+                            "step_id": gate,
+                        }
+                    )
             art = draft_mindmap(req, cases or [], doc.get("app_atlas"), user_note=note)
             req = _apply_cover_art(req, art, job="draft_mindmap", user_note=note, replace=bool(retry_jobs))
             actions.append({"role": "mindmap-writer", "req_id": rid, "action": "draft_mindmap", "engine": art.get("engine"), "step_id": gate})
             log.append({"at": _now(), "role": "mindmap-writer", "job": "draft_mindmap", "req_id": rid, "engine": art.get("engine"), "step_id": gate, "output": art.get("suggest") or "已写脑图"})
             _add_usage(usage, art.get("usage"))
+            _tick_flush(doc, reqs, req, rid)
 
         want_cases = "draft_cases" in allowed and (bool(retry_jobs) or auto["auto_cases"])
         empty_cases = not req.get("draft_cases")
-        if want_cases and (retry_jobs or (not force and (empty_cases or _gap_points(req)))):
-            art = draft_cases(req, cases or [], user_note=note, replace=bool(retry_jobs))
-            req = _apply_cover_art(req, art, job="draft_cases", user_note=note, replace=bool(retry_jobs))
+        if want_cases and (retry_jobs or (not force and empty_cases)):
+            # 重试用例默认只扔掉模板桩再补缺口，已有真用例和锁定用例都不动。
+            # 整表重写必须显式传 replace_cases；定点重写传 point_ids。
+            drop_stubs = rewrite_stubs or (bool(retry_jobs) and "draft_cases" in retry_jobs and not replace_cases)
+            art = draft_cases(
+                req,
+                cases or [],
+                user_note=note,
+                replace=replace_cases or bool(scope_ids),
+                point_ids=scope_ids or None,
+                rewrite_stubs=drop_stubs and not replace_cases and not scope_ids,
+            )
+            req = _apply_cover_art(req, art, job="draft_cases", user_note=note, replace=replace_cases)
             actions.append({"role": "case-writer", "req_id": rid, "action": "draft_cases", "engine": art.get("engine"), "step_id": gate})
             log.append({"at": _now(), "role": "case-writer", "job": "draft_cases", "req_id": rid, "engine": art.get("engine"), "step_id": gate, "output": art.get("suggest") or "已写用例草稿"})
             _add_usage(usage, art.get("usage"))
+            _tick_flush(doc, reqs, req, rid)
 
         reqs[i] = req
         req["_allowed_jobs"] = list(allowed)
@@ -1307,6 +2563,7 @@ def _tick_body(*, qa_process: dict, cases: list | None = None, requirement_id: s
         not atlas.atlas_has_nodes(current_atlas) or analyzed or force or atlas.intent_needs_patch(reqs, current_atlas)
     )
     if auto.get("auto_atlas") is not False and need_atlas and (not atlas.pending_patches(patches) or force):
+        cover_jobs.report(phase="propose_atlas", label="正在建议应用图谱")
         art = propose_atlas({"app_atlas": current_atlas, "requirements": reqs}, cases or [], user_note=note)
         after = (art.get("payload") or {}).get("atlas") or {}
         reason = (art.get("payload") or {}).get("reason") or art.get("suggest") or "建议更新应用图谱"

@@ -881,9 +881,7 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
 8. 已执行动作历史和【短期记忆】会给你。后面要对比变化（点赞前数量/样式）或找回刚做的内容时，先写入 remember，禁止丢了再去别处猜。
 9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。等待不消耗动作预算，禁止在加载页乱点或反复返回。
 10. 短期记忆：操作前把计数、样式、对象名称写入 remember；发布成功当屏必须把可找回该内容的指纹写入 published（title/when/note 用屏幕上可见的文案，不要编造）并把 subflow 设回 none。
-11. 若本条需要先创作并发布一条内容：从进入拍摄/生成到发布成功为止，subflow="create_publish"；发布成功后 subflow="none"。
-12. 禁止为凑前置环境而退出登录、切换账号、清除数据、删帖。信息流空态和当前是否主态登录不是一回事：缺空 feed 账号 → give_up（写明缺哪种环境），不要登出当前号。
-13. 禁止把不同对象的空态串起来验：个人作品/我的发布为 0，不能推出信息流/社区为空（别人的帖仍在）。对不上目标对象的空态 → give_up，不要跳到另一页继续造空。
+11. 【本步相关知识】若写明与当前目标/未完成检查点相关的操作路径（控件文案、图标、入口步骤），【优先按知识执行】；禁止改用知识未写明的替代入口或凭常识另辟路径。仅当知识与当前真实屏幕明显冲突时才可偏离，并在 thought 写明冲突点。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
 AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
@@ -950,7 +948,7 @@ def build_agent_decide_messages(
     knowledge_block = ""
     if knowledge_hint and knowledge_hint.strip():
         knowledge_block = (
-            "\n==== 本步相关知识（参考，不是脚本；以当前真实屏幕为准）====\n"
+            "\n==== 本步相关知识（与目标相关的操作路径优先按知识执行；与屏幕冲突时以屏幕为准并写明）====\n"
             f"{knowledge_hint.strip()[:4000]}\n"
         )
     user_text = AGENT_DECIDE_USER_TEMPLATE.format(

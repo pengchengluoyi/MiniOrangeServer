@@ -853,6 +853,7 @@ def _execute(
     """单台设备 worker：绑定线程 SN，按 coverage 领取单元并执行。"""
     from server.services.ai import dispatch_log as dispatch
     from server.services.runtime.device_bind import device_scope
+    from server.services.ai import app_profile as app_profile_ctx
 
     tok = dispatch.bind(
         trigger="case_run",
@@ -862,6 +863,10 @@ def _execute(
         pipeline_id=str(run_doc.get("run_id") or "") or dispatch.new_pipeline_id(),
         role="test-engineer",
     )
+    # 绑定被测应用的 UI 画像：登录判定 / 页面识别 / 导航这些通用服务在深层调用点
+    # 拿不到 App 对象，靠这个 contextvar 取应用事实（tab 文案等）。
+    # 没有对应画像时是通用默认，只用跨应用成立的信号。
+    prof_tok = app_profile_ctx.bind(package=package)
     try:
         with device_scope(sn):
             _execute_on_device(
@@ -881,6 +886,7 @@ def _execute(
             _on_worker_exit(run_doc, app_id=app_id)
     finally:
         dispatch.reset(tok)
+        app_profile_ctx.reset(prof_tok)
 
 
 def _execute_on_device(

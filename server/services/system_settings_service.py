@@ -1643,7 +1643,7 @@ def _default_plugin_config(plugin_id: str) -> Dict[str, Any]:
                 "space_id": "",
                 "root_node_token": "",
                 "folder_pattern": "{project}/版本/{version}",
-                "children": ["测试报告", "测试用例", "需求", "缺陷"],
+                "children": ["测试报告", "测试用例", "测试脑图", "需求", "缺陷"],
             },
             "notify": {
                 "bot_id": "",

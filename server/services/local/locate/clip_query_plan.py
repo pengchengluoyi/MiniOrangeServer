@@ -1,12 +1,17 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
 """
-CLIP / OCR 分路查询表（一期：造好物登录链路 curated；二期：resolver 直接消费 ClipQueryPlan）。
+CLIP / OCR 分路查询表：登录 / 授权 / 表单这类**跨应用通用**控件的查询语义。
 
 设计：
 - clip_query / clip_aliases：视觉语义，供 CLIP 通道与图标库 embedding
 - ocr_queries：屏上文字匹配，供 OCR / Hierarchy 文本通道
 - 不按业务写专用定位器；新控件靠表项 + 图标库 aliases 扩展
+
+这张表原来叫 ZAOHAOWU_LOGIN_CHAIN，但内容其实一条业务专属的都没有 —— 同意 / 仅在使用中允许 /
+协议勾选框 / 一键登录 / 账号密码输入框 / 我的 tab 全是通用控件，只有名字和注释误导。
+改名为 COMMON_LOGIN_CHAIN，并留出按应用覆写的钩子：
+应用画像 ui_profile.clip_plans 里同 key 的项会覆盖这里的默认值。
 """
 from __future__ import annotations
 
@@ -44,8 +49,8 @@ def _plan(
     )
 
 
-# 造好物 com.mathmagic.zaohaowu 登录链路（一期）
-ZAOHAOWU_LOGIN_CHAIN: Dict[str, ClipQueryPlan] = {
+# 通用登录 / 授权 / 表单控件查询表（应用可通过 ui_profile.clip_plans 覆写同 key 的项）
+COMMON_LOGIN_CHAIN: Dict[str, ClipQueryPlan] = {
     "consent_agree": _plan(
         "同意",
         "同意",
@@ -158,14 +163,42 @@ _LABEL_MATCHERS: List[Tuple[re.Pattern[str], str]] = [
 ]
 
 
+def _app_clip_plans() -> Dict[str, ClipQueryPlan]:
+    """当前应用画像里的 clip 覆写项（同 key 覆盖通用表，缺字段沿用通用表的值）。"""
+    try:
+        from server.services.ai import app_profile as ap
+
+        raw = ap.current().clip_plans or {}
+    except Exception:
+        return {}
+    out: Dict[str, ClipQueryPlan] = {}
+    for key, row in (raw or {}).items():
+        if not isinstance(row, dict):
+            continue
+        base = COMMON_LOGIN_CHAIN.get(str(key))
+        out[str(key)] = _plan(
+            str(row.get("label_key") or (base.label_key if base else key)),
+            str(row.get("clip_query") or (base.clip_query if base else key)),
+            clip_aliases=[str(x) for x in (row.get("clip_aliases") or (list(base.clip_aliases) if base else []))],
+            ocr_queries=[str(x) for x in (row.get("ocr_queries") or (list(base.ocr_queries) if base else []))],
+            region=row.get("region") if row.get("region") is not None else (base.region if base else None),
+            icon_row=bool(row.get("icon_row")) if "icon_row" in row else bool(base.icon_row if base else False),
+        )
+    return out
+
+
 def lookup_clip_query_plan(label: str) -> Optional[ClipQueryPlan]:
-    """按自然语言 label 匹配一期 query 表；未命中返回 None（走通用 _clip_search_params）。"""
+    """按自然语言 label 匹配查询表；未命中返回 None（走通用 _clip_search_params）。
+
+    优先用应用画像里的覆写项，其次通用表。
+    """
     raw = (label or "").strip()
     if not raw:
         return None
+    overrides = _app_clip_plans()
     for pat, key in _LABEL_MATCHERS:
         if pat.search(raw):
-            return ZAOHAOWU_LOGIN_CHAIN.get(key)
+            return overrides.get(key) or COMMON_LOGIN_CHAIN.get(key)
     return None
 
 

@@ -20,8 +20,22 @@ from server.services.shared.page_context.page_context_service import (
 
 TAG = "PageNavigation"
 
-BOTTOM_TAB_LABELS = ["首页", "消息", "我的", "想要"]
-SEGMENT_TAB_LABELS = ["造物秀", "AI创意", "想要成真"]
+
+def _nav_profile():
+    """当前被测应用的 UI 画像（tab 文案等应用事实的唯一来源）。"""
+    from server.services.ai import app_profile as ap
+
+    return ap.current()
+
+
+def bottom_tab_labels() -> list:
+    return list(_nav_profile().bottom_tabs)
+
+
+def segment_tab_labels() -> list:
+    return list(_nav_profile().segment_tabs)
+
+
 OVERLAY_MARKERS = ["隐私政策", "服务协议", "个人信息保护"]
 OVERLAY_DISMISS = ["同意", "同意并继续", "接受", "我知道了", "继续"]
 CONSENT_DIALOG_MARKERS = ("不同意", "同意并继续", "点击\"同意\"", "点击“同意”")
@@ -606,13 +620,16 @@ def _screen_is_consent_dialog(screen_text: str) -> bool:
 
 
 def _screen_is_startup_consent_modal(screen_text: str) -> bool:
-    """冷启动全屏隐私弹窗（造物者 + 协议文案，常含不同意/同意）。"""
+    """冷启动全屏隐私弹窗（应用品牌文案 + 协议文案，常含不同意/同意）。
+
+    品牌文案来自应用画像 ui_profile.foreground_markers，不写死某个被测应用。
+    """
     blob = screen_text or ""
     if _screen_is_login_confirm_sheet(blob):
         return False
     if _screen_is_consent_dialog(blob):
         return True
-    if "造物者" in blob and any(m in blob for m in _GENERIC_LEGAL_MARKERS):
+    if any(b in blob for b in _nav_profile().brand_markers()) and any(m in blob for m in _GENERIC_LEGAL_MARKERS):
         if any(m in blob for m in _CONSENT_DISAGREE_LABELS) or "同意" in blob:
             return True
     return False
@@ -695,7 +712,7 @@ def _screen_is_user_agreement_page(screen_text: str) -> bool:
         return False
     if any(m in blob for m in _CONSENT_DISAGREE_LABELS):
         return False
-    if "平台用户协议" in blob or "造好物 - 平台" in blob or "造好物- 平台" in blob:
+    if any(m in blob for m in _nav_profile().legal_markers()):
         return True
     if any(k in blob for k in ("发布日期", "更新日期", "生效日期")) and "协议" in blob:
         return True
@@ -1522,7 +1539,7 @@ def _screen_is_app_consent_or_privacy_overlay(blob: str) -> bool:
         m in text for m in _CONSENT_AGREE_LABELS
     ):
         return True
-    if "造物者" in text and any(m in text for m in _GENERIC_LEGAL_MARKERS):
+    if any(b in text for b in _nav_profile().brand_markers()) and any(m in text for m in _GENERIC_LEGAL_MARKERS):
         return True
     return False
 
@@ -1540,7 +1557,8 @@ def _screen_is_system_permission_dialog(ocr: str, *, engine=None) -> bool:
     if any(m in blob for m in SYSTEM_PERMISSION_STRONG_MARKERS):
         if "授予" in blob and (
             _screen_is_app_consent_or_privacy_overlay(blob)
-            or any(m in blob for m in ("隐私", "协议", "条款", "造物者"))
+            or any(m in blob for m in ("隐私", "协议", "条款"))
+        or any(b in blob for b in _nav_profile().brand_markers())
         ):
             pass
         else:
@@ -2410,7 +2428,7 @@ def _tab_recovery_steps(
     blob = screen_text or ""
     steps: List[Dict[str, Any]] = []
 
-    for tab in SEGMENT_TAB_LABELS:
+    for tab in segment_tab_labels():
         if tab.lower() in tgt or tab in (target_label or ""):
             if tab in blob or tab.lower() in cur:
                 return []
@@ -2424,10 +2442,11 @@ def _tab_recovery_steps(
             )
             return steps
 
-    for tab in BOTTOM_TAB_LABELS:
+    bottom = bottom_tab_labels()
+    for tab in bottom:
         if tab.lower() in tgt or tab in (target_label or ""):
             if tab.lower() not in cur and tab not in (current_label or ""):
-                if tab in blob or tab in BOTTOM_TAB_LABELS:
+                if tab in blob or tab in bottom:
                     steps.append(
                         {
                             "kind": "click",

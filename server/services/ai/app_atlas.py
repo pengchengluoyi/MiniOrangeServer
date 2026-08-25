@@ -35,6 +35,13 @@ def empty_atlas() -> dict:
     return {"modules": [], "updated_at": ""}
 
 
+def _int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _uniq_ids(values) -> list:
     out = []
     for item in values or []:
@@ -68,6 +75,9 @@ def normalize_feature(raw: dict | None, module_id: str = "") -> dict | None:
         "summary": str(raw.get("summary") or "").strip(),
         "req_ids": _uniq_ids(raw.get("req_ids")),
         "case_ids": _uniq_ids(raw.get("case_ids")),
+        # 脑图对齐后回填的覆盖密度。测试点本身不进图谱（图谱是产品结构，
+        # 不是覆盖清单），只在这里留个数，让人看出哪块功能测得薄。
+        "point_count": _int(raw.get("point_count")),
     }
 
 
@@ -111,6 +121,8 @@ def normalize_module(raw: dict | None, *, depth: int = 0, parent_id: str = "") -
         "parent_id": str(parent_id or raw.get("parent_id") or ""),
         "feishu_hints": [str(x).strip() for x in (raw.get("feishu_hints") or []) if str(x).strip()][:12],
         "req_ids": _uniq_ids(raw.get("req_ids")),
+        # 直接挂在这个模块下、没有归到某个功能上的测试点数量
+        "point_count": _int(raw.get("point_count")),
         "children": children,
         "features": feats,
     }
@@ -137,6 +149,7 @@ def normalize_patch(raw) -> dict | None:
     if not pid:
         return None
     status = raw.get("status") if raw.get("status") in ("pending", "accepted", "rejected") else "pending"
+    aliases = [x for x in (raw.get("aliases") or []) if isinstance(x, dict)][:40]
     return {
         "id": pid,
         "at": str(raw.get("at") or ""),
@@ -149,8 +162,10 @@ def normalize_patch(raw) -> dict | None:
         "diff": [x for x in (raw.get("diff") or []) if isinstance(x, dict)][:120],
         "lines": [str(x) for x in (raw.get("lines") or []) if str(x).strip()][:120],
         "case_changes": [x for x in (raw.get("case_changes") or []) if isinstance(x, dict)][:40],
+        "aliases": aliases,
         "status": status,
         "decided_at": str(raw.get("decided_at") or ""),
+        "reject_note": str(raw.get("reject_note") or ""),
     }
 
 
@@ -198,6 +213,7 @@ def flatten_tree(atlas: dict | None) -> list[dict]:
                 "parent_id": mod.get("parent_id") or "",
                 "req_ids": list(mod.get("req_ids") or []),
                 "case_ids": [],
+                "point_count": _int(mod.get("point_count")),
                 "child_modules": len(mod.get("children") or []),
                 "feature_count": len(mod.get("features") or []),
             }
@@ -215,6 +231,7 @@ def flatten_tree(atlas: dict | None) -> list[dict]:
                     "module_id": mod["id"],
                     "req_ids": list(feat.get("req_ids") or []),
                     "case_ids": list(feat.get("case_ids") or []),
+                    "point_count": _int(feat.get("point_count")),
                     "child_modules": 0,
                     "feature_count": 0,
                 }
@@ -558,23 +575,26 @@ def enqueue_patch(
     role: str = "req-analyst",
     reqs: list | None = None,
     case_changes: list | None = None,
+    aliases: list | None = None,
     force: bool = False,
 ) -> Optional[dict]:
     before = normalize_atlas(before)
     after = normalize_atlas(after)
     changes = [x for x in (case_changes or []) if isinstance(x, dict)][:40]
+    alias_rows = [x for x in (aliases or []) if isinstance(x, dict)][:40]
     diff = diff_atlas(before, after)
     same = _canon(before) == _canon(after)
-    if same and not changes and not force:
+    if same and not changes and not alias_rows and not force:
         return None
-    if not atlas_has_nodes(after) and not atlas_has_nodes(before) and not changes and not force:
+    if not atlas_has_nodes(after) and not atlas_has_nodes(before) and not changes and not alias_rows and not force:
         return None
-    if not diff and not changes and not force:
+    if not diff and not changes and not alias_rows and not force:
         return None
     fingerprint = _hash(
         _canon(after)
         + reason
         + json.dumps(changes, ensure_ascii=False, sort_keys=True)[:200]
+        + json.dumps(alias_rows, ensure_ascii=False, sort_keys=True)[:200]
         + str((source or {}).get("human_feedback") or "")
     )
     for row in pending_patches(patches):
@@ -592,6 +612,7 @@ def enqueue_patch(
         "diff": diff,
         "lines": diff_lines(diff, reqs),
         "case_changes": changes,
+        "aliases": alias_rows,
         "status": "pending",
         "decided_at": "",
     }
@@ -768,7 +789,13 @@ def compact_atlas(atlas: dict | None) -> list:
             "summary": mod.get("summary") or "",
             "children": [pack(c) for c in (mod.get("children") or [])],
             "features": [
-                {"id": f["id"], "name": f["name"], "summary": f.get("summary") or ""}
+                {
+                    "id": f["id"],
+                    "name": f["name"],
+                    "summary": f.get("summary") or "",
+                    # 覆盖密度：模型据此判断哪块功能测得薄，值为 0 时省掉不占 token
+                    **({"points": _int(f.get("point_count"))} if _int(f.get("point_count")) else {}),
+                }
                 for f in (mod.get("features") or [])
             ],
         }
@@ -924,3 +951,97 @@ def rule_propose(current: dict, requirements: list | None, cases: list | None) -
 
     after["updated_at"] = _now()
     return after
+
+
+def _clip_label(text: str, *, point: bool = False) -> str:
+    """和 qa_role_jobs._clip_mindmap 同一套上限，改名后写回脑图才对得上。"""
+    s = str(text or "").strip()
+    cap = 40 if point else 20
+    return s[:cap] if len(s) > cap else s
+
+
+def _ref_target_id(ref: Any) -> str:
+    if not isinstance(ref, dict):
+        return ""
+    return str(ref.get("feature_id") or ref.get("module_id") or "").strip()
+
+
+def relink_mindmap(mindmap: dict | None, atlas: dict | None) -> tuple[dict, dict]:
+    """按 atlas_ref 把脑图节点跟图谱对齐：改名同步、路径回填、删掉的标 orphan。
+
+    验收标准第 7 条。只动带 atlas_ref 的结构节点；测试点跟路径走，不单独绑 id。
+    """
+    tree = copy.deepcopy(mindmap) if isinstance(mindmap, dict) else {}
+    index = {str(r["id"]): r for r in flatten_tree(atlas) if r.get("id")}
+    stats = {"renamed": 0, "orphaned": 0, "restored": 0, "paths": 0}
+
+    def walk(node: dict) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("atlas_ref") if isinstance(node.get("atlas_ref"), dict) else None
+        tid = _ref_target_id(ref) if ref else ""
+        kind = str(node.get("kind") or "")
+        is_point = kind == "point" or (
+            kind not in ("root", "platform", "module", "feature")
+            and not [c for c in (node.get("children") or []) if isinstance(c, dict)]
+        )
+        if tid and not is_point:
+            row = index.get(tid)
+            if row:
+                want = _clip_label(row.get("name") or "")
+                cur = str(node.get("text") or node.get("title") or "").strip()
+                if want and cur != want:
+                    if "text" in node or not node.get("title"):
+                        node["text"] = want
+                    if node.get("title"):
+                        node["title"] = _clip_label(node.get("title") or "")
+                    stats["renamed"] += 1
+                path = [p.strip() for p in str(row.get("path") or "").split(" / ") if p.strip()]
+                if path and list(node.get("path") or []) != path:
+                    node["path"] = path
+                    stats["paths"] += 1
+                if node.get("orphan"):
+                    node.pop("orphan", None)
+                    stats["restored"] += 1
+                # 保持 ref 与当前 kind 一致
+                node["atlas_ref"] = {
+                    **ref,
+                    "module_id": tid if row["kind"] == "module" else str(ref.get("module_id") or ""),
+                    "feature_id": tid if row["kind"] == "feature" else str(ref.get("feature_id") or ""),
+                }
+            else:
+                if not node.get("orphan"):
+                    stats["orphaned"] += 1
+                node["orphan"] = True
+        for kid in node.get("children") or []:
+            if isinstance(kid, dict):
+                walk(kid)
+
+    if tree:
+        walk(tree)
+    return tree, stats
+
+
+def relink_all_mindmaps(doc: dict | None) -> dict:
+    """确认图谱后：所有带 atlas_ref 的需求脑图跟着改名 / 标 orphan。"""
+    next_doc = dict(doc or {})
+    atlas = normalize_atlas(next_doc.get("app_atlas"))
+    reqs = []
+    total = {"renamed": 0, "orphaned": 0, "restored": 0, "paths": 0, "reqs": 0}
+    for raw in next_doc.get("requirements") or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        mind = row.get("mindmap") if isinstance(row.get("mindmap"), dict) else None
+        if mind:
+            linked, st = relink_mindmap(mind, atlas)
+            row["mindmap"] = linked
+            if any(st.get(k) for k in ("renamed", "orphaned", "restored", "paths")):
+                total["reqs"] += 1
+                for k in ("renamed", "orphaned", "restored", "paths"):
+                    total[k] += int(st.get(k) or 0)
+        reqs.append(row)
+    next_doc["requirements"] = reqs
+    next_doc["relink_stats"] = total
+    next_doc["updated_at"] = _now()
+    return next_doc

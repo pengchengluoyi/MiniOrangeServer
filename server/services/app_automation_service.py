@@ -566,19 +566,12 @@ def _screen_suggests_test_app(
     if pkg_tail and len(pkg_tail) >= 4 and pkg_tail in blob.lower():
         return True
 
-    generic_markers = (
-        "造物者",
-        "造好物",
-        "造物者，你好",
-        "同意并继续",
-        "隐私条款",
-        "用户协议",
-        "隐私政策",
-        "访客浏览",
-        "一键登录",
-        "手机号登录",
-    )
-    return any(m in blob for m in generic_markers)
+    # 这个常量原来叫 generic_markers，内容却是某个具体应用的欢迎语 —— 命名为通用、实为专用。
+    # 通用信号（同意并继续 / 用户协议 / 一键登录…）在 app_profile.GENERIC_FOREGROUND_MARKERS，
+    # 应用专属欢迎语在该应用的 ui_profile.foreground_markers。
+    from server.services.ai import app_profile as ap
+
+    return any(m in blob for m in ap.current(package).foreground_marker_labels())
 
 
 def ensure_app_foreground(

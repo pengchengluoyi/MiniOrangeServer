@@ -155,10 +155,14 @@ def infer_region_hint(label: str) -> str:
         return "bottom"
     if re.search(r"tab", raw, re.I) and re.search(r"底部|底栏|bottom", raw, re.I):
         return "bottom"
-    for tab in ("首页", "想要", "消息", "我的", "home", "want", "profile"):
+    # tab 文案来自应用画像；通用英文名保留兜底，画像为空时行为不变。
+    from server.services.ai import app_profile as ap
+
+    prof = ap.current()
+    for tab in tuple(prof.bottom_tabs) + ("home", "want", "profile"):
         if tab.lower() in raw.lower() and len(raw) <= 12:
             return "bottom"
-    for tab in ("造物秀", "AI创意", "想要成真"):
+    for tab in prof.segment_tab_names():
         if tab in raw:
             return "segment"
     if any(k in raw.lower() for k in ("微信", "苹果", "邮箱", "密码", "wechat", "apple")):

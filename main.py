@@ -54,6 +54,7 @@ from server.routers import rImWebhook as im_webhook_router
 import server.models.app_regression_run  # noqa: F401 — register ORM table
 import server.models.app_icon_target  # noqa: F401 — register ORM table
 import server.models.case_baseline  # noqa: F401 — Step 6: case baseline / run trace
+import server.models.atlas_alias  # noqa: F401 — mindmap↔atlas alias learning
 
 # Windows COM Init (仅在 Windows 下执行)
 if platform.system() == "Windows":
@@ -433,7 +434,7 @@ def health_check():
     ip = identity["local_ip"]
     return {
         "status": "ok",
-        "version": "0.0.109",
+        "version": "0.0.110",
         "ip": ip,
         "mdns": f"http://{identity['lan_host']}:{port}",
         "gateway": {

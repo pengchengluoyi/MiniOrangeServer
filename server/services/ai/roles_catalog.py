@@ -9,26 +9,38 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from server.services.ai.plan.prompt import (
-    AI_CASE_ASSERT_SYSTEM_PROMPT,
-    AI_CASE_PLAN_SYSTEM_PROMPT,
-    AI_PLAN_SYSTEM_PROMPT,
-)
 from server.services.ai.regression.prompts import (
     AGENT_DECIDE_SYSTEM_PROMPT,
+    AGENT_DECIDE_USER_TEMPLATE,
     AGENT_RESTART_SYSTEM_PROMPT,
+    AGENT_RESTART_USER_TEMPLATE,
     ASSERT_VISION_SYSTEM_PROMPT,
+    ASSERT_VISION_USER_TEMPLATE,
     DIFF_SUMMARIZER_SYSTEM_PROMPT,
     GOAL_EXTRACT_SYSTEM_PROMPT,
+    GOAL_EXTRACT_USER_TEMPLATE,
+    HITL_COMPOSER_USER_TEMPLATE,
     HITL_PROMPT_COMPOSER_SYSTEM_PROMPT,
     KNOWLEDGE_CAPTURE_SYSTEM,
     LOCATE_VISION_SYSTEM_PROMPT,
+    LOCATE_VISION_USER_TEMPLATE,
     PERSONA_ALLOW_INSTALL_SYSTEM_PROMPT,
     PERSONA_CLEAR_CACHE_VIA_SETTINGS_SYSTEM_PROMPT,
     PERSONA_FORCE_STOP_VIA_SETTINGS_SYSTEM_PROMPT,
     PERSONA_TASK_SYSTEM_PROMPT,
+    PERSONA_TASK_USER_TEMPLATE,
     PLAN_OVERVIEW_SYSTEM_PROMPT,
+    PLAN_OVERVIEW_USER_TEMPLATE,
     SINGLE_STEP_REPLAN_SYSTEM_PROMPT,
+    SINGLE_STEP_REPLAN_USER_TEMPLATE,
+)
+from server.services.ai.plan.prompt import (
+    AI_CASE_ASSERT_SYSTEM_PROMPT,
+    AI_CASE_PLAN_SYSTEM_PROMPT,
+    AI_PLAN_SYSTEM_PROMPT,
+    AI_PLAN_USER_PROMPT_TEMPLATE,
+    VOLCENGINE_DOUBAO_COORD_PRECISION_APPEND,
+    VOLCENGINE_DOUBAO_JSON_ONLY_APPEND,
 )
 
 # 飞书单元格解析 prompt 目前写在函数体内；此处镜像一份供观察，改源码时请同步。
@@ -132,15 +144,15 @@ REQ_ANALYST_SYSTEM_PROMPT = """你是 MiniOrange 的需求分析师。先把需�
 
 【读文档时必须挖出来（漏一项视为没读懂）】
 1. 端 / 后台：把原文里出现的 App、Web、H5、运营平台、运营后台、管理端、CMS 全部列入 surfaces 和 impact.platforms。运营平台/后台 = web，不是 App。禁止只因为标题像客户端需求就只出 App。有「App 下单 / 后台配置」这类关系时必须出 e2e。
-2. 入口与页面身份：写清从哪进（首页 / 我的 / 消息 / 其他）、上一页是什么、当前页像什么。定制页若类似商品详情页，前面必有模版/列表入口，不要臆造首页入口。journeys 必填。
-3. 新增 vs 维持：文档点名的新能力进 new_features 并标 focus=true，必须作为独立功能测。明确「维持原逻辑」的进 keep_features，仍要回归，不要用新功能覆盖掉。例如：传图定制=上传本地图再下单（新）；创意定制=和 agent 对话出图（维持）。
+2. 入口与页面身份：写清从哪进（首页 / 我的 / 消息 / 其他）、上一页是什么、当前页像什么。详情页若类似商品详情，前面必有列表入口，不要臆造首页入口。journeys 必填。
+3. 新增 vs 维持：文档点名的新能力进 new_features 并标 focus=true，必须作为独立功能测。明确「维持原逻辑」的进 keep_features，仍要回归，不要用新功能覆盖掉。例如：本地上传后提交（新）；对话生成（维持）。
 4. 上传 / 图片 / 文件：只要有选图、上传、相册、相机，exceptions 里必须有异常兜底（格式、大小、失败、取消、权限拒绝、超时、损坏图），并落成异常测试点。
-5. 后台功能不要概括成一句「运营配置」。模型管理、定制专区、名单里的每个后台能力都要单独进 surfaces.features 和测试点。
+5. 后台功能不要概括成一句「运营配置」。资源管理、业务配置、名单里的每个后台能力都要单独进 surfaces.features 和测试点。
 
 【产品视角怎么拆】
 - 按用户走完这件事的流程拆：入口 → 上一页 → 当前页 → 能力 → 下单/保存/配置结果。
 - 模块 = 用户能进入的一块产品面。子模块可以是子页面。功能 = 该面上可验证的能力。
-- 例：我的 → 定制模版页 → 定制页（像商品详情）→ 传图定制。不要把「定制页工具链路优化」写成一个平级模块名。
+- 例：我的 → 列表页 → 详情页（像商品详情）→ 本地上传提交。不要把「详情页工具链路优化」写成一个平级模块名。
 
 【端 / 平台（必须写清）】
 - platforms 用 app / web / e2e，不要只写 android/ios 除非确实只改其中一个系统。
@@ -163,18 +175,18 @@ REQ_ANALYST_SYSTEM_PROMPT = """你是 MiniOrange 的需求分析师。先把需�
   "baseline": "原来这个功能做什么；没有把握就写推断",
   "delta": "这次改了什么、没改什么",
   "journeys": [
-    {"entry": "我的", "via": ["定制模版页"], "page": "定制页", "page_like": "商品详情页", "platform": "app"}
+    {"entry": "我的", "via": ["列表页"], "page": "详情页", "page_like": "商品详情页", "platform": "app"}
   ],
-  "new_features": [{"name": "传图定制", "how": "上传本地图片后下单", "focus": true, "platform": "app"}],
-  "keep_features": [{"name": "创意定制", "how": "与 agent 对话生成图片", "platform": "app"}],
+  "new_features": [{"name": "本地上传提交", "how": "上传本地图片后提交", "focus": true, "platform": "app"}],
+  "keep_features": [{"name": "对话生成", "how": "与 agent 对话生成内容", "platform": "app"}],
   "exceptions": [{"scene": "图片上传失败", "need": "有兜底提示且可重试", "platform": "app"}],
   "surfaces": [
-    {"name": "App", "kind": "app", "features": ["定制模版页", "定制页", "传图定制", "创意定制"]},
-    {"name": "运营平台", "kind": "web", "features": ["模型管理", "定制专区"]}
+    {"name": "App", "kind": "app", "features": ["列表页", "详情页", "本地上传提交", "对话生成"]},
+    {"name": "运营平台", "kind": "web", "features": ["资源管理", "业务配置"]}
   ],
   "ac": ["可验证的验收标准"],
   "features": [{"name": "功能名", "notes": "属于哪条路径、哪个端、新还是维持"}],
-  "points": [{"id": "tp1", "kind": "正向|异常|边界", "text": "可观察的测试点", "path": ["我的", "定制模版页", "定制页", "传图定制"], "platform": "app|web|e2e"}],
+  "points": [{"id": "tp1", "kind": "正向|异常|边界", "text": "可观察的测试点", "path": ["我的", "列表页", "详情页", "本地上传提交"], "platform": "app|web|e2e"}],
   "risks": ["风险"],
   "impact": {
     "platforms": ["app", "web", "e2e"],
@@ -183,13 +195,13 @@ REQ_ANALYST_SYSTEM_PROMPT = """你是 MiniOrange 的需求分析师。先把需�
     "notes": "会碰到哪些模块/功能，哪些已有用例可能过时"
   },
   "hang": {
-    "paths": [["我的", "定制模版页", "定制页"]],
+    "paths": [["我的", "列表页", "详情页"]],
     "module_names": ["已有或建议的模块名"],
     "feature_names": ["叶子功能名"]
   },
   "atlas_create": [
-    {"kind": "module", "name": "定制模版页", "parent_name": "我的", "summary": "从我的进入的模版列表"},
-    {"kind": "feature", "name": "传图定制", "path": ["我的", "定制模版页", "定制页"], "summary": "上传本地图下单"}
+    {"kind": "module", "name": "列表页", "parent_name": "我的", "summary": "从我的进入的可选列表"},
+    {"kind": "feature", "name": "本地上传提交", "path": ["我的", "列表页", "详情页"], "summary": "上传本地文件后提交"}
   ]
 }
 
@@ -199,7 +211,7 @@ REQ_ANALYST_IMPACT_PROMPT = """你是 MiniOrange 的需求分析师，正在做�
 
 【图谱原则】
 - 按真实产品结构嵌套：大模块 → 子模块（页面）→ 功能。层数跟产品走。
-- 项目名、应用名、需求标题不是模块。不要新建一层叫「造好物」或把需求全称当模块名。
+- 项目名、应用名、需求标题不是模块。不要新建一层叫应用名，或把需求全称当模块名。
 - 优化需求：优先挂到已有节点，写清改的是哪条路径；不要因为标题像新功能就新建一棵树。
 - 不要按需求文档优先级平铺。飞书分区只是对照。
 - 端的差异写在 reason 里（App / Web / 是否端到端），骨架本身仍是产品结构，不要为每个端复制一套同名模块，除非两边信息架构真的不同。
@@ -252,15 +264,29 @@ MINDMAP_WRITER_SYSTEM_PROMPT = """你是 MiniOrange 的测试脑图编写。脑�
 - 图谱是人确认过的产品骨架。脑图是「这条需求 × 这一版 × 各个端」要测什么，不是另一张产品结构图。
 - 第一层必须是端：App / Web / 端到端。运营平台、后台、CMS 一律挂在 Web 下，不要吞掉。
 - 端下面才是产品流程：入口所在模块 → 上一页 → 当前页 → 功能 → 测试点。按用户真实走路拆，不要按需求文档小节平铺。
-- 禁止把项目名、应用名、需求标题写成模块。也不要默认入口在首页。journeys.entry 写在哪就从哪开始（例如我的 → 定制模版页 → 定制页）。
-- 定制页若被标成类似商品详情页：模版/列表入口、详情主信息、下单/定制动作都要有点，不能只写工具条。
-- new_features 每个名字必须有独立功能枝，focus=true 的要加厚（正向 + 异常 + 边界）。keep_features 必须保留回归枝，不要被新功能挤掉。例：传图定制=本地上传后下单；创意定制=和 agent 对话出图，两套路径分开写。
+- 禁止把项目名、应用名、需求标题写成模块。也不要默认入口在首页。journeys.entry 写在哪就从哪开始（例如我的 → 列表页 → 详情页）。
+- 详情页若被标成类似商品详情页：列表入口、详情主信息、提交/下单动作都要有点，不能只写工具条。
+- new_features 每个名字必须有独立功能枝，focus=true 的要加厚（正向 + 异常 + 边界）。keep_features 必须保留回归枝，不要被新功能挤掉。例：本地上传后提交；对话生成，两套路径分开写。
 - exceptions 每条都要变成异常测试点。有上传就必须有失败/取消/格式/权限兜底，不能只有成功上传。
 - 优化/改造需求必须同时覆盖：（1）改动前的原主流程回归（2）这次每一个改点（3）改点带来的异常、边界、权限、空态、失败回滚、跨端同步。
 - 需求原文、验收标准、surfaces、journeys 里提到的每一件事都要落到至少一个测试点。
 - 叶子是测试点。只有没有子节点的节点才是 kind=point；中间层必须是 module / feature，禁止把模块、页面标成测试点。
+- 严格层级：端 → 模块(module) → 功能(feature) → 测试点(point)。
+  - 模块的 children 只能是 module 或 feature，禁止把测试点直接挂在模块下。
+  - 功能的 children 只能是 point，禁止功能与测试点同级并挂。
+  - 禁止出现「功能 A」旁边一长串完整场景句与它同级（那是把测试点误挂成了兄弟节点）。
+  - 测试点 text 写成可判定的一句话（8～40 字），不要写成整段验收描述；细节放 detail。
 - text 写成可判定的一句话（8～40 字），可用 detail 补场景。
-- 若输入含 previous_mindmap：在上一版上补漏和加深，不要无故删除已有测试点。retry_note / human_feedback 必须逐条落实。
+- 若输入含 previous_mindmap / previous_branch：这是权威基线。在上一版上按 retry_note / human_feedback 修订，不要另起一棵更大的树。
+  - 评论没点名的模块/功能/测试点尽量原样保留（含 id）
+  - 评论要求补漏就加；要求改结构（挪模块、拆功能、改入口）就改；要求删就删
+  - 禁止把上一版和这次新写的拼成两套平行结构；补点时挂到已有功能下，不要在模块旁再平铺一串点
+- 若 scope.mode=revise：只输出该端完整一枝（含测试点），children 里只能有一个 kind=platform 的根。以 scope.previous_branch 为基线修订。仍须遵守「模块→功能→测试点」层级。
+- 若输入含 scope.platform：这一轮只输出该端的一枝（children 里只能有一个 kind=platform 的根），不要写其他端。
+- 若输入含 scope.already：这些模块已经写过，不要重复，只补还没覆盖的模块和测试点。
+- 若 scope.mode=skeleton：只输出端 → 模块 → 功能骨架。功能节点的 children 必须是空数组，不要写测试点。
+- 若 scope.mode=fill_points：只给 scope.branch 这一枝写测试点。输出 {"points":[{"text":"可判定的一句话","kind":"正向|异常|边界","detail":""}]}，不要重复整棵树。focus=true 的功能至少 3 个点（正向+异常+边界）；普通功能至少 2 个点。
+- 若 scope.mode=patch：只补 scope.missing 列出的缺口，输出同样的 points 数组，挂到最相关的功能下。
 
 【端怎么划】
 - kind=platform，platform 取值 app / web / e2e。
@@ -311,12 +337,12 @@ CASE_WRITER_SYSTEM_PROMPT = """你是 MiniOrange 的测试用例编写。测试�
   - 边界/空态：涉及输入、列表、数量、文件大小/格式时必有
   - 权限/未登录：涉及账号、能力开关时必有
 - 一条用例只覆盖一个测试点上的一种情况，point_ids 只含那一个 id，并写 aspect（正向|异常|边界|权限）。
-- 步骤从 journeys.entry 走，不要默认首页。传图=本地上传下单；创意定制=和 agent 对话出图。
+- 步骤从 journeys.entry 走，不要默认首页。本地上传=选文件后提交；对话生成=和 agent 对话产出。
 - 运营平台/Web 的点 platform=web；跨端结果 e2e。
 - module 用图谱路径短横线连接。
 
 【反推脑图】
-写用例时对照 journeys、new_features、keep_features、exceptions、原文。若发现必须测的情况在本批 points 里没有对应测试点，不要塞进无关点，输出到 missing_points。
+对照 journeys、new_features、keep_features、exceptions、原文。all_points 是整张脑图已有测试点（不只是本批）。只有整张脑图都没有、且本需求必须测的场景，才进 missing_points。本批没轮到、但 all_points 里已有的，不要重复报。最多报 5 条。
 
 【输出 JSON（禁止 Markdown）】
 {
@@ -324,7 +350,7 @@ CASE_WRITER_SYSTEM_PROMPT = """你是 MiniOrange 的测试用例编写。测试�
     {
       "case_id": "draft-tp1-ok",
       "name": "用例名",
-      "module": "我的-定制模版页-定制页-传图定制",
+      "module": "我的-列表页-详情页-本地上传提交",
       "aspect": "正向",
       "precondition": "前置",
       "steps": "1. ...\\n2. ...\\n3. ...",
@@ -334,7 +360,7 @@ CASE_WRITER_SYSTEM_PROMPT = """你是 MiniOrange 的测试用例编写。测试�
     }
   ],
   "missing_points": [
-    {"text": "上传失败有兜底提示", "path": ["我的", "定制模版页", "定制页", "传图定制"], "platform": "app", "kind": "异常", "reason": "脑图只有成功上传，没有失败兜底"}
+    {"text": "上传失败有兜底提示", "path": ["我的", "列表页", "详情页", "本地上传提交"], "platform": "app", "kind": "异常", "reason": "脑图只有成功上传，没有失败兜底"}
   ]
 }"""
 
@@ -345,7 +371,7 @@ TEST_ENGINEER_SYSTEM_PROMPT = """你是 MiniOrange 的测试工程师。你负�
 - 规划可执行步骤、根据截图定位元素、判断当前屏是否达到预期。
 - 失败时说明看到了什么、卡在哪一步、建议重试还是交给人。
 - 设备在调度时选定；环境（测试/预发/正式）来自流程节点，不由你临时改。
-- 开跑前调用「筛测试账号」：把这条用例要测的事写成一句话（例如「我要发造物秀」），从资产里的测试账号按环境和业务标签挑号。不要把手机号写死在步骤里。
+- 开跑前调用「筛测试账号」：把这条用例要测的事写成一句话（例如「我要发作品」），从资产里的测试账号按环境和业务标签挑号。不要把手机号写死在步骤里。
 
 【你不管什么】
 - 不宣布「验收通过 / 带风险验收 / 退回重测」（需求QA BM）。
@@ -461,7 +487,7 @@ PRODUCT_EXPERT_SYSTEM_PROMPT = """你是 MiniOrange 的产品专家。你十分�
 PICK_ACCOUNT_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「筛测试账号」能力。根据场景一句话，从项目资产里的测试账号中挑最合适的号。
 
 【你管什么】
-- 输入：场景（如「我要发造物秀」）、目标环境、账号列表（名称、环境、标签、是否占用）。
+- 输入：场景（如「我要发作品」）、目标环境、账号列表（名称、环境、标签、是否占用）。
 - 输出：首选一个账号，并按匹配度排序。优先业务标签，再看名称和备注。占用中的往后排。
 - 环境以流程节点为准；场景里写了「测试/预发/正式」时按该环境收窄。
 
@@ -469,7 +495,7 @@ PICK_ACCOUNT_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「筛测试
 - 不登录、不改号、不编造池子里没有的账号。
 
 【输出 JSON（禁止 Markdown）】
-{"account_id":"首选id","reason":"一句话","ranked":[{"id":"...","score":12,"reason":"标签命中造物秀"}]}
+{"account_id":"首选id","reason":"一句话","ranked":[{"id":"...","score":12,"reason":"标签命中作品流"}]}
 """
 
 EXPLAIN_OVERLAY = """【观察沙盒】你正在设置页被用来观察这个角色。优先用中文说明自己的职责、输入、输出和限制。若用户给出可按原协议执行的任务，再按原协议作答。不要假装已经操作了真机或改写了流程门禁。"""
@@ -1014,6 +1040,218 @@ def _runtime_roles() -> List[dict[str, Any]]:
     ]
 
 
+def _aux_prompt_roles() -> List[dict[str, Any]]:
+    """原先未进目录的 user 模板 / 厂商补丁 / 遗留 / 观察叠加，统一挂进来便于对照。"""
+    from server.services.im_prompts import LEGACY_IM_DIALOGUE_PROMPT
+
+    src_reg = "server/services/ai/regression/prompts.py"
+    src_plan = "server/services/ai/plan/prompt.py"
+    src_im = "server/services/im_prompts.py"
+    src_cat = "server/services/ai/roles_catalog.py"
+    return [
+        _role(
+            id="legacy-im-dialogue",
+            label="遗留 · IM 对话 prompt",
+            group="meta",
+            kind="conversational",
+            source=src_im,
+            used_in=["历史迁移对照"],
+            summary="旧版 IM 测试助手 prompt，现已被 im-qa-assistant 取代；仅保留对照。",
+            system_prompt=LEGACY_IM_DIALOGUE_PROMPT,
+            live=False,
+            owner="im-qa-assistant",
+            called="unused",
+            triggers=["不再默认调用"],
+        ),
+        _role(
+            id="explain-overlay",
+            label="观察沙盒叠加层",
+            group="meta",
+            kind="text",
+            source=src_cat,
+            used_in=["设置页角色对话 explain_mode"],
+            summary="设置页「观察沙盒」时叠在角色 system prompt 前面的说明层。",
+            system_prompt=EXPLAIN_OVERLAY,
+            live=True,
+            owner="conductor",
+            called="sandbox",
+            triggers=["设置页开启观察模式"],
+        ),
+        _role(
+            id="volcengine-doubao-coord-append",
+            label="补丁 · Doubao 坐标归一化",
+            group="meta",
+            kind="text",
+            source=src_plan,
+            used_in=["ai-plan / ai-case-plan"],
+            summary="火山 Doubao 规划时追加的 0~1000 坐标约束。",
+            system_prompt=VOLCENGINE_DOUBAO_COORD_PRECISION_APPEND,
+            live=True,
+            owner="test-engineer",
+            called="gated",
+            triggers=["Plan 使用 Doubao 模型时"],
+        ),
+        _role(
+            id="volcengine-doubao-json-append",
+            label="补丁 · Doubao 仅 JSON",
+            group="meta",
+            kind="text",
+            source=src_plan,
+            used_in=["ai-plan / ai-case-plan"],
+            summary="火山 Doubao thinking 模型追加的「只输出 JSON」约束。",
+            system_prompt=VOLCENGINE_DOUBAO_JSON_ONLY_APPEND,
+            live=True,
+            owner="test-engineer",
+            called="gated",
+            triggers=["Plan 使用 Doubao thinking 模型时"],
+        ),
+        _role(
+            id="user-plan-overview",
+            label="User · 回归规划",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["plan-overview"],
+            summary="PLAN_OVERVIEW 的 user 侧模板。",
+            system_prompt=PLAN_OVERVIEW_USER_TEMPLATE,
+            related_ids=["plan-overview"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Plan 模式开跑"],
+        ),
+        _role(
+            id="user-single-step-replan",
+            label="User · 单步重规划",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["single-step-replan"],
+            summary="SINGLE_STEP_REPLAN 的 user 侧模板。",
+            system_prompt=SINGLE_STEP_REPLAN_USER_TEMPLATE,
+            related_ids=["single-step-replan"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Plan 某步失败"],
+        ),
+        _role(
+            id="user-locate-vision",
+            label="User · 视觉定位",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["locate-vision"],
+            summary="LOCATE_VISION 的 user 侧模板。",
+            system_prompt=LOCATE_VISION_USER_TEMPLATE,
+            related_ids=["locate-vision"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["需要 VLM 定位"],
+        ),
+        _role(
+            id="user-assert-vision",
+            label="User · 视觉断言",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["assert-vision"],
+            summary="ASSERT_VISION 的 user 侧模板。",
+            system_prompt=ASSERT_VISION_USER_TEMPLATE,
+            related_ids=["assert-vision"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["视觉断言"],
+        ),
+        _role(
+            id="user-hitl-composer",
+            label="User · 问人话术",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["hitl-composer"],
+            summary="HITL_PROMPT_COMPOSER 的 user 侧模板。",
+            system_prompt=HITL_COMPOSER_USER_TEMPLATE,
+            related_ids=["hitl-composer"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["human_* 问人"],
+        ),
+        _role(
+            id="user-persona-task",
+            label="User · 拟人化任务",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["persona-task"],
+            summary="PERSONA_TASK 的 user 侧模板。",
+            system_prompt=PERSONA_TASK_USER_TEMPLATE,
+            related_ids=["persona-task"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["persona_subtask"],
+        ),
+        _role(
+            id="user-goal-extract",
+            label="User · 目标抽取",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["goal-extract"],
+            summary="GOAL_EXTRACT 的 user 侧模板。",
+            system_prompt=GOAL_EXTRACT_USER_TEMPLATE,
+            related_ids=["goal-extract"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Agent 开跑"],
+        ),
+        _role(
+            id="user-agent-decide",
+            label="User · 真机决策",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["agent-decide"],
+            summary="AGENT_DECIDE 的 user 侧模板（含目标/检查点/知识块占位）。",
+            system_prompt=AGENT_DECIDE_USER_TEMPLATE,
+            related_ids=["agent-decide"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Agent 每一步"],
+        ),
+        _role(
+            id="user-agent-restart",
+            label="User · 开场重启判断",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["agent-restart"],
+            summary="AGENT_RESTART 的 user 侧模板。",
+            system_prompt=AGENT_RESTART_USER_TEMPLATE,
+            related_ids=["agent-restart"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Agent 开场"],
+        ),
+        _role(
+            id="user-ai-plan",
+            label="User · Copilot Plan",
+            group="meta",
+            kind="text",
+            source=src_plan,
+            used_in=["ai-plan", "ai-case-plan"],
+            summary="AI_PLAN / AI_CASE_PLAN 共用的 user 侧模板。",
+            system_prompt=AI_PLAN_USER_PROMPT_TEMPLATE,
+            related_ids=["ai-plan", "ai-case-plan"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Copilot / 飞书逐步规划"],
+        ),
+    ]
+
+
+def _all_catalog_rows() -> List[dict[str, Any]]:
+    return _product_roles() + _runtime_roles() + _aux_prompt_roles()
+
+
 RUNTIME_META = {
     "propose_atlas": {"owner": "req-analyst", "called": "wired", "triggers": ["需求分析后判断影响范围", "流程 tick", "用例 Tab · 变更"]},
     "pick_account": {"owner": "test-engineer", "called": "wired", "triggers": ["下发冒烟/功能/回归", "资产 → 效果测试"]},
@@ -1040,6 +1278,21 @@ RUNTIME_META = {
     "copilot-rewrite": {"owner": "test-engineer", "called": "gated", "triggers": ["飞书步骤改写成 Copilot 指令"]},
     "expectation-claims": {"owner": "case-writer", "called": "gated", "triggers": ["预期拆成原子断言"]},
     "assert-match": {"owner": "test-engineer", "called": "gated", "triggers": ["规则对不上时的页面语义判断"]},
+    # meta / aux
+    "legacy-im-dialogue": {"owner": "im-qa-assistant", "called": "unused", "triggers": ["不再默认调用"]},
+    "explain-overlay": {"owner": "conductor", "called": "sandbox", "triggers": ["设置页观察模式"]},
+    "volcengine-doubao-coord-append": {"owner": "test-engineer", "called": "gated", "triggers": ["Doubao Plan 坐标约束"]},
+    "volcengine-doubao-json-append": {"owner": "test-engineer", "called": "gated", "triggers": ["Doubao Plan JSON 约束"]},
+    "user-plan-overview": {"owner": "test-engineer", "called": "gated", "triggers": ["Plan 模式开跑"]},
+    "user-single-step-replan": {"owner": "test-engineer", "called": "gated", "triggers": ["Plan 某步失败"]},
+    "user-locate-vision": {"owner": "test-engineer", "called": "gated", "triggers": ["需要 VLM 定位"]},
+    "user-assert-vision": {"owner": "test-engineer", "called": "gated", "triggers": ["视觉断言"]},
+    "user-hitl-composer": {"owner": "test-engineer", "called": "gated", "triggers": ["human_* 问人"]},
+    "user-persona-task": {"owner": "test-engineer", "called": "gated", "triggers": ["persona_subtask"]},
+    "user-goal-extract": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开跑"]},
+    "user-agent-decide": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 每一步"]},
+    "user-agent-restart": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场"]},
+    "user-ai-plan": {"owner": "test-engineer", "called": "gated", "triggers": ["Copilot / 飞书逐步规划"]},
 }
 
 
@@ -1063,6 +1316,21 @@ _SKILL_PROMPT_ROLE = {
     "single-step-replan": "single-step-replan",
     "hitl-composer": "hitl-composer",
     "persona-task": "persona-task",
+    "assert-match": "assert-match",
+    "legacy-im-dialogue": "legacy-im-dialogue",
+    "explain-overlay": "explain-overlay",
+    "volcengine-doubao-coord-append": "volcengine-doubao-coord-append",
+    "volcengine-doubao-json-append": "volcengine-doubao-json-append",
+    "user-plan-overview": "user-plan-overview",
+    "user-single-step-replan": "user-single-step-replan",
+    "user-locate-vision": "user-locate-vision",
+    "user-assert-vision": "user-assert-vision",
+    "user-hitl-composer": "user-hitl-composer",
+    "user-persona-task": "user-persona-task",
+    "user-goal-extract": "user-goal-extract",
+    "user-agent-decide": "user-agent-decide",
+    "user-agent-restart": "user-agent-restart",
+    "user-ai-plan": "user-ai-plan",
     "publish_wiki": "doc-keeper",
 }
 
@@ -1103,28 +1371,33 @@ def list_roles() -> dict[str, Any]:
 
     product = [_apply_role_prompt(row) for row in _product_roles()]
     runtime = []
-    for row in _runtime_roles():
+    for row in _runtime_roles() + _aux_prompt_roles():
         extra = RUNTIME_META.get(row["id"]) or {}
+        merged = {**row, **extra} if extra else dict(row)
         if extra:
-            row = {**row, **extra, "live": extra.get("called") not in ("unused", "sandbox")}
-        runtime.append(row)
+            merged["live"] = extra.get("called") not in ("unused", "sandbox")
+        runtime.append(_apply_role_prompt(merged))
     abstract = [p for p in product if p.get("group") == "abstract"]
     workers = [p for p in product if p.get("group") != "abstract"]
     stack = _load_stack()
     skills = _attach_skills(product, runtime, stack)
     trees = []
     for p in workers:
-        caps = [s for s in skills if s.get("id") in (p.get("skill_ids") or [])] or [r for r in runtime if r.get("owner") == p["id"]]
+        caps = [s for s in skills if s.get("id") in (p.get("skill_ids") or [])] or [
+            r for r in runtime if r.get("owner") == p["id"] and r.get("group") != "meta"
+        ]
         trees.append({**p, "capabilities": caps})
     owners = [{"id": t["id"], "label": t["label"], "role_ids": [t["id"], *[c["id"] for c in t.get("capabilities") or []]]} for t in trees]
     called_counts: dict[str, int] = {}
     for row in product:
         key = str(row.get("called") or "unknown")
         called_counts[key] = called_counts.get(key, 0) + 1
+    meta = [r for r in runtime if r.get("group") == "meta"]
     return {
         "abstract": abstract,
         "product": product,
         "runtime": runtime,
+        "meta": meta,
         "skills": skills,
         "skill_categories": list(stack.get("skill_categories") or []),
         "trees": trees,
@@ -1135,6 +1408,7 @@ def list_roles() -> dict[str, Any]:
             "product": len(workers),
             "abstract": len(abstract),
             "runtime": len(runtime),
+            "meta": len(meta),
             "skills": len(skills),
             "roles": len(product),
             "total": len(product),
@@ -1147,9 +1421,11 @@ def get_role(role_id: str) -> Optional[dict[str, Any]]:
     rid = str(role_id or "").strip()
     if not rid:
         return None
-    for row in _product_roles() + _runtime_roles():
+    for row in _all_catalog_rows():
         if row["id"] == rid:
-            return _apply_role_prompt(row)
+            extra = RUNTIME_META.get(rid) or {}
+            merged = {**row, **extra} if extra else row
+            return _apply_role_prompt(merged)
     return None
 
 

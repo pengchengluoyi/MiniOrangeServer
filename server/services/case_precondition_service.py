@@ -235,10 +235,22 @@ def _screen_blob(engine) -> str:
         return ""
 
 
-def _main_tab_bar_logged_in(blob: str) -> bool:
-    tabs = ("首页", "造物秀", "消息", "我的")
+def _main_tab_bar_logged_in(blob: str, profile=None) -> bool:
+    """底栏主导航齐全 ⇒ 已登录。
+
+    tab 文案是**应用事实**，来自 ui_profile，不能写死在这里 —— 写死的话换一个应用
+    永远返回 False，「已登录」前置检查永远失败，用例会在前置阶段全部阻塞。
+    画像里没有配 tab 时这条信号不可用，返回 False 交给其他信号判断（和以前对未知应用的
+    实际效果一致，但现在是显式的）。
+    """
+    from server.services.ai import app_profile as ap
+
+    prof = profile if profile is not None else ap.current()
+    tabs = prof.login_signal_tabs()
+    if not tabs:
+        return False
     hits = sum(1 for t in tabs if t in (blob or ""))
-    return hits >= 3
+    return hits >= max(1, int(prof.logged_in_tab_hits or 3))
 
 
 def _has_persisted_login_session(engine, package: str) -> Tuple[bool, str]:
@@ -276,20 +288,24 @@ def _check_logged_in(
 ) -> Tuple[bool, str]:
     from server.services.local.navigation.page_navigation_service import _screen_is_login_home
     from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
+    from server.services.ai import app_profile as ap
 
+    # 这里拿得到 package，直接按包解析画像，不依赖 contextvar 是否被绑定。
+    profile = ap.current(package)
     blob = _screen_blob(engine)
     on_login = _screen_is_login_home(blob)
-    page = _identify_page_by_screen_keywords(blob) or {}
+    page = _identify_page_by_screen_keywords(blob, profile=profile) or {}
     label = (page.get("label") or "").strip()
-    tab_logged_in = _main_tab_bar_logged_in(blob)
+    tab_logged_in = _main_tab_bar_logged_in(blob, profile)
+    logged_in_pages = profile.logged_in_pages or profile.login_signal_tabs()
 
     if expect_logged_in:
         session_ok, session_msg = _has_persisted_login_session(engine, package)
         if session_ok:
             return True, session_msg
         if tab_logged_in:
-            return True, "底栏主导航齐全（首页/造物秀/消息/我的），视为已登录"
-        if label in ("首页", "消息", "我的", "造物秀"):
+            return True, f"底栏主导航齐全（{'/'.join(profile.login_signal_tabs())}），视为已登录"
+        if label and label in logged_in_pages:
             return True, f"当前在「{label}」，视为已登录"
         if on_login and tab_logged_in:
             return True, "主界面底栏已出现（登录流程中意外完成登录，未走退出）"

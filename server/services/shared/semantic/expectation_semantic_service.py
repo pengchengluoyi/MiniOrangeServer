@@ -138,10 +138,12 @@ def pages_semantically_match(expected: str, current_label: str) -> bool:
     if exp_phone and (cur_phone or cur_norm == "手机号登录页"):
         return True
 
-    if "造物秀" in exp and "造物秀" in cur:
-        return True
-    if "造物秀" in exp and "造物秀" in (current_label or ""):
-        return True
+    # 顶栏分段 tab 的同名匹配：tab 文案来自应用画像，不写死某个被测应用。
+    from server.services.ai import app_profile as ap
+
+    for tab in ap.current().segment_tab_names():
+        if tab in exp and (tab in cur or tab in (current_label or "")):
+            return True
 
     exp_low = exp.lower().replace(" ", "")
     cur_low = cur.lower().replace(" ", "")
