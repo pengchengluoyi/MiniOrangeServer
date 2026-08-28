@@ -62,12 +62,15 @@ _JOB_TO_SKILL = {
     "review_impact": "propose_atlas",
     "edit_atlas": "propose_atlas",
     "agent-restart": "agent-decide",
+    "inspect-session": "inspect-session",
+    "pick_account": "pick_account",
     "role_chat": "",
     "qa_tick": "",
     "route": "",
     "atlas_followup": "",
-    "knowledge-capture": "",
-    "knowledge-review": "",
+    "knowledge-capture": "knowledge-capture",
+    "knowledge-review": "knowledge-review",
+    "account-tag": "account-tag",
 }
 
 _TRIGGER_SOURCE = {
@@ -117,6 +120,8 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
         return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "restart" in parsed and parsed.get("thought"):
         return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
+    if parsed.get("session") in ("logged_out", "logged_in", "unknown") and parsed.get("identity"):
+        return {"trigger": "case_run", "job": "inspect-session", "role": "test-engineer", "skill": "inspect-session", "source": "case_run"}
     if parsed.get("thought") and any(k in parsed for k in ("action", "tool", "capability_id", "done", "x", "y")):
         return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if parsed.get("thought"):
@@ -127,12 +132,39 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
         return {"trigger": "case_run", "job": "plan-overview", "role": "test-engineer", "skill": "plan-overview", "source": "case_run"}
     if parsed.get("bbox") or ("x" in parsed and "y" in parsed):
         return {"trigger": "case_run", "job": "locate-vision", "role": "test-engineer", "skill": "locate-vision", "source": "case_run"}
+    if (
+        (isinstance(parsed.get("tags"), list) and "replaces" in parsed and "reason" in parsed)
+        or ("测试账号" in sys_l and "标签" in sys_l)
+    ):
+        return {
+            "trigger": "case_run",
+            "job": "account-tag",
+            "role": "test-engineer",
+            "skill": "account-tag",
+            "source": "case_run",
+        }
+    if parsed.get("action") in ("approve", "reject", "hold") and "confidence" in parsed:
+        return {
+            "trigger": "knowledge_review",
+            "job": "knowledge-review",
+            "role": "knowledge-reviewer",
+            "skill": "knowledge-review",
+            "source": "knowledge_review",
+        }
     if isinstance(parsed.get("items"), list):
-        return {"trigger": "knowledge_capture", "job": "knowledge-capture", "role": "version-qa-bm", "source": "knowledge_capture"}
+        return {
+            "trigger": "knowledge_capture",
+            "job": "knowledge-capture",
+            "role": "version-qa-bm",
+            "skill": "knowledge-capture",
+            "source": "knowledge_capture",
+        }
     if "抽取目标" in sys_l or "goal-extract" in sys_l:
         return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "是否先重开" in sys_l or "agent-restart" in sys_l:
         return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
+    if "登录会话" in sys_l or "inspect-session" in sys_l:
+        return {"trigger": "case_run", "job": "inspect-session", "role": "test-engineer", "skill": "inspect-session", "source": "case_run"}
     if "下一个动作" in sys_l or "agent-decide" in sys_l:
         return {"trigger": "case_run", "job": "agent-decide", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
     if "检查点" in sys_l or "assert-vision" in sys_l:

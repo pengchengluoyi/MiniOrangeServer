@@ -275,7 +275,7 @@ class RunReport(BaseModel):
     run_id: str
     case_id: str = ""
     sn: str = ""
-    overall_status: Literal["pass", "fail", "partial", "declined", "blocked"] = "pass"
+    overall_status: Literal["pass", "fail", "partial", "declined", "blocked", "untestable"] = "pass"
 
     total_events: int = 0
     passed: int = 0
@@ -356,6 +356,7 @@ class AgentDecision(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     remember: list[str] = Field(default_factory=list, description="本步要写入短期记忆的事实")
     checkpoint_ids: list[str] = Field(default_factory=list, description="本步正在验证/已达成的检查点 id")
+    knowledge_ids: list[str] = Field(default_factory=list, description="本步要点名展开的知识 id，不点名则不展开正文")
     subflow: str = Field("none", description="none | create_publish，创作发布子流程中不占主预算")
     published: dict[str, Any] = Field(default_factory=dict, description="发布成功时的内容指纹")
     raw_llm: dict[str, Any] = Field(default_factory=dict)

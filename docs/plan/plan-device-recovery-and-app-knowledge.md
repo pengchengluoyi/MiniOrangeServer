@@ -3,7 +3,7 @@
 > 目标：把「用例跑挂」从**一次性猜谜**变成**分层归因 + 可积累的解法**，并让「这东西能不能测」变成一张显式的表。
 > 四层：**L0 系统层**（LLM 决策 + 跨 app 经验）· **L1 引擎护栏**（只止损）· **L2 应用知识层**（文档学习 + 持续存储 + 快检索）· **L3 能力覆盖层**（测试类目）。
 > 基准案例：任务 `898b2038`（`cr-898b203890ac`，13 条 / 3 过 / 10 挂 / 55 分钟）。
-> 相关文档：[用任务 ID 找日志](regression/find-task-logs.md)、[执行全链路（旧引擎）](regression/execution-flow.md)、**[本方案的利弊与业界做法对照](plan-review-and-industry-comparison.md)**（含 27 条修订建议）、**[Skill Pack 可插拔方案与控制台](plan-skill-packs-and-console.md)**（本方案的落地形态：四类扩展全部 YAML 化 + 前端交互 + 调试闭环）。
+> 相关文档：[用任务 ID 找日志](../regression/find-task-logs.md)、[执行全链路（旧引擎）](../regression/execution-flow.md)、**[本方案的利弊与业界做法对照](plan-review-and-industry-comparison.md)**（含 27 条修订建议）、**[Skill Pack 可插拔方案与控制台](plan-skill-packs-and-console.md)**（本方案的落地形态：四类扩展全部 YAML 化 + 前端交互 + 调试闭环）。
 
 ---
 
@@ -41,7 +41,7 @@
 1. `config.json` 里有一条人手写的知识 —— 标题「屏幕黑屏」、内容「需要电亮屏幕」、`app_ids: []`。**这本该是代码，不是知识条目**；而它即使写成了知识，agent 也读不到。
 2. 63 条知识里 62 条绑在另一个 app（`f6e02aaf`），造物相机（`b5431352`）**零条**。所以这次任务全靠模型现场猜。
 
-而现有的 app 私有逻辑是**硬编码**的（`tap_consent_agree_on_engine`、`is_overlay_dismiss_target_label`，见 [造好物登录方案](regression/zaohaowu-login-solutions.md)）—— 这正是"不同 app 不同逻辑无法通用化归类"的现实写照：每来一个 app 就往引擎里塞一批 if。
+而现有的 app 私有逻辑是**硬编码**的（`tap_consent_agree_on_engine`、`is_overlay_dismiss_target_label`，见 [造好物登录方案](../regression/zaohaowu-login-solutions.md)）—— 这正是"不同 app 不同逻辑无法通用化归类"的现实写照：每来一个 app 就往引擎里塞一批 if。
 
 ---
 
@@ -137,7 +137,7 @@ class DeviceEvidence:
 
 实现要点：
 - 一次 `probe_device_state` 调用批量取回（§2.5 定义的取证 capability），**1s 内结果缓存**，正常屏每步只多一次 shell；
-- `logcat_tail` 只在有崩溃线索时抓，直接补上[日志盲区](regression/find-task-logs.md)（`898b2038` 整包 13 条用例没有一条被测应用侧日志）；
+- `logcat_tail` 只在有崩溃线索时抓，直接补上[日志盲区](../regression/find-task-logs.md)（`898b2038` 整包 13 条用例没有一条被测应用侧日志）；
 - 采集失败**不阻断**，字段留 `unknown` 交给模型判断。
 
 ### 2.3 廉价预筛（代码唯一的职责之二：决定是否叫模型）
@@ -346,7 +346,7 @@ if self.sysagent.should_engage(screen, evidence):                               
 
 - SystemAgent 的每一步以 `event_kind="system"`、`capability_id="system_<动作>"` 落 `event_results`，**不进 `_decision_used`、不进 `_wait_rounds`**；
 - `RunReport` 新增 `env_interventions`（唤起轮数）、`env_llm_steps`（系统层 LLM 步数）、`app_crashes`，让"这次跑得干净不干净"是几个数字，而不是埋在 22 条 `wait_ms` 里；
-- 崩溃 logcat 落 `EventResult.raw_response`，补上[日志盲区](regression/find-task-logs.md)；
+- 崩溃 logcat 落 `EventResult.raw_response`，补上[日志盲区](../regression/find-task-logs.md)；
 - 系统层与业务层的 trace 在回放 UI 上**分色显示**，避免"到底是环境折腾还是业务在走"看不出来。
 
 ---

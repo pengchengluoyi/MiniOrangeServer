@@ -169,6 +169,29 @@ def _ask_json(
     facts = ap.current().facts_prompt()
     if facts:
         messages.append({"role": "user", "content": facts})
+    from server.services.system_settings_service import (
+        knowledge_prompt_snippet,
+        match_testing_knowledge,
+    )
+
+    knowledge_text = ""
+    try:
+        app_id = str((dispatch.ctx() or {}).get("app_id") or "")
+        query = user if isinstance(user, str) else str(user or "")
+        hits = match_testing_knowledge(
+            query[:2000],
+            app_id=app_id or None,
+            limit=3,
+        )
+        knowledge_text = "\n".join(
+            knowledge_prompt_snippet(item)
+            for item in hits
+            if item.get("used")
+        )
+    except Exception:
+        knowledge_text = ""
+    if knowledge_text:
+        messages.append({"role": "user", "content": knowledge_text})
     if stable:
         messages.append({"role": "user", "content": stable})
     messages.append({"role": "user", "content": user})
@@ -1129,6 +1152,9 @@ def _normalize_draft_case(row: dict, index: int) -> dict:
     out["steps"] = steps
     out["expected"] = expected
     out["precondition"] = _case_text(out.get("precondition") or out.get("pre")) or "账号可用，应用可启动"
+    out["steps_raw"] = steps
+    out["expected_raw"] = expected
+    out["precondition_raw"] = out["precondition"]
     out["platform"] = out.get("platform") or "双端"
     out["aspect"] = str(out.get("aspect") or out.get("kind") or "正向").strip() or "正向"
     # origin：llm | stub | human | import。缺省视为 llm（模型写的）。

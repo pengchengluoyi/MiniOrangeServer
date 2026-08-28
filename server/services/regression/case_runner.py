@@ -6,12 +6,12 @@
 ====
 - 把 case dict（数据源是应用 qa_process.draft_cases）映射成 CaseSpec
 - 启动多 case 回归（同步 / 后台线程两种模式）
-- 真设备闸门：build_run_context 后若 adb=remote=false，立刻把 run 标失败
+- 真设备闸门：build_run_context 后若 adb=remote=ios 全断，立刻把 run 标失败
+- 单用例一律 Agent（看图闭环）；不再分 plan / auto
 - AI provider 固定从「密钥配置 → 大模型 Key」里读取「可用 + 用例」那条，不在请求里覆盖
 - 提供 trace / baseline / promote 三类只读 helper
 
-不替代 feishu_regression_service：本模块是平行、新的 CaseRunner 入口；
-路由层有 /feishu/run (legacy) 与 /case-runner/run (本模块) 两条路径。
+HTTP：`/case-runner/run` 为主入口；`/feishu/run` 兼容转发到本模块。
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ _LOCK = threading.RLock()
 # 已 persist_run_start 过的 run_id（避免重复 INSERT）
 _PERSISTED: set[str] = set()
 # 用例终态（触发 case_finished 事件）
-_CASE_TERMINAL = {"pass", "fail", "failed", "blocked", "declined", "skipped", "cancelled"}
+_CASE_TERMINAL = {"pass", "fail", "failed", "blocked", "declined", "skipped", "cancelled", "untestable"}
 
 
 def _snapshot(run_doc: dict[str, Any]) -> dict[str, Any]:
@@ -482,11 +482,42 @@ def to_case_spec(
     if precondition_raw.strip():
         pre_parts.append(precondition_raw.strip())
 
-    steps_text = list(case.get("steps") or [])
-    step_nums = list(case.get("step_nums") or list(range(1, len(steps_text) + 1)))
-    expected_by_step = dict(case.get("expected_by_step") or {})
-    expected_lines = list(case.get("expected") or [])
-    expected_raw = str(case.get("expected_raw") or "")
+    from server.services.shared.semantic.case_text_semantic_service import (
+        parse_numbered_items_rules,
+        split_case_field,
+    )
+
+    steps_val = case.get("steps")
+    expected_val = case.get("expected")
+    steps_text = split_case_field(steps_val)
+    expected_lines = split_case_field(expected_val)
+    expected_raw = str(case.get("expected_raw") or "").strip()
+    if not expected_raw:
+        if isinstance(expected_val, str):
+            expected_raw = expected_val.strip()
+        elif expected_lines:
+            expected_raw = "\n".join(f"{i}. {t}" for i, t in enumerate(expected_lines, 1))
+    steps_raw = str(case.get("steps_raw") or "").strip()
+    if not steps_raw and isinstance(steps_val, str):
+        steps_raw = steps_val.strip()
+    if not steps_text and steps_raw:
+        steps_text = split_case_field(steps_raw)
+    if not expected_lines and expected_raw:
+        expected_lines = split_case_field(expected_raw)
+
+    parsed_steps = parse_numbered_items_rules(steps_raw) if steps_raw else []
+    step_nums = list(case.get("step_nums") or [])
+    if not step_nums:
+        if parsed_steps and len(parsed_steps) == len(steps_text):
+            step_nums = [int(it["num"]) for it in parsed_steps]
+        else:
+            step_nums = list(range(1, len(steps_text) + 1))
+    expected_by_step = {}
+    for k, v in dict(case.get("expected_by_step") or {}).items():
+        try:
+            expected_by_step[int(k)] = str(v)
+        except (TypeError, ValueError):
+            continue
 
     steps: list[CaseStep] = []
     for idx, text in enumerate(steps_text):
@@ -564,12 +595,27 @@ def _seed_unit(
         "hitl": False,
         "module": str(raw.get("module") or "").strip(),
         "precondition": str(raw.get("precondition") or raw.get("precondition_raw") or "").strip(),
-        "steps": list(raw.get("steps") or []),
-        "expected": list(raw.get("expected") or []),
+        "steps": list(raw.get("steps") or []) if isinstance(raw.get("steps"), list) else [],
+        "expected": list(raw.get("expected") or []) if isinstance(raw.get("expected"), list) else [],
         "steps_raw": str(raw.get("steps_raw") or "").strip(),
         "expected_raw": str(raw.get("expected_raw") or "").strip(),
         "platform": str(raw.get("platform") or raw.get("client") or raw.get("terminal") or "").strip(),
         "device_platform": str(device_platform or "").strip(),
+    }
+
+
+def _instruction_case(instruction: str) -> dict[str, Any]:
+    text = str(instruction or "").strip()
+    cid = f"chat-{uuid.uuid4().hex[:10]}"
+    return {
+        "case_id": cid,
+        "name": (text[:80] or cid),
+        "precondition": "",
+        "steps": [text] if text else [],
+        "expected": [],
+        "steps_raw": text,
+        "expected_raw": "",
+        "source": "copilot",
     }
 
 
@@ -588,11 +634,12 @@ def run_cases(
     use_persisted_baseline: bool = True,
     use_cache: bool = True,
     options: Optional[OrchestratorOptions] = None,
-    execution_mode: str = "auto",
     run_type: str = "manual",
     requirement_id: str = "",
     release_id: str = "",
     slot_id: str = "",
+    instruction: str = "",
+    provider_id: str = "",
 ) -> dict[str, Any]:
     """启动一次 AI-led 回归（可多设备）。
 
@@ -613,7 +660,12 @@ def run_cases(
         cov = "once"
 
     all_cases = aas.list_app_cases(app)
-    if case_ids:
+    instruction = str(instruction or "").strip()
+    if instruction:
+        cases = [_instruction_case(instruction)]
+        if not str(run_type or "").strip() or str(run_type).lower() == "manual":
+            run_type = "copilot"
+    elif case_ids:
         by_id = {str(c.get("case_id")): c for c in all_cases if c.get("case_id")}
         cases = [by_id[str(cid)] for cid in case_ids if str(cid) in by_id]
         missing = [cid for cid in case_ids if str(cid) not in by_id]
@@ -639,6 +691,14 @@ def run_cases(
     ) or packages_by_platform.get("android") or ""
     app_id = getattr(app, "id", "") or ""
     app_name = getattr(app, "name", "") or ""
+    from server.services.ai.playbook_service import ensure_playbook
+
+    playbook = ensure_playbook(app, package=package)
+    if db is not None:
+        try:
+            db.commit()
+        except Exception:
+            pass
 
     run_id = f"cr-{uuid.uuid4().hex[:12]}"
     if cov == "per_device":
@@ -670,6 +730,7 @@ def run_cases(
         "env_profile": env_profile,
         "package": package,
         "packages_by_platform": packages_by_platform,
+        "playbook": playbook,
         "requirement_id": str(requirement_id or "").strip(),
         "release_id": str(release_id or "").strip(),
         "slot_id": str(slot_id or "").strip(),
@@ -682,6 +743,7 @@ def run_cases(
         "failed": 0,
         "blocked": 0,
         "declined": 0,
+        "untestable": 0,
         "status": "running",
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
@@ -701,7 +763,7 @@ def run_cases(
         _finish_run(run_doc, "done")
         return _snapshot(run_doc)
 
-    provider, gate = resolve_regression_provider()
+    provider, gate = resolve_regression_provider(str(provider_id or "").strip() or None)
     if not provider:
         reason = gate.get("reason") or "未配置用例执行大模型（密钥配置 → 大模型 Key → 可用 + 用例）"
         with _LOCK:
@@ -727,7 +789,6 @@ def run_cases(
         provider_id=provider_id,
         model_name=model_name,
         options=options,
-        execution_mode=execution_mode,
     )
 
     def _make_worker(dsn: str):
@@ -848,12 +909,12 @@ def _execute(
     provider_id: str = "",
     model_name: str = "",
     options: OrchestratorOptions,
-    execution_mode: str = "auto",
 ) -> None:
     """单台设备 worker：绑定线程 SN，按 coverage 领取单元并执行。"""
     from server.services.ai import dispatch_log as dispatch
     from server.services.runtime.device_bind import device_scope
     from server.services.ai import app_profile as app_profile_ctx
+    from server.services.ai.playbook_service import bind_profile
 
     tok = dispatch.bind(
         trigger="case_run",
@@ -863,10 +924,8 @@ def _execute(
         pipeline_id=str(run_doc.get("run_id") or "") or dispatch.new_pipeline_id(),
         role="test-engineer",
     )
-    # 绑定被测应用的 UI 画像：登录判定 / 页面识别 / 导航这些通用服务在深层调用点
-    # 拿不到 App 对象，靠这个 contextvar 取应用事实（tab 文案等）。
-    # 没有对应画像时是通用默认，只用跨应用成立的信号。
-    prof_tok = app_profile_ctx.bind(package=package)
+    # 说明书从任务快照绑定，不按包名读仓库 YAML。
+    prof_tok = bind_profile(package=package, playbook=run_doc.get("playbook") or {})
     try:
         with device_scope(sn):
             _execute_on_device(
@@ -881,7 +940,6 @@ def _execute(
                 provider_id=provider_id,
                 model_name=model_name,
                 options=options,
-                execution_mode=execution_mode,
             )
             _on_worker_exit(run_doc, app_id=app_id)
     finally:
@@ -902,7 +960,6 @@ def _execute_on_device(
     provider_id: str = "",
     model_name: str = "",
     options: OrchestratorOptions,
-    execution_mode: str = "auto",
 ) -> None:
     run_id = run_doc["run_id"]
     coverage = _coverage_of(run_doc)
@@ -919,6 +976,7 @@ def _execute_on_device(
             model_name=model_name,
             target_package=package,
         )
+        ctx.playbook = dict(run_doc.get("playbook") or {})
     except Exception as exc:
         SLog.e(TAG, f"build_run_context failed sn={sn}: {exc}")
         msg = f"build_run_context: {exc}"
@@ -1021,6 +1079,21 @@ def _execute_on_device(
 
         raw_pre = str(raw_case.get("precondition") or "").strip()
         app_cache_cleared = False
+        try:
+            from server.services.runtime.device_provision import (
+                provision_device,
+                wants_keep_permission_prompt,
+            )
+
+            keep = wants_keep_permission_prompt(raw_pre or str(getattr(spec, "preconditions", "") or ""))
+            ctx.keep_permission_prompt = keep
+            ctx.provision_report = provision_device(
+                ctx, router, package=package, platform=platform,
+                keep_permission_prompt=keep, run_id=unit_rid,
+            )
+        except Exception as exc:
+            SLog.w(TAG, f"[{run_id}] device provision failed case={spec.case_id}: {exc}")
+
         if raw_pre:
             from server.services.case_precondition_service import (
                 has_precondition_phase,
@@ -1060,6 +1133,20 @@ def _execute_on_device(
                 )
 
         try:
+            from server.services.account_issue_service import bind_account_for_case
+
+            bind_account_for_case(
+                ctx,
+                app_id=app_id,
+                env_profile=env_profile,
+                case_id=spec.case_id,
+                case_name=spec.name,
+                preconditions=str(getattr(spec, "preconditions", "") or raw_pre),
+            )
+        except Exception as exc:
+            SLog.w(TAG, f"[{run_id}] pick_account failed case={spec.case_id}: {exc}")
+
+        try:
             report = run_case(
                 spec,
                 run_context=ctx,
@@ -1069,7 +1156,6 @@ def _execute_on_device(
                 run_id=unit_rid,
                 use_persisted_baseline=use_persisted_baseline,
                 app_cache_cleared=app_cache_cleared,
-                execution_mode=execution_mode,
             )
         except Exception as exc:  # pragma: no cover
             SLog.e(TAG, f"run_case crashed case={spec.case_id}: {exc}")
@@ -1123,6 +1209,8 @@ def _execute_on_device(
                 run_doc["blocked"] += 1
             elif ostatus == "declined":
                 run_doc["declined"] += 1
+            elif ostatus == "untestable":
+                run_doc["untestable"] = int(run_doc.get("untestable") or 0) + 1
             else:
                 run_doc["failed"] += 1
             _upsert_case(run_doc, entry)
@@ -1130,22 +1218,27 @@ def _execute_on_device(
         try:
             from server.services.knowledge_capture_service import capture_case_knowledge
 
-            events_raw = []
-            for e in (getattr(report, "events", None) or []):
-                if hasattr(e, "model_dump"):
-                    events_raw.append(e.model_dump())
-                elif isinstance(e, dict):
-                    events_raw.append(e)
-            proposals = capture_case_knowledge(
-                app_id=app_id,
-                task_id=run_id,
-                case_id=spec.case_id,
-                case_name=spec.name,
-                status=str(report.overall_status),
-                summary=str(entry.get("summary") or ""),
-                events=events_raw,
-                provider_id=str(run_doc.get("provider_id") or ""),
-            )
+            session_blocked = str(report.overall_status) in ("fail", "untestable") and str(
+                (getattr(report, "session_fact", None) or {}).get("required") or ""
+            ) in ("logged_in", "guest")
+            proposals = []
+            if not session_blocked:
+                events_raw = []
+                for e in (getattr(report, "events", None) or []):
+                    if hasattr(e, "model_dump"):
+                        events_raw.append(e.model_dump())
+                    elif isinstance(e, dict):
+                        events_raw.append(e)
+                proposals = capture_case_knowledge(
+                    app_id=app_id,
+                    task_id=run_id,
+                    case_id=spec.case_id,
+                    case_name=spec.name,
+                    status=str(report.overall_status),
+                    summary=str(entry.get("summary") or ""),
+                    events=events_raw,
+                    provider_id=str(run_doc.get("provider_id") or ""),
+                )
             if proposals:
                 with _LOCK:
                     _upsert_case(run_doc, {
@@ -1158,6 +1251,24 @@ def _execute_on_device(
                     })
         except Exception as exc:
             SLog.w(TAG, f"[{run_id}] knowledge capture failed case={spec.case_id}: {exc}")
+
+        try:
+            from server.services.account_tag_service import tag_account_after_case
+
+            picked = getattr(ctx, "picked_account", None) or {}
+            tag_account_after_case(
+                app_id=app_id,
+                env_profile=env_profile,
+                case_id=spec.case_id,
+                case_name=spec.name,
+                preconditions=str(getattr(spec, "preconditions", "") or ""),
+                status=str(report.overall_status),
+                summary=str(entry.get("summary") or ""),
+                provider_id=str(run_doc.get("provider_id") or ""),
+                account_id=str((picked if isinstance(picked, dict) else {}).get("id") or ""),
+            )
+        except Exception as exc:
+            SLog.w(TAG, f"[{run_id}] account tag failed case={spec.case_id}: {exc}")
 
         SLog.i(
             TAG,
@@ -1191,7 +1302,6 @@ def retry_failed(
     *,
     db: Session,
     sn: str = "",
-    execution_mode: str = "auto",
 ) -> dict[str, Any]:
     """重跑某任务里失败的用例：开一条新任务（新 task_id），不改原任务。
 
@@ -1247,7 +1357,6 @@ def retry_failed(
         case_ids=case_ids,
         db=db,
         async_exec=True,
-        execution_mode=execution_mode,
         run_type=str(task.get("run_type") or "manual"),
     )
     SLog.i(TAG, f"retry-failed {task_id} → {snapshot.get('run_id')} cases={len(case_ids)}")

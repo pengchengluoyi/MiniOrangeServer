@@ -14,6 +14,8 @@ from server.services.ai.regression.prompts import (
     AGENT_DECIDE_USER_TEMPLATE,
     AGENT_RESTART_SYSTEM_PROMPT,
     AGENT_RESTART_USER_TEMPLATE,
+    INSPECT_SESSION_SYSTEM_PROMPT,
+    INSPECT_SESSION_USER_TEMPLATE,
     ASSERT_VISION_SYSTEM_PROMPT,
     ASSERT_VISION_USER_TEMPLATE,
     DIFF_SUMMARIZER_SYSTEM_PROMPT,
@@ -65,8 +67,9 @@ PRECONDITION_PARSE_SYSTEM_PROMPT = (
     "规则：\n"
     "1. 每条含 text（原文要点）、kind、phase。\n"
     "2. kind 取值：clear_cache|check_sim|check_wechat|check_no_wechat|"
-    "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|unknown。\n"
-    "3. phase：清缓存/SIM/微信/设备类型 → before_launch；已登录/未登录 → after_launch。\n"
+    "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|"
+    "keep_permission_prompt|unknown。\n"
+    "3. phase：清缓存/SIM/微信/设备类型/保留权限询问 → before_launch；已登录/未登录 → after_launch。\n"
     "4. 无法自动化的环境描述用 kind=unknown。\n"
     "5. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
 )
@@ -372,6 +375,7 @@ TEST_ENGINEER_SYSTEM_PROMPT = """你是 MiniOrange 的测试工程师。你负�
 - 失败时说明看到了什么、卡在哪一步、建议重试还是交给人。
 - 设备在调度时选定；环境（测试/预发/正式）来自流程节点，不由你临时改。
 - 开跑前调用「筛测试账号」：把这条用例要测的事写成一句话（例如「我要发作品」），从资产里的测试账号按环境和业务标签挑号。不要把手机号写死在步骤里。
+- 开场先读「应用基础逻辑」（登录/退出/判断登录态/访客浏览/底栏），用 inspect-session 看当前屏，不要拿别的 App 常识硬套。
 
 【你不管什么】
 - 不宣布「验收通过 / 带风险验收 / 退回重测」（需求QA BM）。
@@ -671,11 +675,12 @@ def _product_roles() -> List[dict[str, Any]]:
             group="product",
             kind="conversational",
             source="server/services/ai/roles_catalog.py",
-            used_in=["用例执行", "Agent", "视觉定位", "筛测试账号"],
-            summary="在选定设备上执行用例并给出屏幕证据。开跑前按场景从资产里筛测试账号。下发后自动跑，不做验收/发版门禁。",
+            used_in=["用例执行", "Agent", "视觉定位", "筛测试账号", "应用基础逻辑"],
+            summary="在选定设备上执行用例并给出屏幕证据。开跑前读应用基础逻辑、按场景从资产里筛测试账号。下发后自动跑，不做验收/发版门禁。",
             system_prompt=TEST_ENGINEER_SYSTEM_PROMPT,
             related_ids=[
                 "pick_account",
+                "inspect-session",
                 "agent-decide",
                 "plan-overview",
                 "locate-vision",
@@ -914,7 +919,7 @@ def _runtime_roles() -> List[dict[str, Any]]:
             kind="json",
             source="server/services/ai/regression/prompts.py",
             used_in=["Agent 开场 GOAL_EXTRACT"],
-            summary="把用例转成目标 + 可观测检查点。",
+            summary="有预期则直接用作检查点；没有预期才抽取。",
             system_prompt=GOAL_EXTRACT_SYSTEM_PROMPT,
         ),
         _role(
@@ -936,6 +941,16 @@ def _runtime_roles() -> List[dict[str, Any]]:
             used_in=["Agent 开场 AGENT_RESTART"],
             summary="开跑前判断要不要先强关并重开目标应用。",
             system_prompt=AGENT_RESTART_SYSTEM_PROMPT,
+        ),
+        _role(
+            id="inspect-session",
+            label="观察登录会话",
+            group="runtime",
+            kind="json",
+            source="server/services/ai/regression/prompts.py",
+            used_in=["Agent 开场 INSPECT_SESSION"],
+            summary="看截图判断当前登录态和账号是否符合用例。只观察，不切号。依据检索命中的应用基础逻辑。",
+            system_prompt=INSPECT_SESSION_SYSTEM_PROMPT,
         ),
         _role(
             id="knowledge-capture",
@@ -1232,6 +1247,20 @@ def _aux_prompt_roles() -> List[dict[str, Any]]:
             triggers=["Agent 开场"],
         ),
         _role(
+            id="user-inspect-session",
+            label="User · 观察登录会话",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["inspect-session"],
+            summary="INSPECT_SESSION 的 user 侧模板。",
+            system_prompt=INSPECT_SESSION_USER_TEMPLATE,
+            related_ids=["inspect-session"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Agent 开场"],
+        ),
+        _role(
             id="user-ai-plan",
             label="User · Copilot Plan",
             group="meta",
@@ -1268,7 +1297,10 @@ RUNTIME_META = {
     "goal-extract": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 模式开跑一条用例"]},
     "agent-decide": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 每一步看截图决策"]},
     "agent-restart": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场是否重开应用"]},
+    "inspect-session": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场观察登录态"]},
     "knowledge-capture": {"owner": "version-qa-bm", "called": "gated", "triggers": ["每条用例结束 / 整次任务结束"]},
+    "knowledge-review": {"owner": "knowledge-reviewer", "called": "gated", "triggers": ["沉淀知识写入后自动机审"]},
+    "account-tag": {"owner": "test-engineer", "called": "wired", "triggers": ["每条用例结束"]},
     "ai-plan": {"owner": "test-engineer", "called": "gated", "triggers": ["Copilot 自由对话规划"]},
     "ai-case-plan": {"owner": "test-engineer", "called": "gated", "triggers": ["飞书回归逐步执行"]},
     "ai-case-assert": {"owner": "test-engineer", "called": "gated", "triggers": ["飞书回归预期校验（AI 模式）"]},
@@ -1292,6 +1324,7 @@ RUNTIME_META = {
     "user-goal-extract": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开跑"]},
     "user-agent-decide": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 每一步"]},
     "user-agent-restart": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场"]},
+    "user-inspect-session": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场观察登录态"]},
     "user-ai-plan": {"owner": "test-engineer", "called": "gated", "triggers": ["Copilot / 飞书逐步规划"]},
 }
 
@@ -1308,8 +1341,11 @@ _SKILL_PROMPT_ROLE = {
     "pick_regression": "version-qa-bm",
     "draft_gate": "version-qa-bm",
     "pick_account": "pick_account",
+    "knowledge-capture": "knowledge-capture",
+    "knowledge-review": "knowledge-reviewer",
     "goal-extract": "goal-extract",
     "agent-decide": "agent-decide",
+    "inspect-session": "inspect-session",
     "assert-vision": "assert-vision",
     "plan-overview": "plan-overview",
     "locate-vision": "locate-vision",
@@ -1330,6 +1366,7 @@ _SKILL_PROMPT_ROLE = {
     "user-goal-extract": "user-goal-extract",
     "user-agent-decide": "user-agent-decide",
     "user-agent-restart": "user-agent-restart",
+    "user-inspect-session": "user-inspect-session",
     "user-ai-plan": "user-ai-plan",
     "publish_wiki": "doc-keeper",
 }

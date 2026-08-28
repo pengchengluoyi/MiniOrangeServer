@@ -252,7 +252,7 @@ def list_project_accounts(project_id: str, env: str = "", db: Session = Depends(
     return {
         "code": 200,
         "data": {
-            "accounts": public_test_accounts(rows),
+            "accounts": public_test_accounts(rows, include_password=True),
             "environments": doc.get("environments") or [],
         },
     }
@@ -270,7 +270,7 @@ def save_project_accounts(project_id: str, body: TestAccountSaveBody, db: Sessio
     project.env = doc
     flag_modified(project, "env")
     db.commit()
-    return {"code": 200, "msg": "已保存", "data": {"accounts": public_test_accounts(list_test_accounts(doc))}}
+    return {"code": 200, "msg": "已保存", "data": {"accounts": public_test_accounts(list_test_accounts(doc), include_password=True)}}
 
 
 @router.post("/{project_id}/accounts/pick")

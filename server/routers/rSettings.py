@@ -165,7 +165,9 @@ class KnowledgeSaveBody(BaseModel):
 
 
 @router.get("/knowledge")
-def get_testing_knowledge():
+def get_testing_knowledge(app_id: str = ""):
+    if app_id.strip():
+        ss.ensure_playbook_knowledge_slots(app_id.strip())
     return {"code": 200, "data": {"items": ss.list_testing_knowledge()}}
 
 
@@ -179,6 +181,25 @@ def save_testing_knowledge(body: KnowledgeSaveBody):
 def match_testing_knowledge(q: str = "", app_id: str = ""):
     hits = ss.match_testing_knowledge(q, app_id=app_id or None)
     return {"code": 200, "data": {"items": hits}}
+
+
+class KnowledgeJobsBody(BaseModel):
+    capture_enabled: bool = True
+    review_enabled: bool = True
+
+
+@router.get("/knowledge/jobs")
+def get_knowledge_jobs():
+    return {"code": 200, "data": ss.get_knowledge_job_settings()}
+
+
+@router.put("/knowledge/jobs")
+def save_knowledge_jobs(body: KnowledgeJobsBody):
+    data = ss.save_knowledge_job_settings(
+        capture_enabled=body.capture_enabled,
+        review_enabled=body.review_enabled,
+    )
+    return {"code": 200, "msg": "已保存", "data": data}
 
 
 class FailureAnalyzeBody(BaseModel):
@@ -309,6 +330,7 @@ def append_app_knowledge(body: KnowledgeAppendBody):
 
 @router.get("/knowledge/app/{app_id}")
 def list_app_knowledge(app_id: str):
+    ss.ensure_playbook_knowledge_slots(app_id)
     items = [
         x
         for x in ss.list_testing_knowledge()

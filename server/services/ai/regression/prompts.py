@@ -819,11 +819,12 @@ GOAL_EXTRACT_SYSTEM_PROMPT = """你是资深移动端测试分析师。把一条
 }
 
 要求：
-- checkpoint 必须是"能在某一屏上看出来"的客观状态，不要写成动作（写"已进入登录页"而非"点击登录"）。
-- checkpoint 有序，覆盖从起点到目标的关键节点，一般 2~6 个。
+- 检查点必须来自用例「预期 / overall_expected / 各步 expected」，保留原文，不要改写、不要合并、不要扩写。
+- 禁止把测试步骤改写成检查点（不要写「已进入首页」「已点击底部导航」这类过程态，除非预期原文就是这么写的）。
+- 没有预期时，才允许根据用例名给 1 个终态检查点。
 - kind=process：只在过程中出现的状态（加载占位、生成中、切换中、进度条、转圈）。必须在该画面还在时中途验证，不要写进 success_criteria。
 - kind=terminal：完成后仍留在屏幕上的稳定状态。
-- success_criteria 只写终态：完成后的稳定界面上能看见什么。禁止把加载/占位/生成中/切换中/白屏过程写进最终成功标准。
+- success_criteria 只写终态：完成后的稳定界面上能看见什么。禁止把加载/占位/生成中/切换中写进最终成功标准。
 - 空态必须写清对象：信息流/列表空、个人作品空、未登录是三种不同状态，禁止写成「退出登录后社区为空」。
 - 忽略"清缓存/启动应用"等前置（由系统前置条件处理），聚焦用例主体目标。
 - 禁止 Markdown、禁止多个 JSON。"""
@@ -842,7 +843,7 @@ def build_goal_extract_messages(*, case_spec: "CaseSpec") -> list[dict[str, Any]
     ]
 
 
-AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 agent（通过 adb 执行）。你会看到【当前屏幕截图】，要朝着【目标】推进，每次只决定并输出【下一步一个动作】。
+AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent（通过当前可用通道执行：adb / 远程节点 / iOS WDA）。你会看到【当前屏幕截图】，要朝着【目标】推进，每次只决定并输出【下一步一个动作】。
 
 只返回一个 JSON 对象：
 {
@@ -854,7 +855,8 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
   "remember": ["本步要记住、后面还要用的事实"],
   "checkpoint_ids": ["本步正在验证的检查点 id，可空"],
   "subflow": "none 或 create_publish",
-  "published": null
+  "published": null,
+  "knowledge_ids": []
 }
 
 铁律：
@@ -872,7 +874,10 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
 4. 目标已达成 → status="done"（此时可不带 action）。**只有当【成功标准】在当前【完成后的稳定屏】上成立才可判 done**。加载/占位/生成中/切换中属于过程检查点，必须在该画面还在时用 assert_visual 验证（并填 checkpoint_ids），不要拖到最后一屏再验过程态，也不要用过程态去填成功标准。
 5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。
 6. 需要人提供【系统下一步能填进界面的信息】→ status="ask_human"。只允许向人要数据，禁止让人去设备上点选/登录/勾协议。
-   - human_input_text: params={"question":"请输入11位手机号","field":"phone|sms_code|text"}
+   - 号池已给出手机号时：当前屏是登录/手机号输入 → 必须 input_text 该号码，禁止 ask_human 再要手机号。
+   - 号池已给出固定验证码时：验证码页必须 input_text 该码，禁止再问人。
+   - 仅当号池缺对应字段时才 human_input_text。
+   - human_input_text: params={"question":"请输入短信验证码","field":"sms_code"}
      field 必须明确：phone=手机号，sms_code=短信验证码，text=其它要填的字符串。拿到后由你自己 input_text/tap 填入。
    - human_confirm: params={"question":"..."} 仅确认一个事实（是/否），不是「请你去登录」。
    - human_choice_single: params={"question":"...","choices":["A","B"]}
@@ -881,7 +886,7 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台 Android 真机的自动化 ag
 8. 已执行动作历史和【短期记忆】会给你。后面要对比变化（点赞前数量/样式）或找回刚做的内容时，先写入 remember，禁止丢了再去别处猜。
 9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。等待不消耗动作预算，禁止在加载页乱点或反复返回。
 10. 短期记忆：操作前把计数、样式、对象名称写入 remember；发布成功当屏必须把可找回该内容的指纹写入 published（title/when/note 用屏幕上可见的文案，不要编造）并把 subflow 设回 none。
-11. 【本步相关知识】若写明与当前目标/未完成检查点相关的操作路径（控件文案、图标、入口步骤），【优先按知识执行】；禁止改用知识未写明的替代入口或凭常识另辟路径。仅当知识与当前真实屏幕明显冲突时才可偏离，并在 thought 写明冲突点。
+11. 【知识索引】下面只给目录（id + 标题 + 适用时机）。需要某条正文时把该 id 写入 knowledge_ids；不点名则本步不展开正文。禁止臆造索引里没有的 id。点名后按正文路径执行；与当前屏幕冲突时以屏幕为准并在 thought 写明。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
 AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
@@ -892,6 +897,12 @@ AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
 
 ==== 目标应用（launch/open 必须用此包名）====
 {target_app}
+
+==== 会话观察（点过身份页/登录页之后才有；首页看不出登录态时为空，不要为此问人）====
+{session_block}
+
+==== 号池已申请的测试账号（登录页优先用这里的手机号，禁止再问人要号）====
+{accounts_brief}
 
 ==== 检查点（有序，[x]=已达成 [ ]=未达成）====
 {checkpoints_block}
@@ -910,7 +921,7 @@ width={width}, height={height}
 
 ==== 短期记忆（后面找内容 / 对比变化时用这些，不要丢掉）====
 {memory_block}
-{baseline_hint_block}{knowledge_block}{hierarchy_block}
+{knowledge_block}{hierarchy_block}
 请看【下方截图】决定下一步一个动作，只返回一个 JSON 对象。"""
 
 
@@ -926,12 +937,13 @@ def build_agent_decide_messages(
     image_base64: str,
     image_mime: str = "image/png",
     hierarchy_text: str = "",
-    baseline_hint: str = "",
     target_package: str = "",
     target_app_name: str = "",
     success_criteria: str = "",
     memory_block: str = "",
     knowledge_hint: str = "",
+    session_block: str = "",
+    accounts_brief: str = "",
 ) -> list[dict[str, Any]]:
     hierarchy_block = ""
     if hierarchy_text and hierarchy_text.strip():
@@ -939,16 +951,10 @@ def build_agent_decide_messages(
             "\n==== 可点元素（adb UI 层级摘要，辅助定位）====\n"
             f"{hierarchy_text.strip()[:4000]}\n"
         )
-    baseline_hint_block = ""
-    if baseline_hint and baseline_hint.strip():
-        baseline_hint_block = (
-            "\n==== 上次成功路径（仅供参考，不是脚本；以当前真实屏幕为准）====\n"
-            f"{baseline_hint.strip()[:1500]}\n"
-        )
     knowledge_block = ""
     if knowledge_hint and knowledge_hint.strip():
         knowledge_block = (
-            "\n==== 本步相关知识（与目标相关的操作路径优先按知识执行；与屏幕冲突时以屏幕为准并写明）====\n"
+            "\n==== 知识索引（需要正文时填 knowledge_ids；不点名则本步不展开）====\n"
             f"{knowledge_hint.strip()[:4000]}\n"
         )
     user_text = AGENT_DECIDE_USER_TEMPLATE.format(
@@ -962,7 +968,8 @@ def build_agent_decide_messages(
         menu_json=json.dumps(menu, ensure_ascii=False, indent=2, default=str),
         history_block=history_block or "（这是第一步）",
         memory_block=(memory_block or "").strip() or "（暂无）",
-        baseline_hint_block=baseline_hint_block,
+        session_block=(session_block or "").strip() or "（尚未观察；首页/信息流看不出登录态属正常，继续按目标操作）",
+        accounts_brief=(accounts_brief or "").strip() or "（号池未申请到账号；登录所需手机号只能问人）",
         knowledge_block=knowledge_block,
         hierarchy_block=hierarchy_block,
     )
@@ -1038,6 +1045,66 @@ def build_restart_decide_messages(
     ]
 
 
+INSPECT_SESSION_SYSTEM_PROMPT = """你在为一条自动化用例观察【当前屏幕】上的登录会话。只判断，不要规划点击。
+
+只返回一个 JSON 对象：
+{
+  "session": "logged_out | logged_in | unknown",
+  "identity": "match | mismatch | unknown",
+  "seen": "屏幕上用来判断的文案（登录按钮 / 昵称 / 手机尾号），没有就空",
+  "probe": false,
+  "next": "keep | logout | login | switch | human",
+  "reason": "一句话"
+}
+
+规则：
+- 判断依据只有【本步相关知识】和当前截图。没命中的不要用别的 App 常识硬套。
+- 登录页、一键登录、验证码登录、手机号登录、访客浏览 → session=logged_out。
+- 知识写了已登录特征且当前屏命中 → session=logged_in。
+- 游客和登录共用底栏时，不能只因为有底栏就判已登录。
+- 当前屏是首页/信息流/内容页，没有登录按钮也没有昵称/手机号/退出 → session=unknown，identity=unknown，next=keep。这不是失败，不要 next=human。
+- 当前屏已经是登录页或身份页但仍看不清、或必须人才能过的验证码/账号选择 → next=human。
+- 用例要求游客且已登录 → next=logout。
+- 用例要求指定账号且当前屏已能看出对不上 → next=switch。
+- 禁止编造昵称。禁止 Markdown、禁止多个 JSON。"""
+
+INSPECT_SESSION_USER_TEMPLATE = """==== 本条用例要的会话 ====
+{required_session}
+
+==== 本步相关知识 ====
+{knowledge_hint}
+
+==== 号池公开信息（名称 / 标签 / 手机尾号，不含密码）====
+{accounts_brief}
+
+请看【下方截图】判断当前登录态，只返回一个 JSON 对象。"""
+
+
+def build_inspect_session_messages(
+    *,
+    required_session: str = "",
+    knowledge_hint: str = "",
+    accounts_brief: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+) -> list[dict[str, Any]]:
+    user_text = INSPECT_SESSION_USER_TEMPLATE.format(
+        required_session=(required_session or "").strip() or "（未写明，记录看到的即可）",
+        knowledge_hint=(knowledge_hint or "").strip() or "（本步未命中知识）",
+        accounts_brief=(accounts_brief or "").strip() or "（号池未申请到账号）",
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+    if image_base64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
+        })
+    return [
+        {"role": "system", "content": INSPECT_SESSION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
 KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一条（或一批）用例的执行结果，整理可供后续 Agent 复用的应用知识草稿。
 
 只返回 JSON：
@@ -1045,7 +1112,7 @@ KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一�
   "items": [
     {
       "title": "短标题",
-      "category": "业务逻辑|UI导航|登录注册|Tab切换|交互规范|其他",
+      "category": "应用基础逻辑|业务逻辑|UI导航|登录注册|Tab切换|交互规范|其他",
       "tags": ["标签"],
       "content": "可操作的知识正文",
       "question": "需要用户确认时的提问，可空"
@@ -1054,6 +1121,7 @@ KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一�
 }
 
 规则：
+- 登录/退出/如何判断登录态/底栏名称 → category=应用基础逻辑。
 - 1~3 条，宁缺毋滥。没有值得沉淀的事实就返回 {"items": []}。
 - 失败：content 写清【失败现象】和【请用户补充正确操作】；question 用口语问用户「这种情况该怎么操作」。
 - 成功：总结本条观察到的界面事实（入口文案、引导语、按钮位置、加载态），不要复述步骤编号。
@@ -1064,4 +1132,46 @@ def build_knowledge_capture_messages(*, context: str) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": KNOWLEDGE_CAPTURE_SYSTEM},
         {"role": "user", "content": context.strip() or "（无上下文）"},
+    ]
+
+
+LOGIN_LEARN_SYSTEM = """你是移动端测试知识管理员。当前用例因登录态不满足而停止，需要把「这个 App 怎么登录」写成待审核草稿。
+
+只返回 JSON：
+{
+  "items": [
+    {
+      "title": "如何登录",
+      "category": "登录注册",
+      "tags": ["登录"],
+      "content": "可操作的登录说明",
+      "question": "需要用户确认的问题，可空"
+    }
+  ]
+}
+
+规则：
+- 根据截图/屏文描述：登录入口、可见方式（手机号+验证码 / 微信 / 一键登录）、关键按钮文案、登录页特征。
+- 微信/第三方无法自动完成时，写明「需人工在设备外完成」以及屏上看到的入口文案。
+- 禁止编造没看到的控件。1~2 条即可。标题优先用「如何登录」或「登录页特征」。
+- 禁止 Markdown。"""
+
+
+def build_login_learn_messages(
+    *,
+    context: str,
+    image_base64: str = "",
+    image_mime: str = "image/png",
+) -> list[dict[str, Any]]:
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": (context or "").strip() or "（无上下文）"},
+    ]
+    if image_base64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
+        })
+    return [
+        {"role": "system", "content": LOGIN_LEARN_SYSTEM},
+        {"role": "user", "content": user_content},
     ]

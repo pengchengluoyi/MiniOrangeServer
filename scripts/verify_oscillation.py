@@ -20,12 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server.services.ai.regression.schemas import CaseGoal  # noqa: E402
+from server.services.ai.regression.schemas import CaseCheckpoint, CaseGoal  # noqa: E402
 from server.services.regression.agent_executor import (  # noqa: E402
     AgentExecutor,
     AgentOptions,
     _phash_distance,
     _screen_phash,
+    _ScreenSignal,
     _Step,
 )
 from server.services.runtime.run_context import RunContext  # noqa: E402
@@ -105,7 +106,7 @@ def test_oscillation() -> None:
     ex = make_executor()
 
     ex.steps = steps_from(_VIEW007[:3], [_SAME] * 3)
-    check("同动作+同屏 3 步 → 判卡死", ex._is_oscillating(), True)
+    check("同动作+同屏 3 步 → 命中窗口", ex._is_oscillating(), True)
 
     ex.steps = steps_from(_VIEW007[:2], [_SAME] * 2)
     check("只有 2 步 → 不判", ex._is_oscillating(), False)
@@ -123,7 +124,7 @@ def test_oscillation() -> None:
     near = f"{int(_SAME, 16) ^ 0b111111:016x}"      # 距离 6
     far = f"{int(_SAME, 16) ^ 0b1111111:016x}"      # 距离 7
     ex.steps = steps_from(_VIEW007[:3], [_SAME, near, _SAME])
-    check("距离=6（阈值内）→ 判卡死", ex._is_oscillating(), True)
+    check("距离=6（阈值内）→ 命中窗口", ex._is_oscillating(), True)
     ex.steps = steps_from(_VIEW007[:3], [_SAME, far, _SAME])
     check("距离=7（超阈值）→ 不判", ex._is_oscillating(), False)
 
@@ -156,7 +157,7 @@ def test_oscillation() -> None:
         _Step(idx=5, capability_id="tap_element", params={"x": 462, "y": 2094}, phash=_SAME),
     ]
     ex.steps = mixed
-    check("wait 夹心但 3 次同目标点击同屏 → 仍判卡死", ex._is_oscillating(), True)
+    check("wait 夹心但 3 次同目标点击同屏 → 仍命中窗口", ex._is_oscillating(), True)
 
     one_tap = [
         _Step(idx=1, capability_id="tap_element", params={"x": 455, "y": 2094}, phash=_SAME),
@@ -164,6 +165,59 @@ def test_oscillation() -> None:
     ]
     ex.steps = one_tap
     check("1 次点击 + 多次 wait → 不判", ex._is_oscillating(), False)
+
+
+def test_proceed_after_repeat() -> None:
+    print("\n[同一入口再点：不检测页面切换，改做后续]")
+    ex = make_executor()
+    ex.steps = steps_from(_VIEW007[:1], [_SAME])
+    check(
+        "落点仍在容差内 → 算重复同一入口",
+        ex._repeats_last_mutate("tap_element", {"x": 462, "y": 2094}),
+        True,
+    )
+    check(
+        "VLM 多带了锚点文案仍算同一入口",
+        ex._repeats_last_mutate(
+            "tap_element",
+            {"x": 456, "y": 2086, "target": {"text": "首页"}},
+        ),
+        True,
+    )
+    check(
+        "落点很远 → 不算",
+        ex._repeats_last_mutate("tap_element", {"x": 900, "y": 500}),
+        False,
+    )
+    check(
+        "屏幕变了仍算同一入口（不检测是否切换）",
+        ex._repeats_last_mutate("tap_element", {"x": 462, "y": 2094}, phash=_OTHER),
+        True,
+    )
+    check(
+        "滑动不算重复点击入口",
+        ex._repeats_last_mutate("swipe_direction", {"direction": "up"}),
+        False,
+    )
+
+    ex.goal.checkpoints = [
+        CaseCheckpoint(id="cp1", description="底部首页为选中态"),
+        CaseCheckpoint(id="cp2", description="首页可以看到领取悬浮球"),
+    ]
+    skipped = ex._skip_nav_verify_checkpoints()
+    check("跳过选中态检查点", skipped, ["cp1"])
+    check("选中态已跳过", ex.goal.checkpoints[0].done, True)
+    nxt = ex._next_undone_checkpoint()
+    check("后续检查点是悬浮球", nxt.id if nxt else None, "cp2")
+
+    sig = _ScreenSignal(blank="no", phash=_SAME)
+    ex._checked_at_start = True
+    ex._stall_steps = 4
+    ex._static_repeat = 0
+    check("未跳过重复点击时停滞仍预筛 L0", ex._recovery_suspicion(sig).startswith("stalled_"), True)
+    ex._static_repeat = 1
+    check("改做后续后停滞不再走 L0 恢复", ex._recovery_suspicion(sig), "")
+    check("改做后续后黑屏仍预筛", ex._recovery_suspicion(_ScreenSignal(blank="black")), "blank_black")
 
 
 def test_device(sn: str) -> None:
@@ -216,6 +270,7 @@ def main() -> int:
     test_action_sig()
     test_phash_math()
     test_oscillation()
+    test_proceed_after_repeat()
     if len(sys.argv) > 1:
         test_device(sys.argv[1])
     else:

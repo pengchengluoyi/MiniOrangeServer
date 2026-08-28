@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from server.core.database import APP_DATA_DIR, get_db
+from server.core.database import APP_DATA_DIR, SessionLocal, get_db
 from server.models.project import App
 from server.services import app_automation_service as aas
 from server.services.shared import icon_target_service as its
@@ -21,8 +21,18 @@ from server.services.project_env import load_project_env, profile_keys
 from server.services.crawl_persistence import save_screenshot_file
 from server.services import figma_service as fs
 from server.services import figma_logic_service as fls
+from server.services.ai.playbook_service import bind_profile, ensure_playbook, save_playbook
 
 router = APIRouter(prefix="/app-automation", tags=["App Automation"])
+
+
+def _bind_app_profile(app=None, *, app_id: str = "", package: str = ""):
+    """绑库里的应用基础逻辑。后台线程必须自己调，contextvar 不跟线程走。"""
+    if app is not None:
+        return bind_profile(app, package=package)
+    with SessionLocal() as db:
+        row = db.query(App).filter(App.id == app_id).first() if app_id else None
+        return bind_profile(row, package=package)
 
 
 class SkillsBlock(BaseModel):
@@ -123,6 +133,27 @@ def get_automation_config(app_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/playbook/{app_id}")
+def get_app_playbook(app_id: str, db: Session = Depends(get_db)):
+    app = _get_app(db, app_id)
+    pkg = aas.package_for_app(app)
+    pb = ensure_playbook(app, package=pkg)
+    db.commit()
+    return {"code": 200, "data": {"playbook": pb, "package": pkg}}
+
+
+class PlaybookSaveBody(BaseModel):
+    playbook: Dict[str, Any] = {}
+
+
+@router.put("/playbook/{app_id}")
+def save_app_playbook(app_id: str, body: PlaybookSaveBody, db: Session = Depends(get_db)):
+    app = _get_app(db, app_id)
+    pb = save_playbook(app, body.playbook or {})
+    db.commit()
+    return {"code": 200, "msg": "已保存应用基础逻辑", "data": {"playbook": pb}}
+
+
 @router.get("/qa-process/summary")
 def qa_process_summary(db: Session = Depends(get_db)):
     """实验室排期：一次返回所有应用的需求/版本/排期，供「全部项目」日历聚合。"""
@@ -166,7 +197,7 @@ def qa_process_assist(app_id: str, body: QaProcessAssistBody, db: Session = Depe
         raise HTTPException(status_code=400, detail="unknown assist job")
     if body.entity not in ("req", "rel"):
         raise HTTPException(status_code=400, detail="entity must be req or rel")
-    prof_tok = ap.bind(package=aas.package_for_app(app))
+    prof_tok = _bind_app_profile(app)
     try:
         art = assist.run_job(
             body.job,
@@ -254,7 +285,7 @@ def _followup_in_background(
 
     # 画像绑在 contextvar 上，不会跟着线程走，所以后台线程必须自己绑一次。
     # 漏了就是这条路径上的 prompt 拿不到应用术语表，生成质量悄悄退回通用水平。
-    prof_tok = ap.bind(package=package)
+    prof_tok = _bind_app_profile(app_id=app_id, package=package)
     try:
         result = run_followup_pipeline(
             qa_process=qa_process,
@@ -309,7 +340,7 @@ def _reanalyze_in_background(
     from server.services.ai import app_profile as ap
     from server.services.qa_role_jobs import tick
 
-    prof_tok = ap.bind(package=package)
+    prof_tok = _bind_app_profile(app_id=app_id, package=package)
     try:
         result = tick(
             qa_process=qa_process,
@@ -751,7 +782,7 @@ def _tick_in_background(
     if not job:
         return
     # 画像和任务都挂在 contextvar 上，后台线程必须自己绑；漏了就是 prompt 丢术语表、进度条不走。
-    prof_tok = ap.bind(package=package)
+    prof_tok = _bind_app_profile(app_id=app_id, package=package)
     job_tok = cover_jobs.bind(job)
     try:
         job.report(phase="running", label="开始推进")

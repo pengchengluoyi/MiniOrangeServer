@@ -52,11 +52,14 @@ PLAYBOOKS = [
             {"phase": "开跑前", "role_id": "test-engineer", "capability_id": "pick_account", "label": "按场景筛测试账号"},
             {"phase": "开跑", "role_id": "test-engineer", "capability_id": "goal-extract", "label": "抽取目标与检查点"},
             {"phase": "开场", "role_id": "test-engineer", "capability_id": "agent-restart", "label": "是否先重开应用"},
+            {"phase": "开场", "role_id": "test-engineer", "capability_id": "inspect-session", "label": "观察登录态"},
             {"phase": "每一步", "role_id": "test-engineer", "capability_id": "agent-decide", "label": "看截图决定下一个动作"},
             {"phase": "断言", "role_id": "test-engineer", "capability_id": "assert-vision", "label": "检查点是否达成"},
             {"phase": "卡住要问人", "role_id": "test-engineer", "capability_id": "hitl-composer", "label": "改写成问人话术"},
             {"phase": "清缓存/强停/装包", "role_id": "test-engineer", "capability_id": "persona-task", "label": "拟人化走设置"},
             {"phase": "用例结束", "role_id": "version-qa-bm", "capability_id": "knowledge-capture", "label": "沉淀应用知识"},
+            {"phase": "用例结束", "role_id": "knowledge-reviewer", "capability_id": "knowledge-review", "label": "知识机审"},
+            {"phase": "用例结束", "role_id": "test-engineer", "capability_id": "account-tag", "label": "账号打标"},
         ],
     },
     {
@@ -71,6 +74,8 @@ PLAYBOOKS = [
             {"phase": "失败", "role_id": "test-engineer", "capability_id": "single-step-replan", "label": "只重规划失败步"},
             {"phase": "要问人", "role_id": "test-engineer", "capability_id": "hitl-composer", "label": "HITL 话术"},
             {"phase": "结束", "role_id": "version-qa-bm", "capability_id": "knowledge-capture", "label": "沉淀应用知识"},
+            {"phase": "结束", "role_id": "knowledge-reviewer", "capability_id": "knowledge-review", "label": "知识机审"},
+            {"phase": "结束", "role_id": "test-engineer", "capability_id": "account-tag", "label": "账号打标"},
         ],
     },
     {

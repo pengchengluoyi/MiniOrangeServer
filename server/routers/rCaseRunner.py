@@ -19,7 +19,7 @@
 - POST /case-runner/baseline/promote               手工 promote 指定 run 为 baseline
 - GET  /case-runner/devices                        当前可用设备（在线 + 通道状态 + busy_task_id）
 
-数据源仍来自 feishu_service（飞书表格），但执行链路由 server.services.regression.case_runner 驱动。
+数据源来自应用 QA 流程草稿（qa_process.draft_cases）。执行一律 Agent（看图闭环）。
 
 响应约定
 ========
@@ -77,13 +77,15 @@ class RunRequest(BaseModel):
     async_exec: bool = True
     use_persisted_baseline: bool = True
     use_cache: bool = True
-    # 执行引擎：auto(adb设备→agent, 其余→plan) | agent | plan
-    execution_mode: str = "auto"
-    # 触发源：manual | feishu | schedule（定时/飞书走同一个创建函数，只是来源不同）
+    # 已废弃：用例执行只走 Agent。兼容旧客户端，忽略此字段。
+    execution_mode: str = "agent"
+    instruction: str = ""
+    # 触发源：manual | feishu | schedule | copilot（对话下发与回归同一引擎）
     run_type: str = "manual"
     slot_id: str = ""
     requirement_id: str = ""
     release_id: str = ""
+    provider_id: str = ""
 
 
 class PromoteBaselineRequest(BaseModel):
@@ -95,7 +97,8 @@ class PromoteBaselineRequest(BaseModel):
 class RetryFailedRequest(BaseModel):
     # 默认沿用原任务的设备；需要换机时显式指定
     sn: str = ""
-    execution_mode: str = "auto"
+    # 已废弃：忽略。
+    execution_mode: str = "agent"
 
 
 def _normalize_sns(sn: str = "", sns: Optional[List[str]] = None) -> list[str]:
@@ -199,11 +202,12 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
             async_exec=body.async_exec,
             use_persisted_baseline=body.use_persisted_baseline,
             use_cache=body.use_cache,
-            execution_mode=(body.execution_mode or "auto").lower(),
             run_type=(body.run_type or "manual").lower(),
             requirement_id=body.requirement_id or "",
             release_id=body.release_id or "",
             slot_id=body.slot_id or "",
+            instruction=str(body.instruction or "").strip(),
+            provider_id=str(body.provider_id or "").strip(),
         )
         return {"code": 200, "ok": True, "msg": "AI-led 回归任务已启动", "data": snapshot}
     except Exception as e:
@@ -280,7 +284,7 @@ def retry_failed_cases(task_id: str, body: Optional[RetryFailedRequest] = None,
             )
     try:
         result = cr.retry_failed(
-            task_id, db=db, sn=sn, execution_mode=(body.execution_mode or "auto").lower(),
+            task_id, db=db, sn=sn,
         )
     except Exception as e:
         SLog.e(TAG, f"/tasks/{task_id}/retry-failed failed: {e}")
@@ -434,6 +438,7 @@ def list_devices(only_online: bool = True, db: Session = Depends(get_db)):
                 "sn": d.sn,
                 "model": d.model or "",
                 "device_type": d.device_type or "",
+                "type": d.device_type or "",
                 "os_version": d.os_version or "",
                 "resolution": d.resolution or "",
                 "role": d.role or "",

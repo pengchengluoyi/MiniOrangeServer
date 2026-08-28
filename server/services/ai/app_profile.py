@@ -9,16 +9,16 @@
   判定对了 —— 例如 _main_tab_bar_logged_in 要求命中 3 个特定 tab，换应用永远返回 False，
   「已登录」前置检查永远失败，用例全部阻塞。
 
-分层（和 docs/plan-qa-role-quality-v2.md 一致）：
+分层：
   1. 内置默认 `_default`：不含任何业务词，只有跨应用成立的通用信号
-  2. 每应用 YAML 种子：resources/app_profiles/<key>.yaml
-  3. 运行期覆写：App.automation.ui_profile（由调用方在 bind 时传入）
+  2. 应用基础逻辑：存在 App 库里的 playbook，由 bind(override=..., playbook=...) 注入
+  3. 遗留 YAML 只作空库导入种子，运行期不再按包名读文件
 
 深层调用点拿不到 App 对象，所以用 contextvar 绑定（和 dispatch_log.bind 同一套做法）：
   tok = app_profile.bind(package="com.example.app")
   try: ...
   finally: app_profile.reset(tok)
-拿得到 package 的地方也可以直接 `for_package(pkg)`，不依赖绑定。
+运行期必须 `bind(override=..., playbook=...)`；`for_package` 不再按磁盘 YAML 找应用。
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ import contextvars
 import re
 import threading
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, Optional
 
 _CTX: contextvars.ContextVar[dict] = contextvars.ContextVar("ui_profile_ctx", default={})
@@ -331,12 +330,6 @@ def _alias_hit(alias: str, low_text: str) -> bool:
 DEFAULT = UiProfile(key=DEFAULT_KEY, label="")
 
 
-def _resource_dir() -> Path:
-    # 本文件在 server/services/ai/ 下，parents[2] 才是 server/
-    # （注意别照抄 local/locate/page_profiles.py 的 parents[3]，那个文件深一层）
-    return Path(__file__).resolve().parents[2] / "resources" / "app_profiles"
-
-
 def _profile_from_mapping(row: dict[str, Any]) -> UiProfile:
     def tup(key: str) -> tuple[str, ...]:
         return tuple(str(x).strip() for x in (row.get(key) or []) if str(x).strip())
@@ -422,31 +415,13 @@ def _profile_from_mapping(row: dict[str, Any]) -> UiProfile:
 
 
 def _load_all() -> dict[str, UiProfile]:
+    """运行期画像不再从 YAML 按包名加载。应用事实来自库里的 playbook。"""
     global _LOADED
     with _LOCK:
         if _LOADED:
             return _CACHE
         _CACHE.clear()
         _CACHE["_default"] = DEFAULT
-        folder = _resource_dir()
-        if folder.is_dir():
-            try:
-                import yaml
-            except Exception:
-                yaml = None  # type: ignore
-            if yaml is not None:
-                for path in sorted(folder.glob("*.yaml")):
-                    if path.stem.startswith("_"):
-                        continue
-                    try:
-                        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-                    except Exception:
-                        continue
-                    if not isinstance(raw, dict):
-                        continue
-                    raw.setdefault("key", path.stem)
-                    prof = _profile_from_mapping(raw)
-                    _CACHE[prof.key] = prof
         _LOADED = True
         return _CACHE
 
@@ -480,7 +455,7 @@ def for_key(key: str) -> UiProfile:
 def merge_override(base: UiProfile, override: Optional[dict]) -> UiProfile:
     """把 App.automation.ui_profile 的覆写叠加到 YAML 种子上。
 
-    覆写只支持「整字段替换」；空值 / 缺字段一律沿用种子，避免人删一行就把内置行为清空。
+    覆写只支持「整字段替换」；空值 / 缺字段一律沿用底稿，避免人删一行就把内置行为清空。
     """
     if not isinstance(override, dict) or not override:
         return base
@@ -515,17 +490,29 @@ def merge_override(base: UiProfile, override: Optional[dict]) -> UiProfile:
 # ---------- contextvar 绑定 ----------
 
 
-def bind(*, package: str = "", profile: Optional[UiProfile] = None, override: Optional[dict] = None) -> contextvars.Token:
+def bind(
+    *,
+    package: str = "",
+    profile: Optional[UiProfile] = None,
+    override: Optional[dict] = None,
+    playbook: Optional[dict] = None,
+) -> contextvars.Token:
     cur = dict(_CTX.get() or {})
     prof = profile
-    if prof is None and package:
+    if prof is None and override:
+        prof = merge_override(DEFAULT, override)
+    elif prof is None and package:
         prof = for_package(package)
-    if prof is not None and override:
+    if prof is not None and override and profile is not None:
         prof = merge_override(prof, override)
     if prof is not None:
         cur["profile"] = prof
     if package:
         cur["package"] = str(package)
+    if isinstance(playbook, dict):
+        cur["playbook"] = playbook
+    elif "playbook" in cur:
+        cur.pop("playbook", None)
     return _CTX.set(cur)
 
 

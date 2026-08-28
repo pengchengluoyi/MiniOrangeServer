@@ -13,6 +13,7 @@ from server.services.regression.agent_executor import (  # noqa: E402
     AgentExecutor,
     build_case_intent_for_knowledge,
     build_knowledge_hint_text,
+    build_knowledge_index_text,
     build_knowledge_query,
     build_path_knowledge_nudge,
     case_steps_text,
@@ -50,7 +51,6 @@ def main() -> None:
     home_ocr = "造好物 推荐 热门互动 想要成真 消息 我的 开始造物 feed 作品 首页"
     query = build_knowledge_query(case_intent=intent, screen=home_ocr)
     _assert("Agent对话历史" in query, "query 必须含用例步骤意图")
-
     hits = match_testing_knowledge(query, limit=8)
     ranked = rank_knowledge_for_case_intent(hits, case_intent=intent, limit=3)
     titles = [str(r.get("title") or "") for r in ranked]
@@ -61,42 +61,48 @@ def main() -> None:
 
     path_row = {
         "used": True,
+        "id": "k_path",
         "title": "如何进入目标功能页",
         "category": "UI导航",
         "tags": ["入口"],
+        "when": "入口",
         "prompt": "「如何进入目标功能页」: 点击底部「开始造物」再点右上角秒表图标",
         "content": "点击底部「开始造物」再点右上角秒表图标",
     }
     noise_row = {
         "used": True,
+        "id": "k_noise",
         "title": "点击「在首页feed中站到任意的作品点击进入详情页」操作说明",
         "tags": ["feed"],
         "prompt": "「feed」: 空",
         "content": "【本应用正确操作方式】\n1. \n2.",
     }
     _assert(is_path_knowledge_item(path_row), "标题含「如何进入」应判为路径知识")
+    index = build_knowledge_index_text([path_row, noise_row])
+    _assert("k_path" in index and "如何进入目标功能页" in index, f"索引应含 id+标题: {index!r}")
+    _assert("开始造物" not in index, f"索引不得展开正文: {index!r}")
     hint = build_knowledge_hint_text([path_row, noise_row], case_intent=intent)
-    _assert("优先执行·操作路径" in hint, f"hint 应强调路径优先: {hint!r}")
-    _assert("未写明的替代入口" in hint, f"hint 应通用禁止替代入口: {hint!r}")
-    _assert("优先执行·操作路径" in hint.split("【其他")[0], "路径块应在参考块之前")
+    _assert("优先执行·操作路径" in hint, f"展开正文仍强调路径优先: {hint!r}")
 
-    # 另辟路径：决策未引用知识控件词 → 纠正
     bad = SimpleNamespace(
         thought="当前在首页，先进入消息页面查看历史记录",
         expected_after="消息列表",
+        knowledge_ids=[],
     )
     nudge = build_path_knowledge_nudge(bad, [path_row], case_intent=intent)
-    _assert(bool(nudge), "未引用知识控件时应纠正")
+    _assert(bool(nudge), "未点名路径知识时应纠正")
+    _assert("knowledge_ids" in nudge or "点名" in nudge, f"纠正应要求点名: {nudge!r}")
     _assert("替代入口" in nudge, f"纠正文案应通用: {nudge!r}")
     _assert("禁止用底部" not in nudge and "Agent 对话" not in nudge, f"纠正不应含业务特判: {nudge!r}")
 
     good = SimpleNamespace(
         thought="按知识点击底部开始造物，再找右上角秒表图标",
         expected_after="目标功能页",
+        knowledge_ids=["k_path"],
     )
     _assert(
         not build_path_knowledge_nudge(good, [path_row], case_intent=intent),
-        "已引用知识控件时不应纠正",
+        "已点名路径知识时不应纠正",
     )
 
     # Executor 包装仍可用

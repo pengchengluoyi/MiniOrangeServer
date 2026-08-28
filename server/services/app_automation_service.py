@@ -47,6 +47,7 @@ DEFAULT_AUTOMATION = {
         "role_log": [],
         "updated_at": "",
     },
+    "playbook": {},
 }
 
 
@@ -150,11 +151,16 @@ def get_automation_config(app) -> Dict[str, Any]:
             "login_frame": figma.get("login_frame") if isinstance(figma.get("login_frame"), dict) else {},
             "login_reference": figma.get("login_reference") if isinstance(figma.get("login_reference"), dict) else {},
         }
+    from server.services.ai.playbook_service import normalize_playbook
+
+    out["playbook"] = normalize_playbook(raw.get("playbook"))
     return out
 
 
 def generated_cases_from_qa_process(app) -> List[Dict[str, Any]]:
     """流程里写出来的用例，和下发执行共用同一份结构。"""
+    from server.services.shared.semantic.case_text_semantic_service import split_case_field
+
     qp = get_automation_config(app).get("qa_process") or {}
     rows: List[Dict[str, Any]] = []
     for req in qp.get("requirements") or []:
@@ -170,13 +176,21 @@ def generated_cases_from_qa_process(app) -> List[Dict[str, Any]]:
             steps = raw.get("steps")
             expected = raw.get("expected")
             if isinstance(steps, list):
-                steps_raw = "\n".join(str(x) for x in steps if str(x).strip())
+                steps_list = split_case_field(steps)
+                steps_raw = str(raw.get("steps_raw") or "").strip() or "\n".join(
+                    f"{i}. {x}" for i, x in enumerate(steps_list, 1)
+                )
             else:
                 steps_raw = str(raw.get("steps_raw") or steps or "")
+                steps_list = split_case_field(steps_raw)
             if isinstance(expected, list):
-                expected_raw = "\n".join(str(x) for x in expected if str(x).strip())
+                expected_list = split_case_field(expected)
+                expected_raw = str(raw.get("expected_raw") or "").strip() or "\n".join(
+                    f"{i}. {x}" for i, x in enumerate(expected_list, 1)
+                )
             else:
                 expected_raw = str(raw.get("expected_raw") or expected or "")
+                expected_list = split_case_field(expected_raw)
             module = str(raw.get("module") or "").strip()
             rows.append({
                 **raw,
@@ -185,8 +199,8 @@ def generated_cases_from_qa_process(app) -> List[Dict[str, Any]]:
                 "module": f"本需求生成 / {title}" + (f" / {module}" if module else ""),
                 "source": "generated",
                 "requirement_id": str(req.get("id") or ""),
-                "steps": steps if isinstance(steps, list) else [],
-                "expected": expected if isinstance(expected, list) else [],
+                "steps": steps_list,
+                "expected": expected_list,
                 "steps_raw": steps_raw,
                 "expected_raw": expected_raw,
                 "precondition": str(raw.get("precondition") or raw.get("pre") or ""),
@@ -293,6 +307,10 @@ def save_automation_config(app, config: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(incoming.get("login_reference"), dict)
             else (prev_figma.get("login_reference") or {}),
         }
+    if "playbook" in config:
+        from server.services.ai.playbook_service import normalize_playbook
+
+        current["playbook"] = normalize_playbook(config.get("playbook"))
     env["automation"] = current
     app.env = env
     flag_modified(app, "env")

@@ -1939,148 +1939,22 @@ def run_cases(
     use_cache: bool = True,
     async_exec: bool = True,
 ) -> Dict[str, Any]:
-    if use_cache:
-        payload = list_cases_for_app(app, refresh=False)
-    else:
-        payload = fetch_cases_for_app(app, persist=True)
-    all_cases = payload.get("cases") or []
-    if case_ids:
-        by_id = {c.get("case_id"): c for c in all_cases if c.get("case_id")}
-        cases = [by_id[cid] for cid in case_ids if cid in by_id]
-        missing = [cid for cid in case_ids if cid not in by_id]
-        if missing:
-            SLog.w(TAG, f"run_cases: {len(missing)} case_id not found: {missing[:5]}")
-    else:
-        # 全量执行：包含 iOS 专用用例等，平台不匹配时由前置条件 skip 并展示在列表中
-        cases = list(all_cases)
-    if start_index > 0:
-        cases = cases[start_index:]
+    """已退役：用例回归请走 case_runner.run_cases（Agent）。
 
-    if db is not None:
-        try:
-            from server.services.execution_clarification_service import ensure_default_login_icon_templates
+    本函数仍保留以免旧脚本 import 失败；调用会转发到 CaseRunner。
+    """
+    from server.services.regression import case_runner as cr
 
-            ensure_default_login_icon_templates(db, app.id)
-        except Exception as e:
-            SLog.w(TAG, f"seed login icon templates failed: {e}")
-
-    icon_targets = _load_icon_targets(db, app.id) or aas.get_icon_targets(app)
-    device_skills = aas.get_skills_for_device(app, sn)
-    env_profile = aas.resolve_env_profile(app)
-    package = aas.package_for_app(app, env_profile)
-    if not package:
-        SLog.w(TAG, f"run_cases: app={app.id} name={app.name} profile={env_profile} 未解析到 Android 包名")
-    else:
-        SLog.i(TAG, f"run_cases: app={app.id} sn={sn} package={package} profile={env_profile}")
-
-    if platform == "android" and sn:
-        try:
-            from driver.agent.Crawl.device_bootstrap import wait_for_adb_device
-
-            wait_for_adb_device(sn, platform, timeout=15.0)
-        except Exception as e:
-            SLog.w(TAG, f"run_cases: device not ready sn={sn}: {e}")
-            fail_id = uuid.uuid4().hex[:12]
-            return {
-                "run_id": fail_id,
-                "app_id": app.id,
-                "app_name": app.name,
-                "sn": sn,
-                "platform": platform,
-                "env_profile": env_profile,
-                "package": package,
-                "started_at": datetime.now().isoformat(),
-                "finished_at": datetime.now().isoformat(),
-                "status": "failed",
-                "total": len(cases),
-                "passed": 0,
-                "failed": len(cases),
-                "skipped": 0,
-                "cases": [],
-                "error": str(e),
-            }
-
-    context = {
-        "app_id": app.id,
-        "app_name": app.name,
-        "env_profile": env_profile,
-        "package": package,
-        "platform": platform,
-        "execution_profile": resolve_execution_profile("case_execution"),
-    }
-
-    run_id = uuid.uuid4().hex[:12]
-    try:
-        from server.services.shared.run_context.regression_run_context import begin_run
-
-        begin_run(
-            run_id=run_id,
-            sn=sn,
-            platform=platform,
-            capture_screenshots=True,
-            test_package=package or "",
-        )
-    except Exception as e:
-        SLog.w(TAG, f"gesture audit context init failed: {e}")
-    run_doc: Dict[str, Any] = {
-        "run_id": run_id,
-        "app_id": app.id,
-        "app_name": app.name,
-        "sn": sn,
-        "platform": platform,
-        "env_profile": env_profile,
-        "package": package,
-        "started_at": datetime.now().isoformat(),
-        "finished_at": None,
-        "status": "running",
-        "total": len(cases),
-        "passed": 0,
-        "failed": 0,
-        "skipped": 0,
-        "cases": [],
-    }
-    _RUNS[run_id] = run_doc
-    if db is not None:
-        aas.persist_run_start(
-            db,
-            run_id=run_id,
-            app_id=app.id,
-            sn=sn,
-            platform=platform,
-            total=len(cases),
-        )
-
-    if async_exec:
-        _spawn_background_run(
-            app_id=app.id,
-            run_id=run_id,
-            cases=cases,
-            sn=sn,
-            platform=platform,
-            context=context,
-            icon_targets=icon_targets,
-            device_skills=device_skills,
-            package=package,
-            env_profile=env_profile,
-        )
-        return _client_run_snapshot(run_doc)
-
-    _execute_cases_batch(
+    SLog.w(TAG, "feishu_regression_service.run_cases is retired; forwarding to CaseRunner/Agent")
+    return cr.run_cases(
         app,
-        cases,
-        run_doc,
         sn=sn,
-        platform=platform,
-        context=context,
-        icon_targets=icon_targets,
-        device_skills=device_skills,
-        package=package,
-        env_profile=env_profile,
+        platform=(platform or "android").lower(),
+        case_ids=case_ids,
+        start_index=start_index or 0,
         db=db,
-        run_id=run_id,
+        async_exec=async_exec,
     )
-
-    return _finalize_run_doc(run_doc, db)
 
 
 def _client_run_snapshot(run_doc: Dict[str, Any]) -> Dict[str, Any]:

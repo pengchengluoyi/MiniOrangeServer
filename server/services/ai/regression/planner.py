@@ -771,7 +771,7 @@ def expand_persona_task(
 # ============== Agent 执行引擎（目标导向闭环，仅 adb 通道） ==============
 
 
-_PROCESS_KIND_RE = re.compile(r"加载占位|加载中|生成中|切换中|转圈|进度未|白屏|占位")
+_PROCESS_KIND_RE = re.compile(r"加载占位|加载中|生成中|切换中|转圈|进度未|占位符|占位图")
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -820,6 +820,37 @@ def _split_process_from_success(
     return extra, success_out
 
 
+def _checkpoints_from_expected(case_spec: CaseSpec) -> list[CaseCheckpoint]:
+    """检查点 = 用例「预期」原文，不另写一套过程里程碑。"""
+    from server.services.shared.semantic.case_text_semantic_service import parse_numbered_items_rules
+
+    seen: set[str] = set()
+    rows: list[str] = []
+
+    def add(desc: str) -> None:
+        t = (desc or "").strip()
+        if not t or t in seen:
+            return
+        seen.add(t)
+        rows.append(t)
+
+    raw = (case_spec.expected or "").strip()
+    if raw:
+        for it in parse_numbered_items_rules(raw):
+            add(str(it.get("text") or ""))
+    if not rows:
+        for step in case_spec.steps or []:
+            add(step.expected or "")
+    return [
+        CaseCheckpoint(
+            id=f"cp{i}",
+            description=desc,
+            kind=_checkpoint_kind("", desc),
+        )
+        for i, desc in enumerate(rows, start=1)
+    ]
+
+
 def extract_goal(
     case_spec: CaseSpec,
     *,
@@ -827,7 +858,24 @@ def extract_goal(
     provider_id: Optional[str] = None,
     timeout_sec: int = 60,
 ) -> CaseGoal:
-    """把用例抽成 目标 + 有序检查点（D1）。失败时给一个兜底 goal（用例名/预期）。"""
+    """检查点优先用用例预期；没有预期才让模型抽。"""
+    expected_cps = _checkpoints_from_expected(case_spec)
+    expected_text = (case_spec.expected or "").strip()
+    if expected_cps:
+        success = expected_text or "\n".join(c.description for c in expected_cps)
+        goal_text = (case_spec.name or success or "完成用例").strip()
+        SLog.i(
+            TAG,
+            f"extract_goal from expected case={case_spec.case_id} cps={len(expected_cps)}",
+        )
+        return CaseGoal(
+            case_id=case_spec.case_id,
+            goal=goal_text,
+            checkpoints=expected_cps,
+            success_criteria=success,
+            ai_reasoning="检查点来自用例预期原文，未改写",
+        )
+
     provider, gate = resolve_regression_provider(provider_id)
     if provider is None:
         return CaseGoal(
@@ -920,6 +968,7 @@ def _parse_agent_decision(raw: dict[str, Any], width: int, height: int) -> Agent
         confidence=max(0.0, min(1.0, float(raw.get("confidence") or 0.0))),
         remember=_as_str_list(raw.get("remember")),
         checkpoint_ids=_as_str_list(raw.get("checkpoint_ids") or raw.get("checkpoints")),
+        knowledge_ids=_as_str_list(raw.get("knowledge_ids") or raw.get("knowledge_id")),
         subflow=subflow,
         published=published,
         raw_llm=raw,
@@ -938,10 +987,10 @@ def decide_next_action(
     image_base64: str,
     image_mime: str = "image/png",
     hierarchy_text: str = "",
-    baseline_hint: str = "",
     success_criteria: str = "",
     memory_block: str = "",
     knowledge_hint: str = "",
+    session_block: str = "",
     provider_id: Optional[str] = None,
     timeout_sec: int = 90,
 ) -> AgentDecision:
@@ -954,6 +1003,7 @@ def decide_next_action(
     if provider is None:
         return AgentDecision(status="ask_human", thought=f"未启用 AI 视觉：{gate.get('reason')}",
                              parse_warnings=["provider unavailable"])
+    accounts_brief = str(getattr(run_context, "accounts_brief", "") or "").strip()
     messages = P.build_agent_decide_messages(
         goal=goal,
         checkpoints_block=checkpoints_block,
@@ -965,11 +1015,12 @@ def decide_next_action(
         image_base64=image_base64,
         image_mime=image_mime,
         hierarchy_text=hierarchy_text,
-        baseline_hint=baseline_hint,
         target_package=str(getattr(run_context, "target_package", "") or ""),
         success_criteria=success_criteria,
         memory_block=memory_block,
         knowledge_hint=knowledge_hint,
+        session_block=session_block,
+        accounts_brief=accounts_brief,
     )
 
     # 给前端展示：我们喂给模型的“文本块/上下文”（不直接回传超大 image_base64）。
@@ -977,8 +1028,9 @@ def decide_next_action(
         "goal": goal,
         "checkpoints_block": checkpoints_block,
         "history_block": history_block,
-        "baseline_hint": baseline_hint,
         "knowledge_hint": knowledge_hint,
+        "session_block": session_block,
+        "accounts_brief": accounts_brief,
         "memory_block": memory_block,
         "success_criteria": success_criteria,
         "device_brief": run_context.to_prompt_brief(),
@@ -988,13 +1040,16 @@ def decide_next_action(
     raw, meta = _chat(
         job="agent-decide",
         provider=provider, messages=messages,
-        temperature=0.1, max_tokens=1024, timeout_sec=timeout_sec,
+        # 省略该字段时豆包默认仍是 4096；decide JSON 通常 200 token，2048 足够。
+        # 再放大只会让空白熔断更久。空白输出改由流式早停处理。
+        temperature=0.1, max_tokens=2048, timeout_sec=timeout_sec,
     )
     if raw is None:
-        SLog.w(TAG, f"decide_next_action LLM failed err={meta.get('error')!r}")
+        err = str(meta.get("error") or "").strip() or "LLM 返回空/解析失败"
+        SLog.w(TAG, f"decide_next_action LLM failed err={err!r}")
         return AgentDecision(
             status="give_up",
-            thought="LLM 返回空/解析失败",
+            thought=err[:200],
             raw_llm={"llm_input": llm_input_debug, "llm_output": None, "meta": meta},
             parse_warnings=["llm failed"],
         )
@@ -1043,3 +1098,73 @@ def decide_restart_app(
         restart = restart.strip().lower() in {"true", "1", "yes"}
     thought = str(raw.get("thought") or "").strip() or "（未说明）"
     return bool(restart), thought
+
+
+def inspect_session(
+    *,
+    required_session: str = "",
+    knowledge_hint: str = "",
+    accounts_brief: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 60,
+) -> dict[str, Any]:
+    """观察当前屏登录态。失败或首页看不清时 unknown + keep，不点屏幕、不问人。"""
+    empty = {
+        "session": "unknown",
+        "identity": "unknown",
+        "seen": "",
+        "probe": False,
+        "next": "keep",
+        "reason": "未观察",
+    }
+    if not image_base64:
+        empty["reason"] = "无截图，跳过会话观察"
+        return empty
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        empty["reason"] = f"未启用 AI：{gate.get('reason')}"
+        return empty
+    messages = P.build_inspect_session_messages(
+        required_session=required_session,
+        knowledge_hint=knowledge_hint,
+        accounts_brief=accounts_brief,
+        image_base64=image_base64,
+        image_mime=image_mime,
+    )
+    raw, meta = _chat(
+        job="inspect-session",
+        provider=provider, messages=messages,
+        temperature=0.1, max_tokens=512, timeout_sec=timeout_sec,
+    )
+    if not isinstance(raw, dict):
+        SLog.w(TAG, f"inspect_session LLM failed err={meta.get('error')!r}")
+        empty["reason"] = "LLM 返回空/解析失败"
+        return empty
+    session = str(raw.get("session") or "unknown").strip().lower()
+    if session not in {"logged_out", "logged_in", "unknown"}:
+        session = "unknown"
+    identity = str(raw.get("identity") or "unknown").strip().lower()
+    if identity not in {"match", "mismatch", "unknown"}:
+        identity = "unknown"
+    nxt = str(raw.get("next") or "keep").strip().lower()
+    if nxt not in {"keep", "logout", "login", "switch", "human"}:
+        nxt = "keep"
+    probe = raw.get("probe")
+    if isinstance(probe, str):
+        probe = probe.strip().lower() in {"true", "1", "yes"}
+    seen = str(raw.get("seen") or "").strip()[:240]
+    reason = str(raw.get("reason") or "").strip()[:240] or "（未说明）"
+    if session == "unknown" and nxt == "human" and not re.search(
+        r"登录|注册|验证码|退出|昵称|手机号|账号", f"{seen} {reason}"
+    ):
+        nxt = "keep"
+    return {
+        "session": session,
+        "identity": identity,
+        "seen": seen,
+        "probe": bool(probe),
+        "next": nxt,
+        "reason": reason,
+    }

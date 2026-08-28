@@ -1,25 +1,9 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""Orchestrator：顶层事件执行循环。
+"""单用例入口：一律 AgentExecutor（看图闭环）。
 
-输入：
-  - RunContext（设备 + 连通性）
-  - PlanResult（已经由 generate_overview() 出过的事件序列）
-  - 可选 BaselineContext（首次执行可为 None；Step 6 才大规模启用）
-
-循环：
-  while i < len(events):
-    result = router.dispatch(events[i])
-    record(result)
-    if PASS:        → i += 1
-    if BLOCKED:     → break（等 HITL；Step 5 接通后才能从这里恢复）
-    if FAIL/DECLINED:
-        if replan_count < max:
-            replan_result = replan_single_step(...)
-            if mode=give_up:  → break
-            apply replan_result.events → 继续循环
-        else: → break
-  汇总 RunReport
+本文件仍保留旧 Orchestrator 类（盲规划 + replan），用例回归不再调用。
+公开入口只有 run_case()。
 """
 from __future__ import annotations
 
@@ -32,7 +16,6 @@ from typing import Any, Optional
 from script.log import SLog
 
 from server.services.ai.regression.planner import (
-    generate_overview,
     replan_single_step,
 )
 from server.services.ai.regression.schemas import (
@@ -402,74 +385,36 @@ def run_case(
     run_id: str = "",
     use_persisted_baseline: bool = True,
     app_cache_cleared: bool = False,
-    execution_mode: str = "auto",
+    execution_mode: str = "agent",
 ) -> RunReport:
-    """端到端跑一条 case：generate_overview → orchestrate。
+    """端到端跑一条 case：一律 Agent（看图闭环）。
 
-    execution_mode（D1–D6 改造）：
-      - "agent"：目标导向闭环引擎（每步看图决策），仅支持 adb 通道
-      - "plan" ：旧的整体规划 + 逐事件 + replan（默认兼容）
-      - "auto" ：adb 直连设备(非 claw)自动走 agent，其余走 plan
+    旧 Plan 循环（generate_overview + Orchestrator）已停用，不再按
+    execution_mode / adb / claw 分叉。execution_mode 参数仅兼容旧调用方，忽略。
     """
-    mode = (execution_mode or "auto").strip().lower()
-    adb_ok = (run_context.adb.get("state") == "connected") if run_context else False
-    is_claw = str(run_context.sn or "").startswith("claw-") if run_context else False
-    use_agent = mode == "agent" or (mode == "auto" and adb_ok and not is_claw)
-    if use_agent:
-        if not adb_ok:
-            SLog.w(TAG, f"execution_mode=agent 但 adb 未连通，回退 plan 模式 case={case_spec.case_id}")
-        else:
-            from server.services.regression.agent_executor import run_agent_case
+    del baseline, options, use_persisted_baseline, app_cache_cleared, execution_mode
+    from server.services.regression.agent_executor import run_agent_case
 
-            agent_router = router or CapabilityRouter(run_context)
-            SLog.i(TAG, f"[{run_id}] execution_mode=agent (adb) case={case_spec.case_id}")
-            return run_agent_case(
-                case_spec,
-                run_context=run_context,
-                router=agent_router,
-                provider_id=provider_id,
-                run_id=run_id,
-            )
+    flags = run_context.connectivity_flags if run_context else {}
+    has_channel = bool(
+        flags.get("adb") or flags.get("remote") or flags.get("ios_wda")
+    )
+    if not has_channel:
+        SLog.e(TAG, f"[{run_id}] agent refused: no control channel case={case_spec.case_id}")
+        return RunReport(
+            run_id=run_id or "",
+            case_id=case_spec.case_id,
+            sn=getattr(run_context, "sn", "") or "",
+            overall_status="fail",
+            decline_reason="无可用执行通道（adb / remote / ios_wda）",
+        )
 
-    baseline_overview_text = ""
-    if use_persisted_baseline and case_spec and case_spec.case_id:
-        try:
-            ov = case_memory.load_baseline_for_planning(
-                case_id=case_spec.case_id,
-                device_signature=run_context.device_signature if run_context else "",
-            )
-            if ov is not None:
-                baseline_overview_text = ov.to_prompt_block()
-                SLog.i(
-                    TAG,
-                    f"loaded baseline overview case={case_spec.case_id} "
-                    f"events={ov.event_count} status={ov.overall_status}",
-                )
-        except Exception as exc:  # pragma: no cover
-            SLog.w(TAG, f"load_baseline_for_planning failed: {exc}")
-
-    plan = generate_overview(
+    agent_router = router or CapabilityRouter(run_context)
+    SLog.i(TAG, f"[{run_id}] agent case={case_spec.case_id}")
+    return run_agent_case(
         case_spec,
         run_context=run_context,
-        baseline=baseline,
-        baseline_overview_text=baseline_overview_text,
+        router=agent_router,
         provider_id=provider_id,
-        app_cache_cleared=app_cache_cleared,
-    )
-    if app_cache_cleared and plan.events:
-        before = len(plan.events)
-        plan.events = [e for e in plan.events if e.capability_id != "clear_app_cache"]
-        dropped = before - len(plan.events)
-        if dropped:
-            SLog.i(TAG, f"skip {dropped} clear_app_cache event(s); precondition already cleared cache")
-    orch = Orchestrator(
-        run_context=run_context,
-        plan=plan,
-        options=options,
-        router=router,
-        baseline=baseline,
-        case_spec=case_spec,
         run_id=run_id,
-        case_id=case_spec.case_id,
     )
-    return orch.run()

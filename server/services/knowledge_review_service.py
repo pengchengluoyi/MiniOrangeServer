@@ -151,7 +151,13 @@ def _chat_role(role_id: str, user: str, *, max_tokens: int = 600, timeout_sec: i
     if provider is None:
         return None, gate
     from server.services.ai import dispatch_log as dispatch
-    tok = dispatch.bind(trigger="knowledge_review", source="knowledge_review", role=role_id, job="knowledge-review")
+    tok = dispatch.bind(
+        trigger="knowledge_review",
+        source="knowledge_review",
+        role=role_id,
+        job="knowledge-review",
+        skill="knowledge-review",
+    )
     try:
         parsed, meta = call_chat_text(
             provider=provider,

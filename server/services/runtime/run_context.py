@@ -58,6 +58,16 @@ class RunContext:
     # 被测应用包名（来自应用配置 / case_runner）
     target_package: str = ""
 
+    # 应用基础逻辑快照（下发时从库拷入，本趟任务内不变）
+    playbook: dict[str, Any] = field(default_factory=dict)
+    # 本条用例开跑前从号池申请的账号（公开信息；每条用例覆盖）
+    accounts_brief: str = ""
+    picked_account: dict[str, Any] = field(default_factory=dict)
+    # 开跑前设备预置 / 登录态事实
+    keep_permission_prompt: bool = False
+    provision_report: dict[str, Any] = field(default_factory=dict)
+    session_fact: dict[str, Any] = field(default_factory=dict)
+
     # ---------- properties ----------
 
     @property
@@ -200,6 +210,9 @@ class RunContext:
                 "model_name": self.model_name,
             },
             "target_package": self.target_package,
+            "keep_permission_prompt": self.keep_permission_prompt,
+            "provision_report": dict(self.provision_report or {}),
+            "session_fact": dict(self.session_fact or {}),
         }
 
 

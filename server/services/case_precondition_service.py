@@ -65,6 +65,8 @@ def _classify_line(line: str) -> Tuple[str, str]:
         return "check_logged_in", "after_launch"
     if re.search(r"未登录|游客|未登陆", t):
         return "check_not_logged_in", "after_launch"
+    if re.search(r"保留权限(询问|弹窗|框)?|不要(预)?授权|拒绝权限|测(试)?权限拒绝|keep_permission", t, re.I):
+        return "keep_permission_prompt", "before_launch"
     return "unknown", "before_launch"
 
 
@@ -362,6 +364,9 @@ def _run_one(
             ok, msg = _check_logged_in(engine, expect_logged_in=True, package=package)
         elif kind == "check_not_logged_in":
             ok, msg = _check_logged_in(engine, expect_logged_in=False, package=package)
+        elif kind == "keep_permission_prompt":
+            ok, msg = True, "已标记保留权限询问，预置层不 pm grant / 不自动点允许"
+            entry["skipped"] = True
         else:
             ok, msg = True, f"暂未自动化: {line}（已跳过，请人工确认环境）"
             entry["skipped"] = True

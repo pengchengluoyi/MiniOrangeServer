@@ -39,6 +39,7 @@ SKILLS: List[Dict[str, Any]] = [
     {"id": "draft_gate", "label": "发版草稿", "owner": "version-qa-bm", "summary": "出建议，结论人点", "intent": "persist", "category": "flow"},
     {"id": "pick_account", "label": "筛测试账号", "owner": "test-engineer", "summary": "按场景选号", "intent": "persist", "category": "flow"},
     {"id": "goal-extract", "label": "抽取目标", "owner": "test-engineer", "summary": "开跑前抽出检查点", "intent": "act", "category": "device"},
+    {"id": "inspect-session", "label": "观察登录会话", "owner": "test-engineer", "summary": "开场看图判断登录态", "intent": "act", "category": "device"},
     {"id": "agent-decide", "label": "看图决策", "owner": "test-engineer", "summary": "每一步决定下一个动作", "intent": "act", "category": "device"},
     {"id": "assert-vision", "label": "视觉断言", "owner": "test-engineer", "summary": "检查点是否达成", "intent": "act", "category": "device"},
     {"id": "plan-overview", "label": "规划步骤", "owner": "test-engineer", "summary": "Plan 模式先排事件", "intent": "act", "category": "device"},
@@ -61,6 +62,7 @@ SKILLS: List[Dict[str, Any]] = [
     {"id": "user-goal-extract", "label": "User · 目标抽取", "owner": "test-engineer", "summary": "GOAL_EXTRACT user 模板", "intent": "act", "category": "prompt"},
     {"id": "user-agent-decide", "label": "User · 真机决策", "owner": "test-engineer", "summary": "AGENT_DECIDE user 模板", "intent": "act", "category": "prompt"},
     {"id": "user-agent-restart", "label": "User · 开场重启", "owner": "test-engineer", "summary": "AGENT_RESTART user 模板", "intent": "act", "category": "prompt"},
+    {"id": "user-inspect-session", "label": "User · 观察登录", "owner": "test-engineer", "summary": "INSPECT_SESSION user 模板", "intent": "act", "category": "prompt"},
     {"id": "user-ai-plan", "label": "User · Copilot Plan", "owner": "test-engineer", "summary": "AI_PLAN user 模板", "intent": "act", "category": "prompt"},
 ]
 
@@ -127,6 +129,7 @@ DEFAULT_SKILL_DRIVERS: Dict[str, List[str]] = {
     "im.dialogue": ["im.send"],
     "im.defect": ["zentao.submit", "im.send"],
     "goal-extract": ["adb", "claw"],
+    "inspect-session": ["adb", "claw"],
     "agent-decide": ["adb", "claw"],
     "assert-vision": ["adb", "claw"],
     "plan-overview": ["adb", "claw"],
@@ -147,6 +150,7 @@ DEFAULT_ROLE_SKILLS: Dict[str, List[str]] = {
     "test-engineer": [
         "pick_account",
         "goal-extract",
+        "inspect-session",
         "agent-decide",
         "assert-vision",
         "plan-overview",

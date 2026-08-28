@@ -374,7 +374,11 @@ def _expected_by_step_number(text: str) -> Dict[int, str]:
 def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
     """补齐编号字段；JSON 缓存会把 expected_by_step 的 int 键变成 str。"""
     out = dict(case or {})
-    steps = list(out.get("steps") or [])
+    if isinstance(out.get("steps"), str) and str(out.get("steps")).strip() and not str(out.get("steps_raw") or "").strip():
+        out["steps_raw"] = str(out.get("steps"))
+    if isinstance(out.get("expected"), str) and str(out.get("expected")).strip() and not str(out.get("expected_raw") or "").strip():
+        out["expected_raw"] = str(out.get("expected"))
+    steps = list(out.get("steps") or []) if isinstance(out.get("steps"), list) else []
     if steps:
         if out.get("step_nums"):
             out["step_nums"] = [int(x) for x in out["step_nums"]]
@@ -387,7 +391,7 @@ def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
                 else list(range(1, len(steps) + 1))
             )
 
-    expected = list(out.get("expected") or [])
+    expected = list(out.get("expected") or []) if isinstance(out.get("expected"), list) else []
     expected_raw = out.get("expected_raw") or ""
     raw_steps = out.get("steps_raw") or ""
     step_items = (
@@ -398,6 +402,10 @@ def normalize_feishu_case(case: Dict[str, Any]) -> Dict[str, Any]:
     expected_items = _rebalance_single_expected(
         step_items, _parse_numbered_items(expected_raw, field="expected")
     )
+    if step_items and not steps:
+        out["steps"] = [it["text"] for it in step_items]
+        out["step_nums"] = [int(it["num"]) for it in step_items]
+        steps = out["steps"]
     if expected_items:
         out["expected"] = [it["text"] for it in expected_items]
         out["expected_nums"] = [int(it["num"]) for it in expected_items]

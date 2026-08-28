@@ -31,10 +31,15 @@ _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
 _PARSE_RETRIES = 1  # 解析失败后再完整打一轮（填点乱码 JSON 这类偶发花活）
 _CONNECT_TIMEOUT_SEC = 10.0
-# 读超时下限：按 max_tokens 估生成耗时（经验值 ~25 token/s），再取和调用方给的 timeout_sec 的较大值。
-# 这样老调用方不用改参数也能自动获得足够的读超时，避免「4096 token 生成撞 90s 超时」。
-_READ_TIMEOUT_PER_TOKEN = 1.0 / 25.0
+# 读超时跟调用方 timeout_sec 走，不再按 max_tokens 放大。
+# 曾经按 12288 token 估到 ~8 分钟，豆包灌空白时界面会一直无返回。
 _READ_TIMEOUT_MAX_SEC = 600.0
+_STREAM_IDLE_TIMEOUT_SEC = 20.0
+# 流式早停：`{` 后一直空白、始终不出 JSON 键，就掐掉，避免等满 max_tokens。
+_MELT_MIN_CHARS = 200
+_MELT_MAX_ALNUM = 12
+_MELT_KEY_DEADLINE_SEC = 4.0
+_JSON_OBJECT_KEY_RE = re.compile(r'"[A-Za-z_][A-Za-z0-9_]{1,64}"\s*:')
 
 
 def _safe_record_llm(*, messages, parsed=None, raw_text: str = "", meta=None) -> None:
@@ -279,7 +284,7 @@ def extract_chat_content(resp_json: dict[str, Any]) -> tuple[str, dict[str, Any]
             )
     if not content:
         content = choice.get("text") or ""
-    content = str(content or "")
+    content = repair_utf8_mojibake(str(content or ""))
     meta = {
         "finish_reason": choice.get("finish_reason"),
         "content_len": len(content),
@@ -343,9 +348,183 @@ def _response_format(json_mode: bool, response_schema: Optional[dict[str, Any]])
     return None
 
 
-def _read_timeout(max_tokens: int, timeout_sec: float) -> float:
-    est = max_tokens * _READ_TIMEOUT_PER_TOKEN + 30.0
-    return float(min(_READ_TIMEOUT_MAX_SEC, max(float(timeout_sec or 0), est)))
+def _read_timeout(max_tokens: Optional[int], timeout_sec: float) -> float:
+    del max_tokens  # 不再按输出预算放大，避免空白生成把等待拖到数分钟
+    return float(min(_READ_TIMEOUT_MAX_SEC, max(float(timeout_sec or 0), 30.0)))
+
+
+def _stream_idle_timeout(timeout_sec: float) -> float:
+    """SSE 两次 chunk 之间的空闲上限；墙钟仍由 timeout_sec 卡住。"""
+    return float(min(_STREAM_IDLE_TIMEOUT_SEC, max(8.0, float(timeout_sec or 0))))
+
+
+def _delta_text(delta: Any) -> str:
+    if isinstance(delta, str):
+        return delta
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(p.get("text") or "") for p in content if isinstance(p, dict)
+        )
+    return str(delta.get("text") or "")
+
+
+def repair_utf8_mojibake(text: str) -> str:
+    """还原「UTF-8 字节被当成 Latin-1 解开」的中文乱码。
+
+    HTTP 无 charset 时，requests 会按 ISO-8859-1 解 SSE 行，`当前` 变成 `å½å`。
+    整段能 latin-1→utf-8 才改写；已经是中文或真 Latin-1 则原样返回。
+    """
+    raw = str(text or "")
+    if not raw:
+        return raw
+    try:
+        fixed = raw.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return raw
+    return fixed
+
+
+def _iter_sse_text_lines(resp: Any):
+    """按行读 SSE。强制 UTF-8，避免 requests 在无 charset 时用 Latin-1。"""
+    try:
+        enc = str(getattr(resp, "encoding", None) or "").lower().replace("_", "-")
+        if enc in ("", "iso-8859-1", "latin-1", "iso8859-1"):
+            resp.encoding = "utf-8"
+    except Exception:
+        pass
+    try:
+        stream = resp.iter_lines(decode_unicode=False)
+    except TypeError:
+        stream = resp.iter_lines()
+    for raw in stream:
+        if not raw:
+            continue
+        if isinstance(raw, bytes):
+            yield raw.decode("utf-8", errors="replace")
+        else:
+            yield str(raw)
+
+
+def has_json_object_key(text: str) -> bool:
+    """是否已经出现 `"thought":` / `"restart":` 这类对象键。"""
+    return bool(_JSON_OBJECT_KEY_RE.search(str(text or "")))
+
+
+def looks_like_output_melt(text: str) -> bool:
+    """豆包偶发从 `{` 起灌空白，一直写到 max_tokens 才停。
+
+    真正的 JSON 会很快出现 `"ident":`；空白熔断几乎没有字母数字。
+    """
+    raw = str(text or "")
+    if len(raw) < _MELT_MIN_CHARS:
+        return False
+    if has_json_object_key(raw):
+        return False
+    alnum = sum(1 for c in raw if c.isalnum())
+    return alnum <= _MELT_MAX_ALNUM
+
+
+def _consume_sse_chat(
+    resp: Any,
+    meta: dict[str, Any],
+    *,
+    started: float,
+    timeout_sec: float,
+) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """读 OpenAI-compatible SSE。空白熔断 / 墙钟超时立刻关连接，避免等满 max_tokens。"""
+    text = ""
+    finish_reason = ""
+    usage: Any = None
+    first_token_at: Optional[float] = None
+    deadline = started + max(float(timeout_sec or 90), 30.0)
+    aborted = ""
+    try:
+        for raw in _iter_sse_text_lines(resp):
+            now = time.time()
+            if now > deadline:
+                aborted = "timeout"
+                meta["error"] = "LLM 流式等待超时，已中止"
+                break
+            line = str(raw).strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("{") and not line.startswith("data:"):
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    obj = None
+                if isinstance(obj, dict) and (obj.get("choices") or obj.get("error")):
+                    meta["elapsed_ms"] = int((now - started) * 1000)
+                    return obj, meta
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data:
+                continue
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except Exception:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("usage"):
+                usage = chunk.get("usage")
+            choices = chunk.get("choices") or []
+            choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+            piece = _delta_text(choice.get("delta") or {})
+            if not piece:
+                piece = _delta_text(choice)
+            if piece:
+                if first_token_at is None:
+                    first_token_at = now
+                text += piece
+                if looks_like_output_melt(text):
+                    aborted = "melt"
+                    meta["error"] = "模型输出空白/无 JSON 键，已中止以免卡死"
+                    break
+                if (
+                    first_token_at
+                    and (now - first_token_at) >= _MELT_KEY_DEADLINE_SEC
+                    and len(text) >= 40
+                    and not has_json_object_key(text)
+                ):
+                    aborted = "melt"
+                    meta["error"] = "模型输出空白/无 JSON 键，已中止以免卡死"
+                    break
+            fr = choice.get("finish_reason")
+            if fr:
+                finish_reason = str(fr)
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    text = repair_utf8_mojibake(text)
+    meta["elapsed_ms"] = int((time.time() - started) * 1000)
+    if aborted:
+        meta["fail_kind"] = aborted
+        meta["aborted"] = True
+        finish_reason = finish_reason or "abort"
+        SLog.w(
+            TAG,
+            f"chat stream aborted kind={aborted} provider={meta.get('provider_id')} "
+            f"len={len(text)} preview={text[:120]!r}",
+        )
+    return {
+        "choices": [{
+            "message": {"content": text},
+            "finish_reason": finish_reason or "stop",
+        }],
+        "usage": usage or {},
+    }, meta
 
 
 def _post_chat_completions(
@@ -353,18 +532,19 @@ def _post_chat_completions(
     provider: dict[str, Any],
     messages: list[dict[str, str]],
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = 4096,
     timeout_sec: int = 90,
     extra_payload: Optional[dict[str, Any]] = None,
     json_mode: bool = False,
     response_schema: Optional[dict[str, Any]] = None,
     max_attempts: int = _MAX_ATTEMPTS,
+    stream: bool = True,
 ) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     """OpenAI-compatible /chat/completions HTTP 调用。成功返回 (resp_json, meta)，失败 (None, meta)。
 
+    默认走 SSE：空白熔断可在几百毫秒内掐掉，不必等满 max_tokens。
     对限流 / 网关抖动 / 读超时做指数退避重试（`_RETRY_STATUS`）；业务错误不重试。
-    provider 不认 `response_format` 时（400/422）自动摘掉该字段重试一次，避免因为
-    加了 JSON 模式反而把原本能用的 provider 打挂。
+    provider 不认 `response_format` / `stream` 时（400/422）自动摘掉该字段重试一次。
     """
     base = str(provider.get("base_url") or "").rstrip("/")
     api_key = str(provider.get("api_key") or "").strip()
@@ -379,6 +559,7 @@ def _post_chat_completions(
         "attempts": 0,
         "retry_reasons": [],
         "json_mode_downgraded": False,
+        "stream": False,
     }
     if not base or not api_key or not model:
         meta["error"] = f"provider not configured (base={bool(base)}, key={bool(api_key)}, model={bool(model)})"
@@ -394,40 +575,63 @@ def _post_chat_completions(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
         **_volcengine_extras(pid, model),
     }
+    if max_tokens is not None and int(max_tokens) > 0:
+        payload["max_tokens"] = int(max_tokens)
     fmt = _response_format(json_mode, response_schema)
     if fmt:
         payload["response_format"] = fmt
+    want_stream = bool(stream)
+    if want_stream:
+        payload["stream"] = True
     if extra_payload:
         payload.update(extra_payload)
+        if extra_payload.get("stream") is False:
+            want_stream = False
+            payload.pop("stream", None)
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = f"{base}/chat/completions"
-    timeout = (_CONNECT_TIMEOUT_SEC, _read_timeout(max_tokens, timeout_sec))
-
     started = time.time()
     attempt = 0
     while attempt < max(1, max_attempts):
         attempt += 1
         meta["attempts"] = attempt
+        meta["stream"] = want_stream
+        timeout = (
+            _CONNECT_TIMEOUT_SEC,
+            _stream_idle_timeout(timeout_sec) if want_stream else _read_timeout(max_tokens, timeout_sec),
+        )
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=want_stream)
             meta["http_status"] = resp.status_code
-            if resp.status_code in (400, 422) and "response_format" in payload:
-                # provider 不支持 response_format：摘掉重试，不算入退避次数
-                payload.pop("response_format", None)
-                meta["json_mode_downgraded"] = True
-                meta["retry_reasons"].append(f"{resp.status_code}:response_format_unsupported")
-                SLog.w(TAG, f"provider={pid} model={model} 不支持 response_format，已降级重试")
-                attempt -= 1
-                continue
+            if resp.status_code in (400, 422):
+                dropped = ""
+                if want_stream and payload.get("stream"):
+                    payload.pop("stream", None)
+                    want_stream = False
+                    dropped = "stream"
+                elif "response_format" in payload:
+                    payload.pop("response_format", None)
+                    meta["json_mode_downgraded"] = True
+                    dropped = "response_format"
+                if dropped:
+                    meta["retry_reasons"].append(f"{resp.status_code}:{dropped}_unsupported")
+                    SLog.w(TAG, f"provider={pid} model={model} 不支持 {dropped}，已降级重试")
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    attempt -= 1
+                    continue
             if resp.status_code in _RETRY_STATUS and attempt < max_attempts:
                 meta["retry_reasons"].append(str(resp.status_code))
                 time.sleep(_backoff_delay(attempt))
                 continue
             resp.raise_for_status()
+            if want_stream:
+                return _consume_sse_chat(resp, meta, started=started, timeout_sec=timeout_sec)
             meta["elapsed_ms"] = int((time.time() - started) * 1000)
             return resp.json(), meta
         except Exception as e:
@@ -459,7 +663,7 @@ def call_chat_plain(
     provider: dict[str, Any],
     messages: list[dict[str, str]],
     temperature: float = 0.3,
-    max_tokens: int = 2048,
+    max_tokens: Optional[int] = 2048,
     timeout_sec: int = 90,
     extra_payload: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -488,12 +692,14 @@ def _parse_chat_json(resp_json: dict[str, Any], meta: dict[str, Any]) -> tuple[O
 
     会就地写 meta：finish_reason / truncated / salvaged / content_* / usage / fail_kind / error。
     """
+    aborted_kind = str(meta.get("fail_kind") or "")
+    aborted_err = str(meta.get("error") or "")
     content, parse_meta = extract_chat_content(resp_json)
     meta.update(parse_meta)
     meta["truncated"] = str(meta.get("finish_reason") or "") == "length"
     meta["salvaged"] = False
-    meta["fail_kind"] = ""
-    meta["error"] = meta.get("error") or ""
+    meta["fail_kind"] = aborted_kind
+    meta["error"] = aborted_err or meta.get("error") or ""
 
     parsed = _extract_first_json_object(content)
     if parsed is None and content:
@@ -510,14 +716,23 @@ def _parse_chat_json(resp_json: dict[str, Any], meta: dict[str, Any]) -> tuple[O
             )
 
     if parsed is None:
-        meta["fail_kind"] = "truncated" if meta["truncated"] else "parse"
+        if aborted_kind in {"melt", "timeout"}:
+            meta["fail_kind"] = aborted_kind
+            meta["error"] = aborted_err or (
+                "模型输出空白/无 JSON 键，已中止以免卡死"
+                if aborted_kind == "melt"
+                else "LLM 流式等待超时，已中止"
+            )
+        else:
+            meta["fail_kind"] = "truncated" if meta["truncated"] else "parse"
+            meta["error"] = meta.get("error") or (
+                "输出被 max_tokens 截断且无法抢救" if meta["truncated"] else "模型没有返回可解析的 JSON"
+            )
         SLog.w(
             TAG,
             f"chat JSON parse failed provider={meta.get('provider_id')} model={meta.get('model')} "
-            f"finish={meta.get('finish_reason')!r} preview={meta.get('content_preview')!r}",
-        )
-        meta["error"] = meta.get("error") or (
-            "输出被 max_tokens 截断且无法抢救" if meta["truncated"] else "模型没有返回可解析的 JSON"
+            f"kind={meta.get('fail_kind')} finish={meta.get('finish_reason')!r} "
+            f"preview={meta.get('content_preview')!r}",
         )
     return parsed, content
 
@@ -535,6 +750,9 @@ def _merge_round_meta(acc: dict[str, Any], round_meta: dict[str, Any]) -> dict[s
     out["json_mode_downgraded"] = bool(acc.get("json_mode_downgraded")) or bool(
         round_meta.get("json_mode_downgraded")
     )
+    out["aborted"] = bool(round_meta.get("aborted"))
+    if round_meta.get("fail_kind"):
+        out["fail_kind"] = round_meta["fail_kind"]
     return out
 
 
@@ -543,7 +761,7 @@ def call_chat_text(
     provider: dict[str, Any],
     messages: list[dict[str, str]],
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = 4096,
     timeout_sec: int = 90,
     extra_payload: Optional[dict[str, Any]] = None,
     json_mode: bool = True,
@@ -565,7 +783,7 @@ def call_chat_text(
     不能当成功处理（这是「一批用例静默变模板桩」的根因）。
 
     解析失败（非截断）会再完整打一轮模型：偶发乱码 JSON（键名碎掉之类）常能自愈；
-    max_tokens 截断不在此重试。
+    max_tokens 截断、墙钟超时不在此重试。空白熔断会再打一轮（通常第二次能吐出 JSON）。
     """
     meta: dict[str, Any] = {}
     parsed: Optional[dict[str, Any]] = None
@@ -585,7 +803,7 @@ def call_chat_text(
         )
         meta = _merge_round_meta(meta, round_meta)
         if resp_json is None:
-            meta["fail_kind"] = "http"
+            meta["fail_kind"] = str(round_meta.get("fail_kind") or "http")
             _safe_record_llm(messages=messages, meta=meta)
             return None, meta
 
@@ -594,8 +812,9 @@ def call_chat_text(
             _safe_record_llm(messages=messages, parsed=parsed, meta=meta)
             return parsed, meta
 
-        # 截断：同预算再打没用；交给调用方拆批 / 加 tokens
-        if meta.get("truncated") or round_i + 1 >= rounds:
+        # 截断 / 墙钟超时：同预算再打没用。空白熔断允许再打一轮。
+        kind = str(meta.get("fail_kind") or "")
+        if meta.get("truncated") or kind == "timeout" or round_i + 1 >= rounds:
             break
 
         meta["retry_reasons"] = list(meta.get("retry_reasons") or []) + ["parse"]
@@ -616,15 +835,29 @@ def call_chat_text(
 
 
 def resolve_regression_provider(provider_id: Optional[str] = None) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
-    """读 system settings 解析本次 Run 该用哪个 AI provider。
+    """解析本次 Run 用哪个 AI provider。
 
-    CaseRunner 回归固定走「大模型 Key → 可用 + 用例」那条配置，忽略外部传入的 provider_id。
-    返回 (provider_dict | None, gate_dict)。
+    显式传入 provider_id（对话页选择）时：只要该 Key 可用即可。
+    未传入时：CaseRunner 回归仍走「大模型 Key → 可用 + 用例」。
     """
     try:
         from server.services import system_settings_service as ss
     except Exception as e:
         return None, {"enabled": False, "reason": f"system_settings import failed: {e}"}
+
+    pid = str(provider_id or "").strip()
+    if pid:
+        provider = ss.get_ai_provider_credentials(pid)
+        if not provider.get("configured") or not provider.get("api_key"):
+            return None, {"enabled": False, "reason": "provider missing api_key", "provider_id": pid}
+        if provider.get("enabled") is False:
+            return None, {"enabled": False, "reason": f"AI provider disabled: {pid}", "provider_id": pid}
+        return provider, {
+            "enabled": True,
+            "provider_id": provider.get("id") or pid,
+            "model": provider.get("model"),
+            "provider_name": provider.get("name"),
+        }
 
     gate = ss.should_use_ai_planning("case_execution", provider_id=None)
     if not gate.get("enabled"):

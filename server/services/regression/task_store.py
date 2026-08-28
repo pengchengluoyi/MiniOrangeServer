@@ -17,7 +17,7 @@ from script.log import SLog
 TAG = "TaskStore"
 
 # 用例终态（用于算 completed）
-_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled"}
+_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled", "untestable"}
 
 # 引擎内部状态 → PRD §0 用例枚举。禁止让 failed / partial 这类同义词漏到前端：
 #   - failed  : 旧数据别名
@@ -74,6 +74,9 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
     failed = _int(doc.get("failed"))
     blocked = _int(doc.get("blocked"))
     declined = _int(doc.get("declined"))
+    untestable = _int(doc.get("untestable"))
+    judged = max(0, completed - untestable)
+    pass_rate = int(round(passed / judged * 100)) if judged else 0
     st = status or doc.get("status") or "running"
     current = ""
     hitl = False
@@ -121,8 +124,9 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "failed": failed,
         "blocked": blocked,
         "declined": declined,
+        "untestable": untestable,
         "progress": min(100, int(round(completed / total * 100))) if total else 0,
-        "pass_rate": int(round(passed / completed * 100)) if completed else 0,
+        "pass_rate": pass_rate,
         "error": doc.get("error", "") or "",
         "provider_name": doc.get("provider_name", "") or "",
         "model_name": doc.get("model_name", "") or "",
@@ -159,6 +163,7 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
         "failed": t["failed"],
         "blocked": t["blocked"],
         "declined": t["declined"],
+        "untestable": t.get("untestable") or 0,
         "progress": t["progress"],
         "current_case_id": t["current_case_id"],
         "hitl": t["hitl"],

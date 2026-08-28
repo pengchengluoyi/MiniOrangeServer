@@ -218,6 +218,25 @@ def normalize_project_env(raw: Any) -> dict:
     }
 
 
+def account_ident(row: dict | None) -> str:
+    """号池条目的对外标识：手机号优先，其次邮箱/用户名。不用自定义名称。"""
+    row = row if isinstance(row, dict) else {}
+    phone = re.sub(r"\s+", "", str(row.get("phone") or ""))
+    if phone:
+        return phone
+    email = str(row.get("email") or "").strip()
+    if email:
+        return email
+    return str(row.get("username") or "").strip()
+
+
+def account_label(row: dict | None) -> str:
+    row = row if isinstance(row, dict) else {}
+    ident = account_ident(row) or "未填号码"
+    env = str(row.get("env") or "").strip() or "-"
+    return f"{ident} · {env}"
+
+
 def _norm_test_accounts(raw: Any) -> List[dict]:
     rows = raw if isinstance(raw, list) else []
     out: List[dict] = []
@@ -235,15 +254,19 @@ def _norm_test_accounts(raw: Any) -> List[dict]:
             s = str(t or "").strip()[:40]
             if s and s not in clean_tags:
                 clean_tags.append(s)
+        phone = str(item.get("phone") or "").strip()[:32]
+        email = str(item.get("email") or "").strip()[:80]
+        username = str(item.get("username") or "").strip()[:80]
+        ident = account_ident({"phone": phone, "email": email, "username": username})
         out.append(
             {
                 "id": aid,
-                "name": str(item.get("name") or "").strip()[:40] or "未命名账号",
+                "name": ident[:40],
                 "env": _slug(item.get("env") or "test", "test"),
                 "kind": str(item.get("kind") or "mixed").strip() or "mixed",
-                "phone": str(item.get("phone") or "").strip()[:32],
-                "email": str(item.get("email") or "").strip()[:80],
-                "username": str(item.get("username") or "").strip()[:80],
+                "phone": phone,
+                "email": email,
+                "username": username,
                 "password": str(item.get("password") or "").strip()[:120],
                 "tags": clean_tags[:24],
                 "note": str(item.get("note") or "").strip()[:200],
@@ -253,14 +276,18 @@ def _norm_test_accounts(raw: Any) -> List[dict]:
     return out
 
 
-def public_test_accounts(rows: List[dict]) -> List[dict]:
+def public_test_accounts(rows: List[dict], *, include_password: bool = False) -> List[dict]:
+    """列表给前端看。筛号 / 环境接口默认不带明文；号池管理页需要带上才能展示。"""
     out = []
     for row in rows or []:
         pwd = str(row.get("password") or "")
         item = dict(row)
-        item.pop("password", None)
         item["has_password"] = bool(pwd)
-        item["password_masked"] = ("****" + pwd[-2:]) if len(pwd) >= 4 else ("****" if pwd else "")
+        item["password_masked"] = ("••••" + pwd[-2:]) if len(pwd) >= 4 else ("••••" if pwd else "")
+        if include_password:
+            item["password"] = pwd
+        else:
+            item.pop("password", None)
         out.append(item)
     return out
 
@@ -324,6 +351,18 @@ def _prompt_grams(text: str) -> list[str]:
     return out
 
 
+def _tag_fits_query(tag: str, q: str) -> bool:
+    """未注册 / 已登录 这类极性标签，不能只因为「注册」「登录」两个字就命中反义号。"""
+    t = str(tag or "")
+    query = str(q or "")
+    for pos, neg in (("已注册", "未注册"), ("已登录", "未登录"), ("已领取", "未领取")):
+        if neg in t and neg not in query:
+            return False
+        if pos in t and neg in query and pos not in query:
+            return False
+    return True
+
+
 def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> List[dict]:
     raw = str(prompt or "").strip()
     q = raw.lower()
@@ -335,10 +374,10 @@ def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> 
         if env_key and row_env and row_env != env_key:
             continue
         tags = [str(t or "").strip() for t in (row.get("tags") or []) if str(t or "").strip()]
-        name = str(row.get("name") or "")
+        ident = account_ident(row)
         note = str(row.get("note") or "")
         blob = " ".join(
-            [name, note, str(row.get("phone") or ""), str(row.get("email") or ""), str(row.get("username") or ""), " ".join(tags)]
+            [ident, note, str(row.get("email") or ""), str(row.get("username") or ""), " ".join(tags)]
         ).lower()
         score = 0
         reasons = []
@@ -351,20 +390,28 @@ def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> 
         if q and q in blob:
             score += 16
             reasons.append("整句命中")
-        tag_hits = [t for t in tags if t and (t.lower() in q or any(len(g) >= 2 and g in t.lower() for g in grams))]
+        tag_hits = [
+            t for t in tags
+            if t and _tag_fits_query(t, q)
+            and (t.lower() in q or any(len(g) >= 2 and g in t.lower() for g in grams))
+        ]
         if tag_hits:
             score += 10 + 4 * min(3, len(tag_hits))
             reasons.append("标签「" + "、".join(tag_hits[:3]) + "」")
-        name_hits = [g for g in grams if len(g) >= 2 and g in name.lower()]
-        if name_hits:
-            longest = max(name_hits, key=len)
-            score += 3 * min(6, len(longest))
-            reasons.append("名称含「" + longest + "」")
-        extra = [g for g in grams if len(g) >= 3 and g in blob and g not in name.lower() and not any(g in t.lower() for t in tags)]
+        ident_hits = [g for g in grams if len(g) >= 4 and g in ident.lower()]
+        if ident_hits:
+            score += 8
+            reasons.append("号码命中")
+        extra = [
+            g for g in grams
+            if len(g) >= 3 and g in blob
+            and g not in ident.lower()
+            and not any(g in t.lower() for t in tags)
+        ]
         if extra:
             score += 2 * min(4, len(extra))
         scored.append({**row, "score": int(score), "reason": " · ".join(reasons) or "无明显匹配"})
-    scored.sort(key=lambda x: (-int(x.get("score") or 0), x.get("name") or ""))
+    scored.sort(key=lambda x: (-int(x.get("score") or 0), account_ident(x), str(x.get("env") or "")))
     return scored[:12]
 
 

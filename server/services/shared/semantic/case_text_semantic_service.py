@@ -36,6 +36,7 @@ _PRECONDITION_KINDS = frozenset(
         "check_android_device",
         "check_logged_in",
         "check_not_logged_in",
+        "keep_permission_prompt",
         "unknown",
     }
 )
@@ -78,6 +79,20 @@ def _cache_put(key: str, rows: List[Dict[str, Any]]) -> None:
     if len(_FIELD_CACHE) >= _FIELD_CACHE_MAX:
         _FIELD_CACHE.clear()
     _FIELD_CACHE[key] = [dict(r) for r in rows]
+
+
+def split_case_field(val: Any) -> List[str]:
+    """步骤/预期：已是列表则原样，字符串按编号拆。禁止 list(str) 拆成单字。"""
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    raw = str(val or "").strip()
+    if not raw:
+        return []
+    return [
+        str(it.get("text") or "").strip()
+        for it in parse_numbered_items_rules(raw)
+        if str(it.get("text") or "").strip()
+    ]
 
 
 def parse_numbered_items_rules(text: str) -> List[Dict[str, Any]]:
@@ -211,6 +226,8 @@ def _classify_precondition_rules(line: str) -> Tuple[str, str]:
         return "check_logged_in", "after_launch"
     if re.search(r"未登录|游客|未登陆", t):
         return "check_not_logged_in", "after_launch"
+    if re.search(r"保留权限(询问|弹窗|框)?|不要(预)?授权|拒绝权限|测(试)?权限拒绝|keep_permission", t, re.I):
+        return "keep_permission_prompt", "before_launch"
     return "unknown", "before_launch"
 
 
@@ -224,8 +241,9 @@ def _llm_parse_precondition_items(text: str) -> Optional[List[Dict[str, Any]]]:
         "规则：\n"
         "1. 每条含 text（原文要点）、kind、phase。\n"
         "2. kind 取值：clear_cache|check_sim|check_wechat|check_no_wechat|"
-        "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|unknown。\n"
-        "3. phase：清缓存/SIM/微信/设备类型 → before_launch；已登录/未登录 → after_launch。\n"
+        "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|"
+        "keep_permission_prompt|unknown。\n"
+        "3. phase：清缓存/SIM/微信/设备类型/保留权限询问 → before_launch；已登录/未登录 → after_launch。\n"
         "4. 无法自动化的环境描述用 kind=unknown。\n"
         "5. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
     )
@@ -376,6 +394,7 @@ __all__ = [
     "case_text_llm_enabled",
     "parse_numbered_field",
     "parse_numbered_items_rules",
+    "split_case_field",
     "parse_precondition_items",
     "parse_precondition_lines",
     "normalize_step_command",
