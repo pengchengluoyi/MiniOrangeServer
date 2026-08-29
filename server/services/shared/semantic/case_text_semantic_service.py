@@ -244,8 +244,9 @@ def _llm_parse_precondition_items(text: str) -> Optional[List[Dict[str, Any]]]:
         "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|"
         "keep_permission_prompt|unknown。\n"
         "3. phase：清缓存/SIM/微信/设备类型/保留权限询问 → before_launch；已登录/未登录 → after_launch。\n"
-        "4. 无法自动化的环境描述用 kind=unknown。\n"
-        "5. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
+        "4. 含「已登录」必须用 check_logged_in，含「未登录/游客」必须用 check_not_logged_in；后面跟账号标签也不改成 unknown。\n"
+        "5. 无法自动化的环境描述才用 kind=unknown（版本号、后台开关、运营配置等）。\n"
+        "6. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
     )
     data = _llm_chat_json(system=system, user_payload={"precondition": raw}, max_tokens=500)
     if not data:
@@ -262,11 +263,13 @@ def _llm_parse_precondition_items(text: str) -> Optional[List[Dict[str, Any]]]:
         if not text_line:
             continue
         kind = str(row.get("kind") or "unknown").strip().lower()
-        if kind not in _PRECONDITION_KINDS:
-            kind, _ = _classify_precondition_rules(text_line)
+        rk, rp = _classify_precondition_rules(text_line)
+        if kind not in _PRECONDITION_KINDS or kind == "unknown":
+            if rk != "unknown":
+                kind = rk
         phase = str(row.get("phase") or "").strip().lower()
         if phase not in ("before_launch", "after_launch"):
-            _, phase = _classify_precondition_rules(text_line)
+            phase = rp
         try:
             num = int(row.get("num") or i + 1)
         except (TypeError, ValueError):

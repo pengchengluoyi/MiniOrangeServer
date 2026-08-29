@@ -39,6 +39,14 @@ implementations:
     cost: 4
     description: iOS 真机（usbmuxd / WDA）
 
+  - id: playwright_tap
+    display_name: Playwright 点击
+    executor: playwright
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: false
+    cost: 3
+    description: 优先按按钮/链接名字点，坐标兜底
+
 ui:
   shown_in_settings: true
   examples: ["点击「同意」", "点击 一键登录"]

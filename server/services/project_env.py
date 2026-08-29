@@ -495,16 +495,15 @@ def _inherit_mobile_value(profiles: dict, order: List[str], env_key: str, channe
 
 
 def target_id_from_snapshot(snap: dict, platform: str = "android") -> str:
-    """从某一环境 profile 快照取启动标识：Android 包名 / iOS Bundle。"""
+    """从某一环境 profile 快照取启动标识：Android 包名 / iOS Bundle / Web 网址。"""
     data = snap if isinstance(snap, dict) else {}
     plat = str(platform or "android").lower()
+    if plat in ("web", "browser", "playwright"):
+        web = data.get("web") if isinstance(data.get("web"), dict) else {}
+        return str(web.get("base_url") or web.get("url") or "").strip()
     if plat in ("ios", "iphone", "ipad"):
         ios = data.get("ios") if isinstance(data.get("ios"), dict) else {}
-        bundle = str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
-        if bundle:
-            return bundle
-        android = data.get("android") if isinstance(data.get("android"), dict) else {}
-        return str(android.get("package") or "").strip()
+        return str(ios.get("bundle") or ios.get("bundle_id") or "").strip()
     android = data.get("android") if isinstance(data.get("android"), dict) else {}
     pkg = str(android.get("package") or "").strip()
     if pkg:

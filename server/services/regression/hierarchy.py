@@ -95,6 +95,7 @@ class UiDump:
     error: str = ""
     elapsed_ms: int = 0
     source: str = "adb"
+    raw_text: str = ""
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -396,6 +397,8 @@ def to_prompt_text(dump: UiDump, *, limit: int = 40, max_chars: int = 3000) -> s
 
     默认不在每步注入（dump 要 ~2.2s）；排障或 dry-run 时用。
     """
+    if dump.raw_text:
+        return str(dump.raw_text)[:max_chars]
     if not dump.ok:
         return ""
     lines: list[str] = []

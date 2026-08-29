@@ -67,7 +67,10 @@ def get_run_events(run_id: str) -> dict[str, Any] | None:
 
 
 def make_thumb(png_b64: str, *, width: int = 360, quality: int = 70) -> str:
-    """PNG/JPEG base64 → 缩略 JPEG base64（不含 data: 前缀）。失败返回空串。"""
+    """PNG/JPEG base64 → 缩略 JPEG base64（不含 data: 前缀）。失败返回空串。
+
+    横屏且已经压过（宽 ≤ 960，Web 默认比例 2 → 640）不再缩到 360，避免灯箱发糊。
+    """
     if not png_b64:
         return ""
     try:
@@ -79,10 +82,15 @@ def make_thumb(png_b64: str, *, width: int = 360, quality: int = 70) -> str:
         raw = base64.b64decode(raw_b64)
         img = Image.open(BytesIO(raw)).convert("RGB")
         w, h = img.size
-        if w > width:
-            img = img.resize((width, max(1, int(h * width / w))))
+        max_w = width
+        q = quality
+        if w >= h and w <= 960:
+            max_w = w
+            q = max(quality, 82)
+        if max_w and w > max_w:
+            img = img.resize((max_w, max(1, int(h * max_w / w))))
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
+        img.save(buf, format="JPEG", quality=q)
         return base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception as e:  # pragma: no cover
         SLog.d(TAG, f"make_thumb failed: {e}")

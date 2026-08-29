@@ -45,7 +45,7 @@ _LOCK = threading.RLock()
 # 已 persist_run_start 过的 run_id（避免重复 INSERT）
 _PERSISTED: set[str] = set()
 # 用例终态（触发 case_finished 事件）
-_CASE_TERMINAL = {"pass", "fail", "failed", "blocked", "declined", "skipped", "cancelled", "untestable"}
+_CASE_TERMINAL = {"pass", "fail", "failed", "blocked", "declined", "skipped", "cancelled", "untestable", "unverifiable"}
 
 
 def _snapshot(run_doc: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +118,8 @@ def _sns_of(run_doc: dict[str, Any]) -> list[str]:
 
 def _normalize_platform_kind(value: str) -> str:
     plat = str(value or "").lower()
+    if plat in ("web", "browser", "playwright") or plat.startswith("web"):
+        return "web"
     if plat in ("ios", "iphone", "ipad") or "ios" in plat:
         return "ios"
     if plat == "mixed":
@@ -126,7 +128,7 @@ def _normalize_platform_kind(value: str) -> str:
 
 
 def _task_platform_of(kinds: list[str]) -> str:
-    uniq = [k for k in dict.fromkeys(kinds) if k in ("android", "ios")]
+    uniq = [k for k in dict.fromkeys(kinds) if k in ("android", "ios", "web")]
     if len(uniq) == 1:
         return uniq[0]
     if len(uniq) > 1:
@@ -138,10 +140,10 @@ def _device_platform_of(run_doc: dict[str, Any], sn: str) -> str:
     plats = run_doc.get("platforms_by_sn")
     if isinstance(plats, dict):
         kind = _normalize_platform_kind(str(plats.get(sn) or ""))
-        if kind in ("android", "ios"):
+        if kind in ("android", "ios", "web"):
             return kind
     kind = _normalize_platform_kind(str(run_doc.get("platform") or ""))
-    return kind if kind in ("android", "ios") else "android"
+    return kind if kind in ("android", "ios", "web") else "android"
 
 
 def _package_of(run_doc: dict[str, Any], platform: str) -> str:
@@ -161,13 +163,13 @@ def _resolve_platforms_by_sn(
     given: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
     fb = _normalize_platform_kind(fallback)
-    if fb not in ("android", "ios"):
+    if fb not in ("android", "ios", "web"):
         fb = "android"
     out: dict[str, str] = {}
     if isinstance(given, dict):
         for sn in device_sns:
             kind = _normalize_platform_kind(str(given.get(sn) or ""))
-            if kind in ("android", "ios"):
+            if kind in ("android", "ios", "web"):
                 out[sn] = kind
     missing = [sn for sn in device_sns if sn not in out]
     if missing and db is not None:
@@ -187,8 +189,13 @@ def _resolve_platforms_by_sn(
                 )
         except Exception as exc:
             SLog.w(TAG, f"resolve platforms_by_sn failed: {exc}")
+    from server.services.runtime.playwright_hub import is_web_slot
+
     for sn in device_sns:
-        out.setdefault(sn, fb)
+        if is_web_slot(sn):
+            out[sn] = "web"
+        else:
+            out.setdefault(sn, fb)
     return out
 
 
@@ -515,18 +522,26 @@ def to_case_spec(
     expected_by_step = {}
     for k, v in dict(case.get("expected_by_step") or {}).items():
         try:
-            expected_by_step[int(k)] = str(v)
+            num = int(k)
         except (TypeError, ValueError):
             continue
+        text = str(v or "").strip()
+        if num and text:
+            expected_by_step[num] = text
+    if not expected_by_step and expected_raw:
+        for it in parse_numbered_items_rules(expected_raw):
+            try:
+                num = int(it.get("num") or 0)
+            except (TypeError, ValueError):
+                continue
+            text = str(it.get("text") or "").strip()
+            if num and text:
+                expected_by_step[num] = text
 
     steps: list[CaseStep] = []
     for idx, text in enumerate(steps_text):
         num = int(step_nums[idx]) if idx < len(step_nums) else idx + 1
-        expected = ""
-        if num in expected_by_step:
-            expected = str(expected_by_step[num]).strip()
-        elif idx < len(expected_lines):
-            expected = str(expected_lines[idx]).strip()
+        expected = str(expected_by_step.get(num) or "").strip()
         steps.append(
             CaseStep(
                 index=num,
@@ -536,8 +551,8 @@ def to_case_spec(
             )
         )
 
-    overall_expected = expected_raw.strip() if expected_raw else "\n".join(
-        f"{n}. {e}" for n, e in expected_by_step.items() if e
+    overall_expected = "\n".join(
+        f"{n}. {e}" for n, e in sorted(expected_by_step.items()) if e
     )
 
     tags_field = case.get("tags") or case.get("module") or ""
@@ -680,15 +695,16 @@ def run_cases(
     packages_by_platform = {
         "android": aas.package_for_app(app, env_profile, platform="android") or "",
         "ios": aas.package_for_app(app, env_profile, platform="ios") or "",
+        "web": aas.package_for_app(app, env_profile, platform="web") or "",
     }
     resolved_platforms = _resolve_platforms_by_sn(
         device_sns, db=db, fallback=platform, given=platforms_by_sn,
     )
     task_platform = _task_platform_of([resolved_platforms[s] for s in device_sns])
     package = packages_by_platform.get(
-        task_platform if task_platform in ("android", "ios") else "android",
+        task_platform if task_platform in ("android", "ios", "web") else "android",
         "",
-    ) or packages_by_platform.get("android") or ""
+    ) or packages_by_platform.get("android") or packages_by_platform.get("web") or ""
     app_id = getattr(app, "id", "") or ""
     app_name = getattr(app, "name", "") or ""
     from server.services.ai.playbook_service import ensure_playbook
@@ -744,6 +760,10 @@ def run_cases(
         "blocked": 0,
         "declined": 0,
         "untestable": 0,
+        "prep_insufficient": 0,
+        "step_unexecutable": 0,
+        "expect_unverifiable": 0,
+        "engine_error": 0,
         "status": "running",
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
@@ -945,6 +965,13 @@ def _execute(
     finally:
         dispatch.reset(tok)
         app_profile_ctx.reset(prof_tok)
+        from server.services.runtime.playwright_hub import get_hub, is_web_slot
+
+        if is_web_slot(sn, platform):
+            try:
+                get_hub().shutdown_thread()
+            except Exception:
+                pass
 
 
 def _execute_on_device(
@@ -994,11 +1021,13 @@ def _execute_on_device(
         "vlm": flags.get("vlm", False),
         "hitl": flags.get("hitl", False),
         "ios_wda": flags.get("ios_wda", False),
+        "playwright": flags.get("playwright", False),
         "device_signature": ctx.device_signature,
         "channels": {
             "adb": ctx.adb,
             "remote": ctx.remote,
             "ios": ctx.ios,
+            "playwright": ctx.playwright,
             "vlm": ctx.vlm,
             "hitl": ctx.hitl,
         },
@@ -1008,11 +1037,16 @@ def _execute_on_device(
         by[sn] = conn
         run_doc["connectivity"] = conn
 
-    if not flags.get("adb") and not flags.get("remote") and not flags.get("ios_wda"):
+    if (
+        not flags.get("adb")
+        and not flags.get("remote")
+        and not flags.get("ios_wda")
+        and not flags.get("playwright")
+    ):
         msg = (
             f"device offline: sn={sn} 无可用执行通道；"
             f"adb={ctx.adb.get('state')} remote={ctx.remote.get('state')} "
-            f"ios={ctx.ios.get('state')}"
+            f"ios={ctx.ios.get('state')} playwright={ctx.playwright.get('state')}"
         )
         SLog.e(TAG, f"[{run_id}] {msg}")
         with _LOCK:
@@ -1022,8 +1056,12 @@ def _execute_on_device(
                 _terminate_remaining_cases(run_doc, msg)
         return
 
+    from server.services.runtime.playwright_hub import is_web_slot
+
     ios_run = bool(ctx.connectivity_flags.get("ios_wda"))
-    if ios_run:
+    if flags.get("playwright") or is_web_slot(sn, platform):
+        prefer = ("playwright",)
+    elif ios_run:
         prefer = ("ios_wda",)
     elif str(sn).startswith("claw-"):
         prefer = ("remote", "adb")
@@ -1079,6 +1117,7 @@ def _execute_on_device(
 
         raw_pre = str(raw_case.get("precondition") or "").strip()
         app_cache_cleared = False
+        prep_items: list = []
         try:
             from server.services.runtime.device_provision import (
                 provision_device,
@@ -1109,10 +1148,22 @@ def _execute_on_device(
                     package=package,
                     phase="before_launch",
                 )
+                prep_items = list(before_res.get("items") or [])
                 if not before_res.get("ok"):
+                    from server.services.regression.coverage_codes import (
+                        coverage_from_spec,
+                        bump_run_counters,
+                        COVERAGE_PREP,
+                    )
+
+                    cov = coverage_from_spec(
+                        spec,
+                        prep_items=prep_items,
+                        overall=COVERAGE_PREP,
+                        blocked_reason=before_res.get("msg") or "前置条件不满足",
+                    )
                     with _LOCK:
-                        run_doc["completed"] += 1
-                        run_doc["failed"] += 1
+                        bump_run_counters(run_doc, cov["coverage_class"])
                         _upsert_case(run_doc, {
                             "case_id": spec.case_id,
                             "name": spec.name,
@@ -1121,6 +1172,11 @@ def _execute_on_device(
                             "report_run_id": unit_rid,
                             "summary": before_res.get("msg") or "前置条件不满足",
                             "elapsed_ms": int((time.time() - case_started_ts) * 1000),
+                            "coverage": cov,
+                            "coverage_class": cov["coverage_class"],
+                            "coverage_label": cov["coverage_label"],
+                            "failure_category": "prep_insufficient",
+                            "failure_label": cov["coverage_label"],
                         })
                     SLog.w(
                         TAG,
@@ -1128,9 +1184,7 @@ def _execute_on_device(
                         f"{before_res.get('msg')}",
                     )
                     continue
-                app_cache_cleared = precondition_cleared_app_cache(
-                    list(before_res.get("items") or [])
-                )
+                app_cache_cleared = precondition_cleared_app_cache(prep_items)
 
         try:
             from server.services.account_issue_service import bind_account_for_case
@@ -1145,6 +1199,38 @@ def _execute_on_device(
             )
         except Exception as exc:
             SLog.w(TAG, f"[{run_id}] pick_account failed case={spec.case_id}: {exc}")
+
+        web_run = is_web_slot(sn, platform)
+        if web_run:
+            try:
+                from server.services.runtime.playwright_hub import get_hub
+
+                if not str(package or "").strip():
+                    SLog.w(
+                        TAG,
+                        f"[{run_id}] web 未配置 base_url（项目环境 web.base_url），先开空白页；"
+                        f"case={spec.case_id}",
+                    )
+                get_hub().open_case(sn, base_url=package)
+            except Exception as exc:
+                SLog.e(TAG, f"[{run_id}] playwright open_case failed case={spec.case_id}: {exc}")
+                with _LOCK:
+                    from server.services.regression.coverage_codes import bump_run_counters, COVERAGE_ENGINE
+                    bump_run_counters(run_doc, COVERAGE_ENGINE)
+                    _upsert_case(run_doc, {
+                        "case_id": spec.case_id,
+                        "name": spec.name,
+                        "sn": sn,
+                        "status": "fail",
+                        "report_run_id": unit_rid,
+                        "summary": f"打开浏览器失败: {exc}",
+                        "elapsed_ms": int((time.time() - case_started_ts) * 1000),
+                        "coverage_class": COVERAGE_ENGINE,
+                        "coverage_label": "执行期-引擎故障",
+                        "failure_category": "execution_error",
+                        "failure_label": "执行期-引擎故障",
+                    })
+                continue
 
         try:
             report = run_case(
@@ -1162,8 +1248,8 @@ def _execute_on_device(
             if _cancelled(run_doc):
                 return
             with _LOCK:
-                run_doc["completed"] += 1
-                run_doc["failed"] += 1
+                from server.services.regression.coverage_codes import bump_run_counters, COVERAGE_ENGINE
+                bump_run_counters(run_doc, COVERAGE_ENGINE)
                 _upsert_case(run_doc, {
                     "case_id": spec.case_id,
                     "name": spec.name,
@@ -1172,8 +1258,20 @@ def _execute_on_device(
                     "report_run_id": unit_rid,
                     "summary": f"run_case crashed: {exc}",
                     "elapsed_ms": int((time.time() - case_started_ts) * 1000),
+                    "coverage_class": COVERAGE_ENGINE,
+                    "coverage_label": "执行期-引擎故障",
+                    "failure_category": "execution_error",
+                    "failure_label": "执行期-引擎故障",
                 })
             continue
+        finally:
+            if web_run:
+                try:
+                    from server.services.runtime.playwright_hub import get_hub
+
+                    get_hub().close_case(sn)
+                except Exception:
+                    pass
 
         if _cancelled(run_doc):
             return
@@ -1201,18 +1299,51 @@ def _execute_on_device(
                 "failure_category": getattr(report, "failure_category", "") or "",
                 "failure_label": getattr(report, "failure_label", "") or "",
             }
-            run_doc["completed"] += 1
-            ostatus = report.overall_status
-            if ostatus == "pass":
-                run_doc["passed"] += 1
-            elif ostatus == "blocked":
-                run_doc["blocked"] += 1
+            from server.services.regression.coverage_codes import (
+                coverage_from_spec,
+                bump_run_counters,
+                COVERAGE_PREP,
+                COVERAGE_EXPECT,
+                COVERAGE_PRODUCT_FAIL,
+            )
+
+            ostatus = str(report.overall_status)
+            overall_for_cov = ostatus
+            session_gate_failed = False
+            for ev in getattr(report, "events", None) or []:
+                cap = str(getattr(ev, "capability_id", "") or "")
+                if cap != "session_gate":
+                    continue
+                st = getattr(ev, "status", "")
+                st = str(getattr(st, "value", st) or "").lower()
+                if st in ("fail", "failed"):
+                    session_gate_failed = True
+                    break
+            if ostatus == "fail" and session_gate_failed:
+                overall_for_cov = COVERAGE_PREP
+            cov = coverage_from_spec(
+                spec,
+                prep_items=prep_items,
+                overall=overall_for_cov,
+                failure_category=getattr(report, "failure_category", "") or "",
+                blocked_reason=report.blocked_reason or report.decline_reason or "",
+                expect_outcomes=getattr(report, "expect_outcomes", None) or {},
+            )
+            entry["coverage"] = cov
+            entry["coverage_class"] = cov["coverage_class"]
+            entry["coverage_label"] = cov["coverage_label"]
+            if cov["coverage_class"] == COVERAGE_PRODUCT_FAIL:
+                entry["status"] = "fail"
+            elif cov["coverage_class"] == COVERAGE_EXPECT:
+                entry["status"] = "unverifiable"
+            if ostatus == "blocked":
+                run_doc["completed"] = int(run_doc.get("completed") or 0) + 1
+                run_doc["blocked"] = int(run_doc.get("blocked") or 0) + 1
             elif ostatus == "declined":
-                run_doc["declined"] += 1
-            elif ostatus == "untestable":
-                run_doc["untestable"] = int(run_doc.get("untestable") or 0) + 1
+                run_doc["completed"] = int(run_doc.get("completed") or 0) + 1
+                run_doc["declined"] = int(run_doc.get("declined") or 0) + 1
             else:
-                run_doc["failed"] += 1
+                bump_run_counters(run_doc, cov["coverage_class"])
             _upsert_case(run_doc, entry)
 
         try:
@@ -1234,7 +1365,7 @@ def _execute_on_device(
                     task_id=run_id,
                     case_id=spec.case_id,
                     case_name=spec.name,
-                    status=str(report.overall_status),
+                    status=str(entry.get("status") or report.overall_status),
                     summary=str(entry.get("summary") or ""),
                     events=events_raw,
                     provider_id=str(run_doc.get("provider_id") or ""),
@@ -1245,7 +1376,7 @@ def _execute_on_device(
                         "case_id": spec.case_id,
                         "sn": sn,
                         "report_run_id": unit_rid,
-                        "status": str(report.overall_status),
+                        "status": str(entry.get("status") or report.overall_status),
                         "knowledge_ids": [p.get("id") for p in proposals if p.get("id")],
                         "knowledge_proposals": proposals,
                     })
@@ -1262,7 +1393,7 @@ def _execute_on_device(
                 case_id=spec.case_id,
                 case_name=spec.name,
                 preconditions=str(getattr(spec, "preconditions", "") or ""),
-                status=str(report.overall_status),
+                status=str(entry.get("status") or report.overall_status),
                 summary=str(entry.get("summary") or ""),
                 provider_id=str(run_doc.get("provider_id") or ""),
                 account_id=str((picked if isinstance(picked, dict) else {}).get("id") or ""),
@@ -1272,7 +1403,7 @@ def _execute_on_device(
 
         SLog.i(
             TAG,
-            f"[{run_id}] <<< case={spec.case_id} status={report.overall_status} "
+            f"[{run_id}] <<< case={spec.case_id} status={entry.get('status') or report.overall_status} "
             f"({report.passed}P/{report.failed}F/{report.blocked}B in {report.elapsed_ms}ms) sn={sn}",
         )
 
@@ -1284,14 +1415,16 @@ _RETRY_STATUS = {"fail", "failed", "blocked", "declined"}
 
 
 def failed_case_ids(task: dict[str, Any]) -> list[str]:
-    """从任务 JSON 里取出需要重跑的 case_id（去重、保持原顺序）。"""
+    """重跑校验不通过；无法验证和执行期缺口不空转。blocked 仍复跑。"""
+    from server.services.regression.coverage_codes import is_product_retry
+
     seen: set[str] = set()
     out: list[str] = []
     for row in task.get("cases") or []:
         cid = str(row.get("case_id") or "")
         if not cid or cid in seen:
             continue
-        if str(row.get("status") or "") in _RETRY_STATUS:
+        if is_product_retry(row) or str(row.get("status") or "") == "blocked":
             seen.add(cid)
             out.append(cid)
     return out

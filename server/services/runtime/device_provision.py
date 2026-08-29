@@ -221,6 +221,14 @@ def provision_device(
         "failed": [],
         "ios_alert": {},
     }
+    from server.services.runtime.playwright_hub import is_web_slot
+
+    if plat in ("web", "browser", "playwright") or is_web_slot(sn, plat):
+        report["awake"] = "n/a"
+        report["unlocked"] = "n/a"
+        report["skipped"].append("web_no_device_wake")
+        SLog.i(TAG, f"[{run_id}] web provision skipped sn={sn}")
+        return report
     if plat in ("ios", "iphone", "ipad"):
         report["awake"] = "n/a"
         report["unlocked"] = "engine_init"
@@ -274,4 +282,6 @@ def accept_post_launch_alerts(
     plat = (platform or "").lower()
     if plat in ("ios", "iphone", "ipad"):
         return _accept_ios_alert(sn)
+    if plat in ("web", "browser", "playwright"):
+        return {"skipped": True, "reason": "web_no_system_alert"}
     return {"skipped": True, "reason": "android_uses_pm_grant_and_l0"}

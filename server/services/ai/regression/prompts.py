@@ -237,7 +237,8 @@ ASSERT_VISION_SYSTEM_PROMPT = """你是 MiniOrange 的视觉断言器（ASSERT_V
    - 预期是相对变化（数量+1、样式从 A 变 B）时，用记忆中的之前对比当前图，不要因为当前图上看不到变化前而判失败。
    - 预期是找回刚发布/刚操作过的内容时，用记忆中的标题/时间/可见文案对照当前图。
    - 过程态（加载、占位、生成中、切换中）若记忆写明已在中途验证，终态截图上不再出现这些不得判失败。
-6. 不要返回 markdown / 多个 JSON / 中文叙述外泄；只返回一个 JSON。
+6. 只根据当前截图判定。图上有的控件/文案就是有。禁止因为「可以关掉所以算不出现」而判通过。
+7. 不要返回 markdown / 多个 JSON / 中文叙述外泄；只返回一个 JSON。
 
 【输出 JSON Schema（严格）】
 {
@@ -843,6 +844,49 @@ def build_goal_extract_messages(*, case_spec: "CaseSpec") -> list[dict[str, Any]
     ]
 
 
+AGENT_DO_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent（通过当前可用通道执行：adb / 远程节点 / iOS WDA）。你会看到【当前屏幕截图】，只负责【当前步骤的操作】。校验由系统在操作结束后单独做，你不要验、不要为预期去点。
+
+只返回一个 JSON 对象：
+{
+  "thought": "先描述当前这屏是什么，再说为什么选下面这一步",
+  "status": "continue | done | give_up | ask_human",
+  "action": {"capability_id": "菜单里的能力", "params": { ... }},
+  "expected_after": "执行后界面大概会变成什么样（给自己看，不是校验结论）",
+  "confidence": 0.0~1.0,
+  "remember": ["本步要记住、后面还要用的事实"],
+  "checkpoint_ids": [],
+  "subflow": "none 或 create_publish",
+  "published": null,
+  "knowledge_ids": []
+}
+
+铁律：
+1. capability_id 必须来自 capability_menu，禁止臆造。菜单里没有 assert / 校验能力。
+2. 坐标一律用【0-1000 归一化整数】：x=横向千分比、y=纵向千分比。屏幕正中央 = x:500,y:500。
+   - tap_element: params={"x":0-1000,"y":0-1000}
+   - swipe_element_to_element: params={"from_x","from_y","to_x","to_y"（均 0-1000）,"duration_ms"}
+   - input_text: params={"text":str,"x":0-1000,"y":0-1000}(先点输入框再输入)
+   - launch_app/close_app: params={"package":str}
+   - press_key: params={"key":"back|home|..."}
+   - wait_ms: params={"ms":int}
+3. 你能看图：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动点同意/允许/关闭/稍后，不要卡住。
+★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名。
+4. **只做当前步骤的操作**。status="done" 只表示【本步操作结束】，不是整案完成，也不是校验通过。
+   - 禁止去做后面的步骤。
+   - 禁止自己校验预期、禁止输出 assert 类能力。
+   - 禁止为了让后面的预期成立而关闭/隐藏/返回。
+5. 客观无法完成 → status="give_up"。加载/占位用 wait_ms。
+6. 需要人提供【能填进界面的信息】→ status="ask_human"。禁止让人去设备上点。
+   - 号池已给出手机号且当前是登录/手机号输入 → 必须 input_text 该号码。
+   - 号池已给出固定验证码时：验证码页必须 input_text 该码。
+   - human_input_text: params={"question":"...","field":"sms_code|phone|text"}
+7. 不要连续多次点同一位置无效动作；不要盲目连按返回键退出应用。
+8. 已执行动作历史和【短期记忆】会给你。后面要对比变化时先写入 remember。
+9. 当前屏明显在加载/转圈时，用 wait_ms，禁止乱点。
+10. 【知识索引】需要某条正文时把 id 写入 knowledge_ids；不点名则不展开。
+禁止 Markdown、禁止思考链、禁止多个 JSON。"""
+
+
 AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent（通过当前可用通道执行：adb / 远程节点 / iOS WDA）。你会看到【当前屏幕截图】，要朝着【目标】推进，每次只决定并输出【下一步一个动作】。
 
 只返回一个 JSON 对象：
@@ -871,8 +915,11 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent
    - assert_visual: params={"expectation":"当前屏上应看到的客观状态"}
 3. 你能看图，所以【自己判断当前页面】：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动决定如何越过它（点同意/允许/关闭/稍后），不要卡住。
 ★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名，禁止凭屏幕图标或记忆猜其它包名。目标应用已在前置步骤启动时，通常无需再 launch。
-4. 目标已达成 → status="done"（此时可不带 action）。**只有当【成功标准】在当前【完成后的稳定屏】上成立才可判 done**。加载/占位/生成中/切换中属于过程检查点，必须在该画面还在时用 assert_visual 验证（并填 checkpoint_ids），不要拖到最后一屏再验过程态，也不要用过程态去填成功标准。
-5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。
+4. **严格按步骤编号执行**：每次只做「当前步骤」的操作；做完后才校验同号预期。禁止跳到后面的步骤，禁止提前验后面的检查点。
+   - 操作阶段：status="done" 只表示【本步操作结束】，不是整案完成。
+   - 校验阶段：只能 wait_ms（仍在加载）或 assert_visual。禁止点击/关闭/返回/滑动来让预期成立。屏幕上现在是什么就按什么判。
+   - 预期写「不出现 X」时，若 X 在当前屏上，就是没过。禁止关掉 X 再验。
+5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。加载/占位/生成中属于过程，用 wait_ms，不要用过程态去填成功标准。
 6. 需要人提供【系统下一步能填进界面的信息】→ status="ask_human"。只允许向人要数据，禁止让人去设备上点选/登录/勾协议。
    - 号池已给出手机号时：当前屏是登录/手机号输入 → 必须 input_text 该号码，禁止 ask_human 再要手机号。
    - 号池已给出固定验证码时：验证码页必须 input_text 该码，禁止再问人。
@@ -884,18 +931,36 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent
    禁止 human_acknowledge / 禁止让用户输入「已登录」这类操作口令。设备操作必须由你完成。
 7. 操作纪律：不要连续多次点同一位置无效动作；能一步到位就别绕；不要盲目连按返回键退出应用。
 8. 已执行动作历史和【短期记忆】会给你。后面要对比变化（点赞前数量/样式）或找回刚做的内容时，先写入 remember，禁止丢了再去别处猜。
-9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。等待不消耗动作预算，禁止在加载页乱点或反复返回。
+9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。禁止在加载页乱点或反复返回。
 10. 短期记忆：操作前把计数、样式、对象名称写入 remember；发布成功当屏必须把可找回该内容的指纹写入 published（title/when/note 用屏幕上可见的文案，不要编造）并把 subflow 设回 none。
 11. 【知识索引】下面只给目录（id + 标题 + 适用时机）。需要某条正文时把该 id 写入 knowledge_ids；不点名则本步不展开正文。禁止臆造索引里没有的 id。点名后按正文路径执行；与当前屏幕冲突时以屏幕为准并在 thought 写明。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
+AGENT_WEB_CHANNEL_ADDENDUM = """
+
+【网页通道 playwright】这是本机浏览器页，不是手机。
+- expected_executor 用 playwright；禁止 adb / remote / ios_wda。
+- tap_element 优先 params.selector_text 或 description（按钮/链接上的可见文字），坐标只作兜底。
+- input_text：params.text + 输入框名字（label / placeholder）。
+- launch_app 的 url 用「目标应用」里的网址，不要填 Android 包名。
+- press_key 的 back 等于 Escape。不要规划清缓存、授权弹窗、杀进程。"""
+
+
+def _playwright_brief(device_brief: dict[str, Any]) -> bool:
+    flags = (device_brief or {}).get("flags") or {}
+    if flags.get("playwright"):
+        return True
+    channels = (device_brief or {}).get("channels") or {}
+    return str(channels.get("playwright") or "") in ("available", "connected")
+
+
 AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
 {goal}
 
-==== 成功标准（终态：完成后的稳定屏。过程态不要拖到这里验）====
+==== 本步要完成的操作（做完 status=done；不要自己校验）====
 {success_criteria}
 
-==== 目标应用（launch/open 必须用此包名）====
+==== 目标应用（launch/open 必须用此标识：App 包名或网页网址）====
 {target_app}
 
 ==== 会话观察（点过身份页/登录页之后才有；首页看不出登录态时为空，不要为此问人）====
@@ -904,7 +969,7 @@ AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
 ==== 号池已申请的测试账号（登录页优先用这里的手机号，禁止再问人要号）====
 {accounts_brief}
 
-==== 检查点（有序，[x]=已达成 [ ]=未达成）====
+==== 检查点 / 步骤指针（只做标记为当前的那一步）====
 {checkpoints_block}
 
 ==== 设备/通道 ====
@@ -922,7 +987,52 @@ width={width}, height={height}
 ==== 短期记忆（后面找内容 / 对比变化时用这些，不要丢掉）====
 {memory_block}
 {knowledge_block}{hierarchy_block}
-请看【下方截图】决定下一步一个动作，只返回一个 JSON 对象。"""
+请看【下方截图】决定下一步一个操作，只返回一个 JSON 对象。"""
+
+
+def build_agent_do_messages(
+    *,
+    goal: str,
+    checkpoints_block: str,
+    device_brief: dict[str, Any],
+    menu: list[dict[str, Any]],
+    history_block: str,
+    width: int,
+    height: int,
+    image_base64: str,
+    image_mime: str = "image/png",
+    hierarchy_text: str = "",
+    target_package: str = "",
+    target_app_name: str = "",
+    success_criteria: str = "",
+    memory_block: str = "",
+    knowledge_hint: str = "",
+    session_block: str = "",
+    accounts_brief: str = "",
+) -> list[dict[str, Any]]:
+    messages = build_agent_decide_messages(
+        goal=goal,
+        checkpoints_block=checkpoints_block,
+        device_brief=device_brief,
+        menu=menu,
+        history_block=history_block,
+        width=width,
+        height=height,
+        image_base64=image_base64,
+        image_mime=image_mime,
+        hierarchy_text=hierarchy_text,
+        target_package=target_package,
+        target_app_name=target_app_name,
+        success_criteria=success_criteria,
+        memory_block=memory_block,
+        knowledge_hint=knowledge_hint,
+        session_block=session_block,
+        accounts_brief=accounts_brief,
+    )
+    messages[0] = {"role": "system", "content": AGENT_DO_SYSTEM_PROMPT + (
+        AGENT_WEB_CHANNEL_ADDENDUM if _playwright_brief(device_brief) else ""
+    )}
+    return messages
 
 
 def build_agent_decide_messages(
@@ -948,7 +1058,7 @@ def build_agent_decide_messages(
     hierarchy_block = ""
     if hierarchy_text and hierarchy_text.strip():
         hierarchy_block = (
-            "\n==== 可点元素（adb UI 层级摘要，辅助定位）====\n"
+            "\n==== 可点元素（页面结构摘要，辅助定位）====\n"
             f"{hierarchy_text.strip()[:4000]}\n"
         )
     knowledge_block = ""
@@ -980,7 +1090,9 @@ def build_agent_decide_messages(
             "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
         })
     return [
-        {"role": "system", "content": AGENT_DECIDE_SYSTEM_PROMPT},
+        {"role": "system", "content": AGENT_DECIDE_SYSTEM_PROMPT + (
+            AGENT_WEB_CHANNEL_ADDENDUM if _playwright_brief(device_brief) else ""
+        )},
         {"role": "user", "content": user_content},
     ]
 

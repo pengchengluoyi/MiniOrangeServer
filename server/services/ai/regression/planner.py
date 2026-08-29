@@ -821,33 +821,32 @@ def _split_process_from_success(
 
 
 def _checkpoints_from_expected(case_spec: CaseSpec) -> list[CaseCheckpoint]:
-    """检查点 = 用例「预期」原文，不另写一套过程里程碑。"""
+    """检查点 = 有编号的预期原文；缺号步骤不生成检查点。"""
     from server.services.shared.semantic.case_text_semantic_service import parse_numbered_items_rules
 
+    rows: list[tuple[int, str]] = []
     seen: set[str] = set()
-    rows: list[str] = []
-
-    def add(desc: str) -> None:
-        t = (desc or "").strip()
-        if not t or t in seen:
-            return
-        seen.add(t)
-        rows.append(t)
-
-    raw = (case_spec.expected or "").strip()
-    if raw:
-        for it in parse_numbered_items_rules(raw):
-            add(str(it.get("text") or ""))
+    for step in case_spec.steps or []:
+        t = (step.expected or "").strip()
+        n = int(getattr(step, "index", 0) or 0)
+        if t and n and t not in seen:
+            seen.add(t)
+            rows.append((n, t))
     if not rows:
-        for step in case_spec.steps or []:
-            add(step.expected or "")
+        raw = (case_spec.expected or "").strip()
+        for it in parse_numbered_items_rules(raw) if raw else []:
+            t = str(it.get("text") or "").strip()
+            n = int(it.get("num") or 0) or (len(rows) + 1)
+            if t and t not in seen:
+                seen.add(t)
+                rows.append((n, t))
     return [
         CaseCheckpoint(
-            id=f"cp{i}",
+            id=f"cp{n}",
             description=desc,
             kind=_checkpoint_kind("", desc),
         )
-        for i, desc in enumerate(rows, start=1)
+        for n, desc in rows
     ]
 
 
@@ -999,12 +998,13 @@ def decide_next_action(
     if not menu:
         return AgentDecision(status="give_up", thought="capability_menu 为空（连通性丢失）",
                              parse_warnings=["empty menu"])
+    menu = [c for c in menu if str(c.get("id") or "") not in {"assert_visual", "assert_goal", "assert"}]
     provider, gate = resolve_regression_provider(provider_id)
     if provider is None:
         return AgentDecision(status="ask_human", thought=f"未启用 AI 视觉：{gate.get('reason')}",
                              parse_warnings=["provider unavailable"])
     accounts_brief = str(getattr(run_context, "accounts_brief", "") or "").strip()
-    messages = P.build_agent_decide_messages(
+    messages = P.build_agent_do_messages(
         goal=goal,
         checkpoints_block=checkpoints_block,
         device_brief=run_context.to_prompt_brief(),

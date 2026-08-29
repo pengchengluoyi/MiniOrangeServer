@@ -50,6 +50,7 @@ class RunContext:
     vlm: dict[str, Any] = field(default_factory=dict)
     hitl: dict[str, Any] = field(default_factory=dict)
     ios: dict[str, Any] = field(default_factory=dict)
+    playwright: dict[str, Any] = field(default_factory=dict)
 
     # AI provider hints
     provider_id: str = ""
@@ -94,11 +95,22 @@ class RunContext:
             "vlm": (self.vlm.get("state") == "available"),
             "hitl": (self.hitl.get("state") == "available"),
             "ios_wda": (self.ios.get("state") == "connected"),
-            "web_cdp": False,
+            "playwright": (self.playwright.get("state") in ("connected", "available")),
+            "web": (self.playwright.get("state") in ("connected", "available")),
             "pc_winapi": False,
             "mac_apple_script": False,
             "ai_persona": (self.vlm.get("state") == "available"),
         }
+
+    @property
+    def has_control_channel(self) -> bool:
+        flags = self.connectivity_flags
+        return bool(
+            flags.get("adb")
+            or flags.get("remote")
+            or flags.get("ios_wda")
+            or flags.get("playwright")
+        )
 
     # ---------- prompt ----------
 
@@ -115,7 +127,14 @@ class RunContext:
         vlm_on = flags["vlm"]
         hitl_on = flags["hitl"]
 
-        if ios_on and not adb_on and not remote_on:
+        playwright_on = flags.get("playwright", False)
+
+        if playwright_on:
+            advice = (
+                "playwright=true：这是网页用例。用 tap_element / input_text / launch_app 操作当前浏览器页；"
+                "expected_executor 填 playwright；不要规划 adb / remote / ios_wda。"
+            )
+        elif ios_on and not adb_on and not remote_on:
             advice = (
                 "ios_wda=true：走 WebDriverAgent（USB/usbmuxd 或已配对 Wi‑Fi）；"
                 "不要规划 adb / ClawNode remote 事件。"
@@ -140,14 +159,16 @@ class RunContext:
             advice = "ios_wda=true：使用 WDA 点击/滑动/截图。"
         else:
             advice = (
-                "adb=false & remote=false & ios_wda=false：无可用执行通道，"
+                "无可用执行通道（adb/remote/ios_wda/playwright 均为 false），"
                 "PLAN 应直接 decline 并给出 reasoning，不要凭空规划事件。"
             )
 
         # 额外能力提示
         capability_notes: list[str] = []
-        if not vlm_on:
+        if not vlm_on and not playwright_on:
             capability_notes.append("vlm=false：禁止规划任何 needs_vlm=true 的事件（tap_element / assert_visual 等）。")
+        elif not vlm_on and playwright_on:
+            capability_notes.append("vlm=false：网页按按钮/链接名字点；不要规划 assert_visual。")
         if not hitl_on:
             capability_notes.append("hitl=false：禁止规划 human_* 事件；遇到需要人工确认的步骤改为 decline。")
         if app_cache_cleared:
@@ -168,6 +189,7 @@ class RunContext:
                 "adb": self.adb.get("state"),
                 "remote": self.remote.get("state"),
                 "ios": self.ios.get("state"),
+                "playwright": self.playwright.get("state"),
                 "vlm": self.vlm.get("state"),
                 "hitl": self.hitl.get("state"),
             },
@@ -175,6 +197,7 @@ class RunContext:
                 "adb": adb_on,
                 "remote": remote_on,
                 "ios_wda": ios_on,
+                "playwright": playwright_on,
                 "vlm": vlm_on,
                 "hitl": hitl_on,
             },
@@ -202,6 +225,7 @@ class RunContext:
                 "remote": self.remote,
                 "adb": self.adb,
                 "ios": self.ios,
+                "playwright": self.playwright,
                 "vlm": self.vlm,
                 "hitl": self.hitl,
             },
@@ -225,8 +249,14 @@ def _looks_ios_token(value: str) -> bool:
 
 
 def device_platform_kind(device_type: str = "", channels: Any = None, sn: str = "") -> str:
-    """根据设备元信息判断 android / ios。混任务时每台机各自调用。"""
+    """根据设备元信息判断 android / ios / web。"""
+    from server.services.runtime.playwright_hub import is_web_slot
+
+    if is_web_slot(sn, device_type):
+        return "web"
     dt = str(device_type or "").lower()
+    if dt in ("web", "browser", "playwright"):
+        return "web"
     if _looks_ios_token(dt):
         return "ios"
     if "android" in dt:
@@ -340,6 +370,37 @@ def build_run_context(
     ctx.resolution = meta.get("resolution", "")
     ctx.role = meta.get("role", "")
 
+    from server.services.runtime.playwright_hub import is_web_slot, probe_playwright
+
+    web_run = is_web_slot(ctx.sn, ctx.platform) or str(ctx.device_type or "").lower() in ("web", "browser")
+    if web_run:
+        ctx.platform = "web"
+        ctx.remote = {"state": "not_applicable", "reason": "web slot"}
+        ctx.adb = {"state": "not_applicable", "reason": "web slot"}
+        ctx.ios = {"state": "not_applicable"}
+        if not ctx.model:
+            ctx.model = "本机浏览器"
+        if not ctx.device_type:
+            ctx.device_type = "web"
+        state_pw, meta_pw = probe_playwright()
+        ctx.playwright = {"state": state_pw, **meta_pw}
+        if probe_vlm_channel:
+            state, meta_v = cp.probe_vlm(ctx.provider_id, ctx.model_name)
+            ctx.vlm = {"state": state, **meta_v}
+        else:
+            ctx.vlm = {"state": "available", "reason": "probe skipped"}
+        if probe_hitl_channel:
+            state, meta_h = cp.probe_hitl()
+            ctx.hitl = {"state": state, **meta_h}
+        else:
+            ctx.hitl = {"state": "available", "reason": "probe skipped"}
+        SLog.i(
+            TAG,
+            f"RunContext built sn={ctx.sn} playwright={ctx.playwright.get('state')} "
+            f"vlm={ctx.vlm.get('state')} hitl={ctx.hitl.get('state')}",
+        )
+        return ctx
+
     # 2. Remote
     if probe_remote_channel:
         state, meta_r = cp.probe_remote(ctx.sn)
@@ -366,8 +427,10 @@ def build_run_context(
     if _is_ios_target(ctx.sn, ctx.platform, ctx.device_type):
         state, meta_i = cp.probe_ios(ctx.sn)
         ctx.ios = {"state": state, "udid": ctx.sn, **meta_i}
+        ctx.playwright = {"state": "not_applicable"}
     else:
         ctx.ios = {"state": "not_applicable"}
+        ctx.playwright = {"state": "not_applicable"}
 
     # 4. VLM
     if probe_vlm_channel:
@@ -386,6 +449,7 @@ def build_run_context(
     SLog.i(
         TAG,
         f"RunContext built sn={ctx.sn} adb={ctx.adb.get('state')} remote={ctx.remote.get('state')} "
-        f"ios={ctx.ios.get('state')} vlm={ctx.vlm.get('state')} hitl={ctx.hitl.get('state')}",
+        f"ios={ctx.ios.get('state')} playwright={ctx.playwright.get('state')} "
+        f"vlm={ctx.vlm.get('state')} hitl={ctx.hitl.get('state')}",
     )
     return ctx

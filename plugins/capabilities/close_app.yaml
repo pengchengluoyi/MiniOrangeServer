@@ -3,7 +3,7 @@ display_name: 关闭应用
 event_kind: close_app
 category: app_lifecycle
 description: 关闭指定应用（Remote 走设置强停，与 kill_app 拟人路径一致）
-platforms: [android, ios]
+platforms: [android, ios, web]
 trigger_phrases: [关闭, 退出, close, quit]
 needs_vlm: false
 
@@ -33,6 +33,13 @@ implementations:
     requires_caps: [app_force_stop]
     needs_vlm: false
     cost: 2
+
+  - id: playwright_close
+    display_name: Playwright 关页
+    executor: playwright
+    requires_caps: [app_force_stop]
+    needs_vlm: false
+    cost: 1
 
 ui:
   shown_in_settings: true

@@ -237,6 +237,13 @@ def probe_vlm(
 # ====== HITL ======
 
 
+def probe_playwright() -> ProbeResult:
+    """本机 Playwright + Chromium 是否能当 Web 执行通道。不长期占浏览器。"""
+    from server.services.runtime.playwright_hub import probe_playwright as _probe
+
+    return _probe()
+
+
 def probe_hitl(*, observer_count: int | None = None) -> ProbeResult:
     """HITL 通道是否可用。
 

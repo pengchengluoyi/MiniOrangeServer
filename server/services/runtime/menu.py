@@ -47,11 +47,16 @@ def available_menu_brief(ctx: RunContext, *, audience: str = "case") -> list[dic
     out: list[dict[str, Any]] = []
     for cap in caps:
         is_hitl = (cap.category or "").lower() == "hitl"
+        impls = list(cap.implementations or [])
+        impl_vlm = [bool(getattr(i, "needs_vlm", False)) for i in impls]
+        # 菜单里只剩 playwright_tap（needs_vlm=false）时，不要仍写 cap 级 true，
+        # 否则模型会以为必须先看图要坐标。
+        needs_vlm = all(impl_vlm) if impl_vlm else bool(cap.needs_vlm)
         out.append({
             "id": cap.id,
             "event_kind": cap.event_kind,
             "category": cap.category,
-            "needs_vlm": cap.needs_vlm,
+            "needs_vlm": needs_vlm,
             "is_human_in_the_loop": is_hitl,
             "summary": (cap.description or "").strip().splitlines()[0][:160] if cap.description else "",
             "platforms": list(cap.platforms or []),

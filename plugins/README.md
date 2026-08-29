@@ -6,8 +6,8 @@
 
 1. **AI 主导**：AI 大脑（LLM/VLM）是测试执行的主角；YAML 只声明"能做什么、用什么实现"，**不**写"什么时候做、按什么顺序做"。
 2. **数据驱动**：增删能力、调整 `needs_vlm` 开关、改触发短语，都改 YAML 不改 Python，支持热更新。
-3. **执行器抽象**：能力声明的是 **抽象 caps**（如 `system_pkg_clear`、`ui_native_input`），不是具体的 `adb` / `remote`。未来加 web/pc/iOS 只动 `executors/` 不动 `capabilities/`。
-4. **运行时筛选**：plan 阶段 Router 按当前 connectivity（adb 通否 / remote 通否）过滤可用 implementations，再把瘦身后的菜单塞给 AI。
+3. **执行器抽象**：能力声明的是 **抽象 caps**（如 `system_pkg_clear`、`ui_native_input`），不是具体的 `adb` / `remote`。加 web 只加 `executors/playwright.yaml` + 对应 Python executor；Chrome CDP / Firefox BiDi 不要再拆驱动。
+4. **运行时筛选**：Router 按当前 connectivity（adb / remote / ios_wda / playwright）过滤 implementations，再把瘦身后的菜单塞给 AI。
 
 ## 目录结构
 
@@ -17,6 +17,8 @@ plugins/
 ├── executors/             # 每个执行器声明自己实现哪些抽象能力
 │   ├── adb.yaml
 │   ├── remote.yaml        # ClawNode App on phone
+│   ├── ios_wda.yaml
+│   ├── playwright.yaml    # 本机 Chromium，和 adb 平级
 │   ├── ai_persona.yaml    # AI 拟人化（多步 UI 操作）
 │   ├── vlm.yaml           # 大模型视觉
 │   ├── hitl.yaml          # 人工介入
@@ -82,7 +84,8 @@ platforms: [android]
 | adb=T, remote=T | 完整菜单 |
 | adb=T, remote=F | 砍 remote 独有实现，AI 全走 adb |
 | adb=F, remote=T | 砍 adb 独有实现；`clear_cache` 自动落到 `ai_persona` 拟人路径 |
-| adb=F, remote=F | 空菜单，PLAN_OVERVIEW 直接 decline |
+| adb=F, remote=F, playwright=T | 网页菜单：tap/input/launch 走 playwright，按名字点，不先 VLM locate |
+| adb=F, remote=F, ios_wda=F, playwright=F | 空菜单，应 decline |
 
 ## 修改流程（运营/QA）
 
@@ -98,8 +101,8 @@ platforms: [android]
 3. 在相关 `executors/*.yaml` 的 `provides:` 加上
 4. 重启 / reload
 
-## 添加新执行器（未来：web/pc/iOS）
+## 添加新执行器（web 已落地：playwright；pc 仍是占位）
 
 1. 在 `executors/` 加新 yaml，声明 `provides:` 哪些抽象 caps
-2. 实现对应的 runtime probe（连通性检测）
-3. 不动任何 `capabilities/`——已有能力自动获得新执行路径
+2. 实现对应的 runtime probe（连通性检测）+ `executors/*.py`
+3. 已有 capability 补一条 `implementations` 指向新 executor（cost 低于 VLM 的优先）

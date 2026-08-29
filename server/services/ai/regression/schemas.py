@@ -275,7 +275,7 @@ class RunReport(BaseModel):
     run_id: str
     case_id: str = ""
     sn: str = ""
-    overall_status: Literal["pass", "fail", "partial", "declined", "blocked", "untestable"] = "pass"
+    overall_status: Literal["pass", "fail", "partial", "declined", "blocked", "untestable", "unverifiable"] = "pass"
 
     total_events: int = 0
     passed: int = 0

@@ -3,7 +3,7 @@ display_name: 启动应用
 event_kind: launch_app
 category: app_lifecycle
 description: 启动或切换至目标应用
-platforms: [android, ios]
+platforms: [android, ios, web]
 trigger_phrases: [打开, 启动, 进入, open, launch, start]
 needs_vlm: false
 
@@ -33,6 +33,14 @@ implementations:
     requires_caps: [app_launch_native]
     needs_vlm: false
     cost: 2
+
+  - id: playwright_goto
+    display_name: Playwright 打开网址
+    executor: playwright
+    requires_caps: [app_launch_native]
+    needs_vlm: false
+    cost: 2
+    description: goto 项目环境 web.base_url
 
 ui:
   shown_in_settings: true

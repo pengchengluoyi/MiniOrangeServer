@@ -70,7 +70,7 @@ def get_abstract_cap(cap_id: str) -> Optional[AbstractCap]:
 
 ConnectivityFlags = dict[str, bool]
 """执行器层面的连通性标记。常见 key：
-    adb, remote, vlm, hitl, web, pc, mac, ios_wda
+    adb, remote, vlm, hitl, web, playwright, pc, mac, ios_wda
 """
 
 
@@ -98,6 +98,7 @@ def _executor_available(executor: Executor, connectivity: ConnectivityFlags) -> 
         "pc": "pc",
         "mac": "mac",
         "ios_wda": "ios_wda",
+        "playwright": "playwright",
         "hitl": "hitl",
     }
     key = alias.get(last, last)

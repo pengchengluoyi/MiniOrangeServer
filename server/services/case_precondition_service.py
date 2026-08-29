@@ -219,11 +219,14 @@ def _check_platform(expected: str, actual: str) -> Tuple[bool, str]:
     exp = (expected or "").lower()
     act = (actual or "").lower()
     if "ios" in exp or "苹果" in expected:
-        ok = act in ("ios", "mobile")
+        ok = act in ("ios", "mobile", "iphone", "ipad")
         return ok, "当前为 iOS 设备" if ok else f"当前设备类型为 {actual}，需要 iOS"
     if "android" in exp or "安卓" in expected:
         ok = act == "android"
         return ok, "当前为 Android 设备" if ok else f"当前设备类型为 {actual}，需要 Android"
+    if "web" in exp or "网页" in expected or "浏览器" in expected:
+        ok = act in ("web", "browser", "playwright")
+        return ok, "当前为本机浏览器" if ok else f"当前设备类型为 {actual}，需要 Web"
     return True, ""
 
 
@@ -342,13 +345,62 @@ def _run_one(
     package: str,
 ) -> Dict[str, Any]:
     entry: Dict[str, Any] = {"text": line, "kind": kind, "ok": False, "msg": ""}
+    plat = (platform or "").lower()
+    ios_plat = plat in ("ios", "iphone", "ipad") or _is_ios_engine(engine)
+    web_plat = plat in ("web", "browser", "playwright")
     try:
+        from server.services.regression.coverage_codes import (
+            refine_precondition_kind,
+            UNSUPPORTED_PREP_KINDS,
+        )
+
+        kind = refine_precondition_kind(kind, line)
+        entry["kind"] = kind
+        if kind == "check_sim" and ios_plat:
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = "iOS 无法读取 SIM，已跳过"
+            return _stamp_precondition_item(entry)
+        if kind in UNSUPPORTED_PREP_KINDS:
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = f"前置引擎无法执行（{kind}）"
+            return _stamp_precondition_item(entry)
+        if web_plat and kind == "clear_cache":
+            entry["ok"] = True
+            entry["msg"] = "网页每次新开浏览器上下文，无持久化缓存"
+            return _stamp_precondition_item(entry)
+        if web_plat and kind in ("check_sim", "check_wechat", "check_no_wechat"):
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = f"网页通道不检查 {kind}"
+            return _stamp_precondition_item(entry)
+        if web_plat and kind == "check_not_logged_in":
+            entry["ok"] = True
+            entry["msg"] = "新浏览器上下文视为未登录"
+            return _stamp_precondition_item(entry)
+        if web_plat and kind == "check_logged_in":
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = "网页「已登录」不在开跑前检查，由用例步骤完成登录"
+            return _stamp_precondition_item(entry)
+        if kind == "unknown":
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = f"前置未命中引擎库: {line}"
+            return _stamp_precondition_item(entry)
         if kind == "clear_cache":
             ok, msg = _clear_app_data(engine, package)
         elif kind == "check_sim":
             if _is_ios_engine(engine):
-                ok, msg = True, "iOS 无法用 adb 读取 SIM，已跳过"
+                ok, msg = True, "iOS 无法读取 SIM，已跳过"
                 entry["skipped"] = True
+                entry["gap"] = True
             else:
                 ok, msg, sim_meta = _check_sim(engine)
                 entry.update(sim_meta)
@@ -368,8 +420,9 @@ def _run_one(
             ok, msg = True, "已标记保留权限询问，预置层不 pm grant / 不自动点允许"
             entry["skipped"] = True
         else:
-            ok, msg = True, f"暂未自动化: {line}（已跳过，请人工确认环境）"
+            ok, msg = True, f"前置未命中引擎库: {line}"
             entry["skipped"] = True
+            entry["gap"] = True
         entry["ok"] = ok
         entry["msg"] = msg
     except Exception as e:
@@ -422,7 +475,9 @@ def run_preconditions(
         for item in parse_precondition_items(precondition_raw):
             if item.get("phase") != phase:
                 continue
-            kind = item.get("kind") or _classify_line(item.get("text") or "")[0]
+            kind = str(item.get("kind") or "").strip() or _classify_line(item.get("text") or "")[0]
+            if kind == "unknown":
+                kind = _classify_line(item.get("text") or "")[0]
             tasks.append((kind, item.get("text") or ""))
     except Exception:
         tasks = []
@@ -436,27 +491,57 @@ def run_preconditions(
     if not tasks:
         return {"ok": True, "items": [], "msg": ""}
 
+    from server.services.regression.coverage_codes import (
+        refine_precondition_kind,
+        stamp_precondition_items,
+        prep_blocks_run,
+        UNSUPPORTED_PREP_KINDS,
+    )
+
+    tasks = [(refine_precondition_kind(k, t), t) for k, t in tasks]
     plat = (platform or "android").lower()
     ios = plat in ("ios", "iphone", "ipad")
+    from server.services.runtime.playwright_hub import is_web_slot
+
+    web = is_web_slot(sn, plat) or plat in ("web", "browser", "playwright")
+    no_engine = {"check_ios_device", "check_android_device", "unknown"} | set(UNSUPPORTED_PREP_KINDS)
+    if ios:
+        no_engine = set(no_engine) | {"check_sim"}
+    if web:
+        no_engine = set(no_engine) | {
+            "clear_cache",
+            "check_sim",
+            "check_wechat",
+            "check_no_wechat",
+            "check_logged_in",
+            "check_not_logged_in",
+            "keep_permission_prompt",
+        }
 
     engine = None
     items: List[Dict[str, Any]] = []
     try:
-        needs_engine = any(
-            k not in ("check_ios_device", "check_android_device", "unknown")
-            for k, _ in tasks
-        )
+        needs_engine = any(k not in no_engine for k, _ in tasks)
         if needs_engine:
             engine = _mobile_engine(sn, platform)
         for kind, line in tasks:
-            if kind not in ("check_ios_device", "check_android_device", "unknown") and engine is None:
+            if kind in no_engine:
+                items.append(
+                    _run_one(kind, line, engine=engine, platform=platform, package=package)
+                )
+                continue
+            if kind not in ("check_ios_device", "check_android_device") and engine is None:
                 items.append(
                     _stamp_precondition_item(
                         {
                             "text": line,
                             "kind": kind,
                             "ok": False,
-                            "msg": f"无法初始化{(' iOS' if ios else ' Android')}执行引擎，前置检查未执行",
+                            "msg": (
+                                "网页通道无法初始化移动执行引擎，前置检查未执行"
+                                if web
+                                else f"无法初始化{(' iOS' if ios else ' Android')}执行引擎，前置检查未执行"
+                            ),
                         }
                     )
                 )
@@ -486,16 +571,29 @@ def run_preconditions(
                 )
     except Exception as e:
         SLog.e(TAG, f"precondition engine failed: {e}")
+        stamped = stamp_precondition_items(items, platform=platform)
         return {
             "ok": False,
-            "items": items,
+            "items": stamped,
             "msg": f"前置条件执行失败: {e}",
         }
 
-    ok = all(i.get("ok") for i in items)
-    fail_msgs = [i.get("msg") for i in items if not i.get("ok")]
+    items = stamp_precondition_items(items, platform=platform)
+    ok = not prep_blocks_run(items)
+    fail_msgs = [
+        i.get("msg")
+        for i in items
+        if not i.get("ok") and not i.get("gap")
+    ]
+    gap_n = sum(1 for i in items if i.get("gap"))
+    if fail_msgs:
+        msg = "；".join(str(m) for m in fail_msgs if m)
+    elif gap_n:
+        msg = f"前置可执行项已满足，{gap_n} 条无法执行已跳过"
+    else:
+        msg = "前置条件已满足"
     return {
         "ok": ok,
         "items": items,
-        "msg": "；".join(fail_msgs) if fail_msgs else "前置条件已满足",
+        "msg": msg,
     }

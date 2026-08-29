@@ -44,6 +44,13 @@ implementations:
     locate_prompt: LOCATE_VISION
     cost: 6
 
+  - id: playwright_fill
+    display_name: Playwright 输入
+    executor: playwright
+    requires_caps: [ui_input_text, ui_screenshot]
+    needs_vlm: false
+    cost: 3
+
 ui:
   shown_in_settings: true
   examples: ["输入手机号 13800138000", "点击密码输入框,输入：123456"]

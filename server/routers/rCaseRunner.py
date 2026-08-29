@@ -453,4 +453,34 @@ def list_devices(only_online: bool = True, db: Session = Depends(get_db)):
             })
     except Exception as e:
         SLog.w(TAG, f"/devices failed: {e}")
+    from server.services.runtime.playwright_hub import WEB_SLOT_SN, is_web_slot, probe_playwright
+
+    if not any(is_web_slot(str(it.get("sn") or "")) for it in items):
+        state, meta = probe_playwright()
+        available = state in ("connected", "available")
+        if available or not only_online:
+            hit = reserved.get(WEB_SLOT_SN) or {}
+            items.insert(0, {
+                "sn": WEB_SLOT_SN,
+                "model": "本机浏览器",
+                "device_type": "web",
+                "type": "web",
+                "os_version": "",
+                "resolution": "1280x800",
+                "role": "",
+                "status": "online" if available else "offline",
+                "channels": {
+                    "playwright_state": state,
+                    "playwright_reason": (meta or {}).get("reason") or "",
+                    "remote_state": "not_applicable",
+                    "adb_state": "not_applicable",
+                    "ios_state": "not_applicable",
+                },
+                "busy_task_id": busy.get(WEB_SLOT_SN, ""),
+                "reserved_slot_id": hit.get("slot_id") or "",
+                "reserved_title": hit.get("title") or "",
+                "reserved_until": hit.get("reserved_until") or "",
+                "reserved_kind": hit.get("kind") or "",
+                "reserved_app_id": hit.get("app_id") or "",
+            })
     return {"code": 200, "ok": True, "data": {"count": len(items), "items": items}}

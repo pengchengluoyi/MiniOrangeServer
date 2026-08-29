@@ -431,6 +431,7 @@ class AIProviderSaveBody(BaseModel):
     clear_key: bool = False
     set_default: bool = False
     plan_compress_ratio: float = 3.0
+    web_compress_ratio: float = 2.0
     case_execution_use: bool = False
 
 
@@ -461,6 +462,7 @@ def save_ai_provider(provider_id: str, body: AIProviderSaveBody):
             clear_key=body.clear_key,
             set_default=body.set_default,
             plan_compress_ratio=body.plan_compress_ratio,
+            web_compress_ratio=body.web_compress_ratio,
             case_execution_use=body.case_execution_use,
         )
     except ValueError as e:

@@ -3,7 +3,7 @@ display_name: 长按元素
 event_kind: long_press_element
 category: ui_interaction
 description: 长按屏幕上的元素（如长按图标弹出菜单、长按消息撤回）
-platforms: [android, ios]
+platforms: [android, ios, web]
 trigger_phrases: [长按, 按住, 持续按]
 needs_vlm: true
 
@@ -36,6 +36,13 @@ implementations:
     needs_vlm: true
     locate_prompt: LOCATE_VISION
     cost: 4
+
+  - id: playwright_long_press
+    display_name: Playwright 长按
+    executor: playwright
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: false
+    cost: 3
 
 ui:
   shown_in_settings: true

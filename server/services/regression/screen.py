@@ -140,6 +140,72 @@ def _peek_png_size(data: bytes) -> tuple[int, int]:
         return 0, 0
 
 
+def _compress_web_png(png_bytes: bytes, ratio: float) -> tuple[bytes, str, int, int]:
+    """按 Web 压缩比例缩小截图。返回 (bytes, mime, orig_w, orig_h)。width/height 仍报原图，坐标按视口换算。"""
+    orig_w, orig_h = _peek_png_size(png_bytes)
+    if ratio <= 1.0 or not png_bytes:
+        return png_bytes, "image/png", orig_w, orig_h
+    try:
+        from PIL import Image
+
+        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+        orig_w, orig_h = img.size
+        preview_w = max(1, round(orig_w / ratio))
+        preview_h = max(1, round(orig_h / ratio))
+        if preview_w < orig_w or preview_h < orig_h:
+            img = img.resize((preview_w, preview_h), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=82, optimize=True)
+        return buf.getvalue(), "image/jpeg", orig_w, orig_h
+    except Exception as exc:
+        SLog.w(TAG, f"web screenshot compress failed: {exc}")
+        return png_bytes, "image/png", orig_w, orig_h
+
+
+def _capture_via_playwright(ctx: RunContext, *, timeout_sec: float = 15.0) -> CapturedScreen:
+    started = time.time()
+    try:
+        from server.services.runtime.playwright_hub import get_hub
+
+        png_bytes = get_hub().screenshot_png(
+            str(ctx.sn or ""), timeout_ms=int(timeout_sec * 1000),
+        )
+    except Exception as e:
+        return CapturedScreen(
+            ok=False,
+            source="playwright",
+            error=f"playwright screenshot failed: {e}",
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
+    elapsed_ms = int((time.time() - started) * 1000)
+    if not png_bytes:
+        return CapturedScreen(ok=False, source="playwright", error="empty screenshot", elapsed_ms=elapsed_ms)
+    ratio = 2.0
+    try:
+        from server.services.system_settings_service import get_ai_web_compress_ratio
+
+        ratio = get_ai_web_compress_ratio(getattr(ctx, "provider_id", None))
+    except Exception:
+        ratio = 2.0
+    out, mime, width, height = _compress_web_png(png_bytes, ratio)
+    suffix = ".jpg" if mime == "image/jpeg" else ".png"
+    fd, path = tempfile.mkstemp(prefix="screen_web_", suffix=suffix)
+    try:
+        os.write(fd, out)
+    finally:
+        os.close(fd)
+    return CapturedScreen(
+        ok=True,
+        source="playwright",
+        image_path=path,
+        image_base64=base64.b64encode(out).decode("ascii"),
+        image_mime=mime,
+        width=width,
+        height=height,
+        elapsed_ms=elapsed_ms,
+    )
+
+
 # ---------- ClawNode 截图失败解析 ----------
 
 
@@ -495,6 +561,16 @@ def capture_screen(
             res = _capture_via_ios_wda(udid, timeout_sec=timeout_sec)
             if res.ok:
                 SLog.i(TAG, f"capture via ios_wda sn={ctx.sn} elapsed={res.elapsed_ms}ms size={res.width}x{res.height}")
+                return res
+            last = res
+        elif ch in ("playwright", "web"):
+            state = str(ctx.playwright.get("state") or "")
+            if state not in ("connected", "available") and str(ctx.platform or "").lower() not in ("web", "browser", "playwright"):
+                last = CapturedScreen(ok=False, source="playwright", error="playwright not available")
+                continue
+            res = _capture_via_playwright(ctx, timeout_sec=timeout_sec)
+            if res.ok:
+                SLog.i(TAG, f"capture via playwright sn={ctx.sn} elapsed={res.elapsed_ms}ms size={res.width}x{res.height}")
                 return res
             last = res
         else:

@@ -1,0 +1,17 @@
+id: playwright
+display_name: Playwright (本机浏览器)
+description: |
+  MiniOrangeServer 进程内用 Playwright 拉起 Chromium，点网页 / 截图 / 填表。
+  与 adb / ios_wda 平级。Chrome 走 CDP、Firefox 走 BiDi 由 Playwright 消化，不要再拆驱动。
+
+available_when: connectivity.playwright
+
+provides:
+  - ui_native_input
+  - ui_input_text
+  - ui_screenshot
+  - app_launch_native
+  - app_force_stop
+  - key_event
+
+platforms: [web]

@@ -7,7 +7,7 @@
        expected_executor (from AI) → fallback_executors (from AI) → executor 自己 supports() 兜底
        并按当前 RunContext 的 connectivity 把不可用的 executor 过滤掉。
   2. 若该 event needs_vlm=True：
-       a) 调 capture_screen() 抓一张图（按 prefer 顺序 adb → remote）
+       a) 调 capture_screen() 抓一张图（按 prefer：adb / remote / ios_wda / playwright）
        b) 把截图 attach 到 ExecutorContext.screen
        c) 若 event 是 tap/long_press/swipe_element_to_element/input_text 这种"看图后再做"型，
           先调 locate_element() 拿坐标 → 写回 event.params.x/y / from_x/y / to_x/y
@@ -61,7 +61,7 @@ class CapabilityRouter:
         run_context: RunContext,
         *,
         executors: Optional[dict[str, Executor]] = None,
-        capture_prefer: tuple[str, ...] = ("adb", "remote"),
+        capture_prefer: tuple[str, ...] = ("adb", "remote"),  # web 传入 ("playwright",)
     ):
         self.run_context = run_context
         self.executors: dict[str, Executor] = executors or build_default_executors()
@@ -223,9 +223,10 @@ class CapabilityRouter:
         """合成最终的 executor 尝试顺序。
 
         优先级：
-          1. event.expected_executor（AI 选的）
-          2. event.fallback_executors（AI 选的备选）
-          3. 该 cap 在菜单里允许的其他 executor
+          1. capture_prefer 首选（网页 playwright / iOS ios_wda），若该通道能跑这条能力
+          2. event.expected_executor（AI 选的）
+          3. event.fallback_executors
+          4. 该 cap 在菜单里允许的其他 executor
         全部按 connectivity 过滤。
         """
         in_menu = self._menu_index.get(event.capability_id, [])
@@ -248,10 +249,19 @@ class CapabilityRouter:
             if not self.executors[ex].supports(event.capability_id):
                 continue
             out.append(ex)
+        prefer0 = (self.capture_prefer or ("",))[0]
+        if prefer0 in out:
+            out = [prefer0] + [x for x in out if x != prefer0]
         return out
+
+    def _impl_skips_vlm_locate(self, event: PlanEvent) -> bool:
+        ordered = self._executor_order(event)
+        return bool(ordered) and ordered[0] == "playwright"
 
     def _needs_locate(self, event: PlanEvent) -> bool:
         if event.capability_id not in _VLM_LOCATE_NEEDED:
+            return False
+        if self._impl_skips_vlm_locate(event):
             return False
         params = event.params or {}
         # 带语义锚点（target: resource_id/text/content_desc）时不走 VLM locate：

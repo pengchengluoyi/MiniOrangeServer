@@ -5,6 +5,9 @@
 | 文档 | 对应什么 | 是否仍是主路径 |
 |------|----------|----------------|
 | **本文** | 测试平台「下发任务」→ CaseRunner → Agent | **是。前端 `AppShell.vue` 只打 `/case-runner/run`** |
+| [无人值守跑通条件.md](../无人值守跑通条件.md) | 什么时候可以不盯着跑完一轮、还缺哪些闸门 | 分析；档 0～2 验收 |
+| [8月28日-断言部分优化.md](../8月28日-断言部分优化.md) | 前置先跑；步骤/预期按编号 JOIN（缺号不验）；三列 UNKNOWN；写作准则 | 方案；P0 记账未落地 |
+| [8月29日.md](../8月29日.md) | 测试结论必须真：测好/测多/测准、能观察什么、假绿假红 | 拍板；执行附录 |
 | [8月27日-执行策略后续改动.md](../8月27日-执行策略后续改动.md) | 预防 / 知识索引 / 登录闸门 / 对话改 Agent | **2/4/6 + Copilot 已落地**；轨迹 Hint、断言分级未动 |
 | [prd_llm_agent_execution.md](prd_llm_agent_execution.md) | Agent 改造方案（D1–D6） | 历史设计稿 |
 | [regression/execution-flow.md](../regression/execution-flow.md) | 旧飞书 Copilot 逐步点击 | **批次入口已转发到 CaseRunner**；对话小窗也改为 `run_cases(instruction)` |
@@ -17,10 +20,12 @@
 
 ```
 ① 任务编排     CaseRunner：多设备、多用例、闸门、落库、WS
-② 单用例引擎   AgentExecutor（看图闭环；adb / remote / ios_wda）
+② 单用例引擎   AgentExecutor（看图闭环；adb / remote / ios_wda / playwright）
 ③ 动作分发     CapabilityRouter：选通道、可选 locate、调 executor
-④ 真机动作     adb / remote / ios_wda / vlm / hitl / ai_persona / internal
+④ 设备动作     adb / remote / ios_wda / playwright / vlm / hitl / ai_persona / internal
 ```
+
+Web 不另做 CDP / BiDi 驱动。Playwright 在 MiniOrangeServer **进程内**拉起 Chromium（和 adb 平级），Chrome 走 CDP、Firefox 走 BiDi 由它消化。设备列表里的 `web-local` 是虚拟槽，不是 MDevice 行。
 
 再加上三条旁路，它们 **不是** 用例逐步点击，但会改执行上下文：
 
@@ -74,7 +79,8 @@ flowchart TB
 | `CaseRunner` | 任务编排 |
 | `AgentExecutor` | 看图闭环 |
 | `CapabilityRouter` | 动作分发 |
-| `AdbExecutor` / `RemoteExecutor` / … | 真机 |
+| `AdbExecutor` / `RemoteExecutor` / `IosWdaExecutor` / `PlaywrightExecutor` | 设备通道 |
+| `PlaywrightHub` | 进程内 Chromium 会话 |
 | `Recovery` | L0 系统恢复 |
 
 ---
@@ -90,6 +96,8 @@ FastAPI 在 `main.py` 挂路由。和「跑用例」直接相关的是：
 | `/feishu` | `server/routers/rFeishuRegression.py` | 飞书表配置、**旧 Copilot 跑法** `POST /feishu/run` |
 | `/app-automation` | `server/routers/rAppAutomation.py` | 应用配置、playbook、QA 流程、用例列表 |
 | WebSocket | `server/websocket/` | 设备通道、HITL 广播、`testing_task` / `agent_step` |
+
+`GET /case-runner/devices` 在 MDevice 之外注入 `sn=web-local`（本机 Playwright）。`playwright install chromium` 之后状态为 available，测试页可选「本机浏览器」。项目环境 `web.base_url` 当作启动标识（对等于 Android package）。
 
 `POST /case-runner/run` 在真正开跑前做三道闸：
 
@@ -327,12 +335,12 @@ Agent 对 HITL 还有一层改写（`_normalize_hitl`）：**只允许向人要�
 规划器：`server/services/ai/regression/planner.py`  
 Prompt：`prompts.py` 里 `AGENT_DECIDE_*` / `GOAL_EXTRACT_*` / `AGENT_RESTART_*`
 
-### 10.1 开跑前：目标抽取 + 预算
+### 10.1 开跑前：目标抽取 + 时限
 
 `run_agent_case`：
 
-1. `compute_decision_budget` = `clamp(步骤数 × 5, 15, 60)`。`wait_ms` **不占** 这 15–60。
-2. 若用例文本像「再发一条新帖」→ `nested_publish=True`，创作子流程另有 40 步上限，期间不占主预算。
+1. 单用例墙钟上限 **20 分钟**（`max_case_wall_sec = 1200`）。到点仍未完成 → `partial` / `budget_exhausted`（文案：执行超时）。主循环不再用决策步数 `max_steps` 卡死。
+2. 若用例文本像「再发一条新帖」→ `nested_publish=True`，创作子流程另有 40 步上限。
 3. `extract_goal`：
    - **有预期原文** → 检查点直接从预期切出来，不改写（`_checkpoints_from_expected`）
    - 没有预期 → LLM `goal-extract`
@@ -341,44 +349,34 @@ Prompt：`prompts.py` 里 `AGENT_DECIDE_*` / `GOAL_EXTRACT_*` / `AGENT_RESTART_*
 
 ### 10.2 主循环（`AgentExecutor.run`）
 
-用一张图把每步发生的事钉死：
+主循环仍是看图决策，但 **有步骤指针**：只做步骤 n，做完再验同号预期。**校验阶段不再调用操作 prompt**：先对质检库分类，命中的才 `assert_visual`，选中态等验不了的直接 `无法验证`。校验不通过立刻停；无法验证继续，但整单不算通过。
 
 ```mermaid
 flowchart TD
   Start[run] --> Acc[记下号池账号到短期记忆]
   Acc --> Boot[开场看图：要不要 force-stop + launch]
-  Boot --> Loop{decision_used < max_steps?}
-  Loop -->|否| Budget[partial / budget_exhausted]
+  Boot --> Loop{墙钟 < 20 分钟?}
+  Loop -->|否| Budget[partial / budget_exhausted 执行超时]
   Loop -->|是| Shot[force_fresh 截图]
-  Shot -->|连续 2 次失败| CapFail[fail / execution_error]
-  Shot --> Stall[感知哈希：屏幕几乎没变则 stall++]
-  Stall --> Rec[L0 恢复预筛]
-  Rec -->|恢复成功| Loop
-  Rec -->|致命| DevFail[device_unhealthy]
-  Rec -->|无规则 / 未恢复| Dump[dump UI 树]
-  Dump --> KB[检索已审核知识 最多 3 条]
-  KB --> Sess[点过页面后：inspect_session 一次]
-  Sess --> Think[WS phase=think]
-  Think --> Decide[decide_next_action 看图 JSON]
-  Decide --> Nudge{路径知识命中但决策没引用?}
-  Nudge -->|是，本步仅一次| Decide
-  Nudge -->|否| Branch{status}
-  Branch -->|done| Assert[assert_visual 成功标准]
-  Assert -->|过| Pass[pass]
-  Assert -->|不过，&lt;2 次| Loop
-  Assert -->|不过 ≥2| FalseDone[fail]
-  Branch -->|give_up| GiveUp[goal_unreachable 或 llm failed]
-  Branch -->|ask_human| Hitl[_ask_human]
-  Hitl --> Loop
-  Branch -->|continue| Guard{禁止凑环境?}
-  Guard -->|登出/清缓存/删帖凑空态| EnvFail[goal_unreachable]
+  Shot --> Rec[L0 恢复预筛]
+  Rec --> Phase{当前阶段}
+  Phase -->|操作 do| Think[WS 正在看图决策]
+  Think --> Decide[decide_next_action 只做当前步骤 / 菜单无 assert]
+  Decide --> Guard{禁止凑结果?}
+  Guard -->|关掉目标来凑不出现| ProductFail[fail / expect_fail]
   Guard --> Disp[Router.dispatch]
-  Disp --> Oscil{同动作同屏震荡?}
-  Oscil -->|是| Stuck[execution_error]
-  Oscil --> Loop
+  Disp -->|本步操作 done| Check
+  Phase -->|校验 check| Check[质检库分类]
+  Check -->|UNVERIFIABLE / UNKNOWN| Skip[assert_skip 无法验证]
+  Check -->|命中库| Vision[assert_visual 只验可核片段]
+  Skip --> Next[步骤 n+1]
+  Vision -->|过| Next
+  Vision -->|不过| ExpectFail[fail / 未达预期]
+  Next -->|还有步骤| Loop
+  Next -->|全部完成| Pass[pass]
 ```
 
-### 10.3 开场重启（不占预算）
+### 10.3 开场重启
 
 `_maybe_bootstrap_restart`：有 `target_package` 才做。看当前屏，`decide_restart_app` 返回 `restart: bool`。
 
@@ -387,15 +385,15 @@ flowchart TD
 
 ### 10.4 决策输入（模型每步真正看到的）
 
-`decide_next_action` → `build_agent_decide_messages`，user 里有：
+`decide_next_action` → `build_agent_do_messages`（操作专用 system prompt，菜单不含 assert）。user 里有：
 
-- 目标、成功标准、目标包名
-- 检查点勾选块 `[x]/[ ]`
+- 目标、**本步要完成的操作**（不是整案成功标准）
+- 检查点 / 步骤指针（操作阶段不泄漏预期原文）
 - 会话观察（`inspect_session` 之后才有；首页看不出登录态是正常的）
 - 号池 brief（「登录页必须 input_text 这个号，禁止再问人」）
 - 设备通道 JSON
 - 屏幕宽高 + **整图**
-- capability 菜单
+- capability 菜单（无 assert_visual）
 - 最近 8 步动作摘要（不含 thought、不含 `skip_restart` 等噪音）
 - 短期记忆（发布指纹、操作前计数等）
 - 本步知识 hint（路径类知识优先）
@@ -554,8 +552,8 @@ Planner 里的 job 名（日志/调度过滤用）：
 
 | kind | 行为 |
 |------|------|
-| `clear_cache` | 清应用数据（成功则 `app_cache_cleared=True`，Plan 不再规划清缓存） |
-| `check_sim` / 微信是否安装 / 安卓或 iOS 设备 | 检查，失败整条用例 fail |
+| `clear_cache` | 清应用数据（成功则 `app_cache_cleared=True`，Plan 不再规划清缓存）。**网页**：新 context 视为已无缓存，不调 adb |
+| `check_sim` / 微信是否安装 / 安卓或 iOS 设备 | 检查，失败整条用例 fail。**网页**：SIM/微信记缺口并放过；「未登录」因新上下文视为满足 |
 
 `after_launch`（已登录/游客）在这条链路上 **不会跑**。
 

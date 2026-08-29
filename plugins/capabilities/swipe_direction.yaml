@@ -36,6 +36,13 @@ implementations:
     needs_vlm: false
     cost: 3
 
+  - id: playwright_swipe
+    display_name: Playwright 滑动
+    executor: playwright
+    requires_caps: [ui_native_input]
+    needs_vlm: false
+    cost: 2
+
 ui:
   shown_in_settings: true
   examples: ["上滑", "下拉刷新"]

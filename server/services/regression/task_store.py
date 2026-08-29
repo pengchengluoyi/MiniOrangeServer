@@ -17,7 +17,7 @@ from script.log import SLog
 TAG = "TaskStore"
 
 # 用例终态（用于算 completed）
-_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled", "untestable"}
+_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled", "untestable", "unverifiable"}
 
 # 引擎内部状态 → PRD §0 用例枚举。禁止让 failed / partial 这类同义词漏到前端：
 #   - failed  : 旧数据别名
@@ -75,7 +75,11 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
     blocked = _int(doc.get("blocked"))
     declined = _int(doc.get("declined"))
     untestable = _int(doc.get("untestable"))
-    judged = max(0, completed - untestable)
+    prep_insufficient = _int(doc.get("prep_insufficient"))
+    step_unexecutable = _int(doc.get("step_unexecutable"))
+    expect_unverifiable = _int(doc.get("expect_unverifiable"))
+    engine_error = _int(doc.get("engine_error"))
+    judged = max(0, passed + failed)
     pass_rate = int(round(passed / judged * 100)) if judged else 0
     st = status or doc.get("status") or "running"
     current = ""
@@ -125,6 +129,10 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "blocked": blocked,
         "declined": declined,
         "untestable": untestable,
+        "prep_insufficient": prep_insufficient,
+        "step_unexecutable": step_unexecutable,
+        "expect_unverifiable": expect_unverifiable,
+        "engine_error": engine_error,
         "progress": min(100, int(round(completed / total * 100))) if total else 0,
         "pass_rate": pass_rate,
         "error": doc.get("error", "") or "",
@@ -164,6 +172,10 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
         "blocked": t["blocked"],
         "declined": t["declined"],
         "untestable": t.get("untestable") or 0,
+        "prep_insufficient": t.get("prep_insufficient") or 0,
+        "step_unexecutable": t.get("step_unexecutable") or 0,
+        "expect_unverifiable": t.get("expect_unverifiable") or 0,
+        "engine_error": t.get("engine_error") or 0,
         "progress": t["progress"],
         "current_case_id": t["current_case_id"],
         "hitl": t["hitl"],
@@ -186,6 +198,11 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
             "hitl": bool(case.get("hitl", False)),
             "knowledge_ids": list(case.get("knowledge_ids") or []),
             "knowledge_proposals": list(case.get("knowledge_proposals") or []),
+            "coverage_class": case.get("coverage_class") or "",
+            "coverage_label": case.get("coverage_label") or "",
+            "coverage": case.get("coverage") if isinstance(case.get("coverage"), dict) else {},
+            "failure_category": case.get("failure_category") or "",
+            "failure_label": case.get("failure_label") or "",
         }
     return data
 

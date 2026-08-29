@@ -160,6 +160,15 @@ def normalize_plan_compress_ratio(value: Any) -> float:
     return max(1.0, min(10.0, ratio))
 
 
+def normalize_web_compress_ratio(value: Any) -> float:
+    """Web 截图压缩比例：保留一位小数，1.0 表示不压缩。默认 2。"""
+    try:
+        ratio = round(float(value), 1)
+    except (TypeError, ValueError):
+        ratio = 2.0
+    return max(1.0, min(10.0, ratio))
+
+
 def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     preset = next((p for p in AI_PROVIDER_PRESETS if p["id"] == provider_id), None)
     raw = raw if isinstance(raw, dict) else {}
@@ -190,6 +199,9 @@ def _provider_public(provider_id: str, raw: Optional[Dict[str, Any]] = None) -> 
         "case_execution_use": case_execution_use,
         "plan_compress_ratio": normalize_plan_compress_ratio(
             raw.get("plan_compress_ratio", _default_plan_compress_ratio(provider_id))
+        ),
+        "web_compress_ratio": normalize_web_compress_ratio(
+            raw.get("web_compress_ratio", _default_web_compress_ratio(provider_id))
         ),
     }
 
@@ -357,6 +369,10 @@ def _default_plan_compress_ratio(provider_id: str) -> float:
     return 3.0
 
 
+def _default_web_compress_ratio(provider_id: str) -> float:
+    return 2.0
+
+
 def get_ai_plan_compress_ratio(provider_id: Optional[str] = None) -> float:
     """返回模型 Plan 截图压缩比例；1.0=不压缩，默认 3.0（宽高各除以 3）。"""
     ai = _ai_root()
@@ -367,6 +383,16 @@ def get_ai_plan_compress_ratio(provider_id: Optional[str] = None) -> float:
     if not ai_plan_compress_image_enabled():
         return 1.0
     return _default_plan_compress_ratio(target_id)
+
+
+def get_ai_web_compress_ratio(provider_id: Optional[str] = None) -> float:
+    """Web 截图压缩比例；1.0=不压缩，默认 2.0（宽高各除以 2）。"""
+    ai = _ai_root()
+    target_id = (provider_id or ai.get("_default_provider") or "openai").strip().lower()
+    raw = ai.get(target_id)
+    if isinstance(raw, dict) and raw.get("web_compress_ratio") is not None:
+        return normalize_web_compress_ratio(raw.get("web_compress_ratio"))
+    return _default_web_compress_ratio(target_id)
 
 
 def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, Any]:
@@ -389,6 +415,9 @@ def get_ai_provider_credentials(provider_id: Optional[str] = None) -> Dict[str, 
         "configured": bool(api_key),
         "plan_compress_ratio": normalize_plan_compress_ratio(
             (raw or {}).get("plan_compress_ratio", _default_plan_compress_ratio(target_id))
+        ),
+        "web_compress_ratio": normalize_web_compress_ratio(
+            (raw or {}).get("web_compress_ratio", _default_web_compress_ratio(target_id))
         ),
         "case_execution_use": (raw or {}).get("case_execution_use") is True,
     }
@@ -467,6 +496,7 @@ def save_ai_provider_settings(
     clear_key: bool = False,
     set_default: bool = False,
     plan_compress_ratio: Optional[float] = None,
+    web_compress_ratio: Optional[float] = None,
     case_execution_use: Optional[bool] = None,
 ) -> Dict[str, Any]:
     provider_id = (provider_id or "").strip().lower()
@@ -502,6 +532,10 @@ def save_ai_provider_settings(
         current["plan_compress_ratio"] = normalize_plan_compress_ratio(plan_compress_ratio)
     elif "plan_compress_ratio" not in current:
         current["plan_compress_ratio"] = 3.0
+    if web_compress_ratio is not None:
+        current["web_compress_ratio"] = normalize_web_compress_ratio(web_compress_ratio)
+    elif "web_compress_ratio" not in current:
+        current["web_compress_ratio"] = 2.0
     if set_default:
         ai["_default_provider"] = provider_id
     SecurityManager.save()

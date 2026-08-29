@@ -374,12 +374,28 @@ def load_project_env_for_app(app) -> dict:
 
 
 def package_for_app(app, env_profile: Optional[str] = None, platform: str = "android") -> str:
-    """被测应用启动标识：Android 取 package，iOS 取 bundle。都来自项目环境配置。"""
+    """被测应用启动标识：Android 取 package，iOS 取 bundle，Web 取 base_url。都来自项目环境配置。"""
     plat = str(platform or "android").lower()
     want_ios = plat in ("ios", "iphone", "ipad")
+    want_web = plat in ("web", "browser", "playwright")
     profile = resolve_env_profile(app, env_profile)
     env_doc = load_project_env_for_app(app)
     snap = profile_snapshot(env_doc, profile)
+    if want_web:
+        pkg = target_id_from_snapshot(snap, "web")
+        if pkg:
+            return pkg
+        legacy = _app_env(app)
+        pkg = target_id_from_snapshot(legacy, "web")
+        if pkg:
+            return pkg
+        for prof in profile_keys(env_doc):
+            snap2 = profile_snapshot(env_doc, prof)
+            pkg = target_id_from_snapshot(snap2, "web")
+            if pkg:
+                SLog.i(TAG, f"package_for_app web fallback profile={prof}: {pkg}")
+                return pkg
+        return ""
     pkg = target_id_from_snapshot(snap, "ios" if want_ios else "android")
     if pkg:
         return pkg

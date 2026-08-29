@@ -8,7 +8,8 @@
 
 - D1 用例=目标+检查点   D2 决策 VLM 直接出坐标(不走 locate VLM)   D3 每步看图
 - D4 成功交给 VLM 断言   D5 允许 ask_human(走 human_* 能力+现有 HitlExecutor)
-- 收尾：步数预算 + 成功断言 + 震荡检测（取代 max_replans 硬上限）
+- 收尾：墙钟上限（单用例 20 分钟）+ 按步骤编号校验 + 震荡检测
+- 步骤指针：做完步骤 n 再验同号预期，禁止跳步；校验不走操作 prompt，只按质检库看图或直接无法验证
 
 底座全复用：CapabilityRouter / executors / 通道 / screen / case_memory。
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
@@ -40,7 +41,7 @@ from server.services.runtime.run_context import RunContext
 
 TAG = "AgentExecutor"
 
-# 不计入决策预算的能力（加载轮询）
+# 加载轮询（另有 max_wait_rounds）
 _WAIT_CAPS = {"wait_ms", "wait_screen_ready"}
 # 等待 / 断言 / 开场跳过 不是「动作没落地」。cr-00c044bb6529 五条用例都在
 # 连续 wait_ms（轮播引导语、加载进度条）上被误判卡死。这些能力另有
@@ -48,7 +49,7 @@ _WAIT_CAPS = {"wait_ms", "wait_screen_ready"}
 _OSCILLATION_IGNORE_CAPS = {
     "wait_ms", "wait_screen_ready", "assert_visual",
     "skip_restart", "inspect_session", "pick_account", "exec_script", "capture_screen",
-    "skip_repeat_tap",
+    "skip_repeat_tap", "assert_skip",
 }
 _MUTATE_CAPS = {
     "tap_element", "swipe_element_to_element", "swipe_direction",
@@ -56,8 +57,8 @@ _MUTATE_CAPS = {
 }
 # 同一入口再点：不检测页面有没有切过去，直接做后续操作。
 _PROCEED_AFTER_ENTRY = (
-    "【入口已点过】同一位置已经点过。不要检测页面有没有切换，也不要再点这里。"
-    "立刻做目标的后续操作：未完成的检查点或成功标准（用 assert_visual 看目标是否出现，或继续其它步骤）。"
+    "【入口已点过】同一位置已经点过。不要再点这里。"
+    "本步操作视为做完，进入【本步预期】校验：只看当前屏是什么，禁止点击/关闭/返回来让预期成立。"
 )
 # 导航是否成功不要靠「选中态/切没切页」挡后续；这些检查点直接跳过。
 _NAV_VERIFY_RE = re.compile(
@@ -67,6 +68,15 @@ _NAV_VERIFY_RE = re.compile(
 _NESTED_PUBLISH_RE = re.compile(
     r"再发|发一条新|发布一条新|新帖后|发布新帖|再发布",
 )
+_OBSERVE_HEAD_RE = re.compile(r"^(查看|检查|观察|确认是否|确认一下|看一下|看看)")
+_DO_VERB_RE = re.compile(r"点击|点「|点选|输入|填写|滑动|上滑|下滑|打开应用|启动应用|长按|拖|按返回")
+_CHECK_ONLY_CAPS = {"wait_ms", "wait_screen_ready", "assert_visual", "capture_screen"}
+_CHECK_SETTLE_SEC = 0.8
+_LOADING_HINT_RE = re.compile(r"加载|转圈|转场|占位|生成中|尚未完成")
+_MAKE_ABSENT_RE = re.compile(
+    r"关闭|关掉|点叉|叉号|隐藏|让它消失|使其不出现|凑成|凑出|让预期成立|为了让检查点",
+)
+_ABSENT_EXPECT_RE = re.compile(r"不出现|看不到|不可见|没有出现|未出现")
 _PUBLISHED_RE = re.compile(r"发布成功|已发布到|发布完成")
 _PROCESS_HINT_RE = re.compile(r"加载占位|加载中|生成中|切换中|转圈|占位|白屏")
 _LOGOUT_RE = re.compile(r"退出登录|登出|切换账号")
@@ -147,9 +157,11 @@ _CATEGORY_LABEL = {
     "success": "成功",
     "goal_unreachable": "目标不可达/环境不符",
     "execution_error": "执行异常(点击/截图/设备)",
-    "budget_exhausted": "步数耗尽",
+    "budget_exhausted": "执行超时",
     "needs_human": "需人工介入",
     "device_unhealthy": "设备/系统异常",
+    "expect_fail": "校验不通过",
+    "expect_unverifiable": "无法验证",
 }
 
 
@@ -170,12 +182,9 @@ _KNOWLEDGE_TOKEN_STOP = {
 
 @dataclass
 class AgentOptions:
-    max_steps: int = 25                  # 决策预算（wait 不占）
-    steps_per_case_step: int = 5         # 飞书 1 步 → 最多 N 次决策
-    min_steps: int = 15
-    max_steps_cap: int = 60
+    max_case_wall_sec: int = 20 * 60     # 单用例墙钟上限（不再用决策步数卡死）
     max_wait_rounds: int = 15            # 连续 wait 上限，防止无限等
-    max_create_steps: int = 40           # 嵌套创作/发布子流程上限（发帖成功前不占主预算）
+    max_create_steps: int = 40           # 嵌套创作/发布子流程上限（发帖成功前不占主循环）
     oscillation_window: int = 3          # 连续 N 步 (同 action + 同屏无变化) 判卡死
     phash_max_distance: int = 6          # 感知哈希汉明距离 ≤ 此值视为「屏幕几乎没变」
     recovery_enabled: bool = True        # L0 系统层恢复（YAML 规则驱动）
@@ -298,7 +307,7 @@ def _count_numbered_in_text(text: str) -> int:
 
 
 def count_case_steps(case_spec: CaseSpec) -> int:
-    """决策预算用的用例步骤数：优先飞书编号，其次 steps 条数。"""
+    """用例步骤数：优先飞书编号，其次 steps 条数。"""
     n_list = len(case_spec.steps or [])
     raw = ""
     row = case_spec.raw_row or {}
@@ -308,12 +317,6 @@ def count_case_steps(case_spec: CaseSpec) -> int:
         raw = "\n".join(s.instruction for s in case_spec.steps if s.instruction)
     n_raw = _count_numbered_in_text(raw) if raw else 0
     return max(n_list, n_raw, 1)
-
-
-def compute_decision_budget(case_spec: CaseSpec, opts: Optional[AgentOptions] = None) -> int:
-    opts = opts or AgentOptions()
-    n = count_case_steps(case_spec)
-    return max(opts.min_steps, min(opts.max_steps_cap, n * opts.steps_per_case_step))
 
 
 def case_text_blob(case_spec: CaseSpec) -> str:
@@ -350,6 +353,68 @@ def case_steps_text(case_spec: CaseSpec, *, max_chars: int = 1200) -> str:
     if len(text) > max_chars:
         return text[:max_chars].rstrip() + "…"
     return text
+
+
+def is_observe_only_step(instruction: str) -> bool:
+    """「查看/检查」且没有点击等动作 → 本步没有操作，直接验预期。"""
+    t = str(instruction or "").strip()
+    if not t:
+        return True
+    if _DO_VERB_RE.search(t):
+        return False
+    return bool(_OBSERVE_HEAD_RE.search(t))
+
+
+@dataclass
+class SeqNode:
+    n: int
+    instruction: str
+    expected: str
+    cp_id: str = ""
+    observe_only: bool = False
+
+
+def build_seq_nodes(case_spec: CaseSpec, goal: Optional[CaseGoal] = None) -> list[SeqNode]:
+    """按用例步骤编号建指针：步骤 n 做完才验同号预期。"""
+    rows: list[tuple[int, str, str]] = []
+    for step in case_spec.steps or []:
+        n = int(getattr(step, "index", 0) or 0)
+        inst = str(getattr(step, "instruction", "") or "").strip()
+        exp = str(getattr(step, "expected", "") or "").strip()
+        if not n and not inst and not exp:
+            continue
+        rows.append((n or (len(rows) + 1), inst, exp))
+    if not rows:
+        raw = ""
+        row = case_spec.raw_row or {}
+        if isinstance(row, dict):
+            raw = str(row.get("steps_raw") or "")
+        if not raw:
+            raw = case_steps_text(case_spec, max_chars=8000)
+        if raw:
+            try:
+                from server.services.shared.semantic.case_text_semantic_service import (
+                    parse_numbered_items_rules,
+                )
+                for it in parse_numbered_items_rules(raw) or []:
+                    t = str(it.get("text") or "").strip()
+                    n = int(it.get("num") or 0) or (len(rows) + 1)
+                    if t:
+                        rows.append((n, t, ""))
+            except Exception:
+                rows = [(1, raw.strip(), "")]
+    if not rows:
+        return []
+    nodes: list[SeqNode] = []
+    for n, inst, exp in rows:
+        nodes.append(SeqNode(
+            n=n,
+            instruction=inst,
+            expected=exp,
+            cp_id=f"cp{n}" if exp else "",
+            observe_only=is_observe_only_step(inst),
+        ))
+    return nodes
 
 
 def _clip_knowledge_bit(text: str, max_chars: int) -> str:
@@ -612,6 +677,7 @@ class AgentExecutor:
         case_steps_text: str = "",
         nested_publish: bool = False,
         knowledge_hits: list[dict[str, Any]] | None = None,
+        seq_nodes: Optional[list[SeqNode]] = None,
     ):
         self.goal = goal
         self.ctx = run_context
@@ -627,6 +693,7 @@ class AgentExecutor:
         self._nested_publish = bool(nested_publish)
         self.knowledge_hits = knowledge_hits or []
         self.shared: dict[str, Any] = {}
+        self._started_ts = 0.0
         self._assert_feedback = ""   # 上次"判 done 但校验未过"的理由，回灌给下一步
         self._false_done = 0
         self.steps: list[_Step] = []
@@ -649,16 +716,215 @@ class AgentExecutor:
         self._followup_after_repeat = False  # 已经把「后面的操作」跑过一次
         self._session_note = ""
         self._session_inspected = False
+        self._seq_nodes: list[SeqNode] = list(seq_nodes or [])
+        self._seq_i = 0
+        self._seq_phase = "do"
+        self._check_waits = 0
+        self._expect_codes: dict[int, str] = {}
+        if self._seq_nodes:
+            self._sync_seq_phase()
 
     # ---------- prompt 片段 ----------
 
     def _checkpoints_block(self) -> str:
+        if self._seq_enabled:
+            return self._seq_prompt_block()
         if not self.goal.checkpoints:
             return "（无显式检查点，按目标自行判断进度）"
         return "\n".join(
             f"[{'x' if cp.done else ' '}] {cp.id}({ '过程' if getattr(cp, 'kind', 'terminal') == 'process' else '终态' }): {cp.description}"
             for cp in self.goal.checkpoints
         )
+
+    @property
+    def _seq_enabled(self) -> bool:
+        return bool(self._seq_nodes)
+
+    def _seq_current(self) -> Optional[SeqNode]:
+        if 0 <= self._seq_i < len(self._seq_nodes):
+            return self._seq_nodes[self._seq_i]
+        return None
+
+    def _sync_seq_phase(self) -> None:
+        cur = self._seq_current()
+        if not cur:
+            self._seq_phase = "done"
+            return
+        if cur.observe_only:
+            if cur.expected:
+                self._seq_phase = "check"
+            else:
+                self._seq_advance()
+            return
+        if not cur.instruction and cur.expected:
+            self._seq_phase = "check"
+            return
+        self._seq_phase = "do"
+        if not cur.instruction and not cur.expected:
+            self._seq_advance()
+
+    def _seq_advance(self) -> bool:
+        self._seq_i += 1
+        self._check_waits = 0
+        self._false_done = 0
+        self._assert_feedback = ""
+        if self._seq_i >= len(self._seq_nodes):
+            self._seq_phase = "done"
+            return False
+        self._sync_seq_phase()
+        if self._seq_phase == "do" and self._seq_current() and not self._seq_current().instruction:
+            return self._seq_advance()
+        return True
+
+    def _seq_prompt_block(self) -> str:
+        lines = [
+            "【执行纪律：严格按步骤编号。禁止跳到后面的步骤，禁止提前验后面的预期。】",
+        ]
+        for i, node in enumerate(self._seq_nodes):
+            if i < self._seq_i:
+                mark = "x"
+                tag = "已完成"
+            elif i == self._seq_i:
+                mark = ">"
+                tag = "操作中" if self._seq_phase == "do" else "校验中"
+            else:
+                mark = " "
+                tag = "未到，禁止执行"
+            bit = f"[{mark}] 步骤 {node.n} {tag}：{node.instruction or '（无操作）'}"
+            if not node.expected:
+                bit += " ｜ 本步无预期（做完即过）"
+            elif i < self._seq_i:
+                bit += " ｜ 已交系统校验"
+            elif self._seq_phase == "check" and i == self._seq_i:
+                bit += f" ｜ 预期：{node.expected}"
+            else:
+                bit += " ｜ 做完后由系统校验"
+            lines.append(bit)
+        cur = self._seq_current()
+        if not cur:
+            lines.append("全部步骤已完成。不要再操作设备。")
+            return "\n".join(lines)
+        if self._seq_phase == "do":
+            lines.append(f"【当前只做步骤 {cur.n}】{cur.instruction}")
+            lines.append(
+                "做完本步操作后 status=done，表示本步操作结束（不是整案结束）。"
+                "禁止去做后面步骤。不要自己校验，也不要为了后面的字去改界面。"
+            )
+            if cur.expected:
+                lines.append("本步预期由系统单独校验。现在不要看预期、不要验、不要为它去点。")
+        else:
+            lines.append(f"【当前只验步骤 {cur.n}】{cur.expected or '（无预期，视为通过）'}")
+            lines.append("校验由系统直接做，不要操作设备。")
+        return "\n".join(lines)
+
+    def _seq_decide_goal(self) -> str:
+        cur = self._seq_current()
+        if not cur:
+            return "完成本步操作"
+        return (cur.instruction or "").strip() or "完成本步操作"
+
+    def _seq_decide_success(self) -> str:
+        cur = self._seq_current()
+        if not cur:
+            return "全部步骤已完成"
+        return (
+            f"完成步骤 {cur.n} 的操作：{cur.instruction}。"
+            "不要自己校验预期，不要用整案成功标准，也不要为了后面的字去改界面。"
+        )
+
+    def _outcome_manufacture_reason(self, decision, cap: str) -> str:
+        """禁止为了让预期成立而改界面（例如关掉悬浮球再验「不出现」）。"""
+        cap = (cap or "").lower()
+        thought = f"{getattr(decision, 'thought', '')} {getattr(decision, 'expected_after', '')}"
+        cur = self._seq_current()
+        exp = (cur.expected if cur else "") or ""
+        if self._seq_enabled:
+            exp = " ".join(n.expected for n in self._seq_nodes[self._seq_i:] if n.expected)
+        if self._seq_phase == "check" and cap and cap not in _CHECK_ONLY_CAPS:
+            return "校验阶段禁止操作设备来凑预期；按当前屏判定"
+        if cap not in _MUTATE_CAPS and cap != "press_key":
+            return ""
+        if _ABSENT_EXPECT_RE.search(exp) and _MAKE_ABSENT_RE.search(thought):
+            return "禁止关闭或隐藏目标来凑「不出现」；屏幕上有什么就验什么"
+        if _MAKE_ABSENT_RE.search(thought) and re.search(r"预期|检查点|成功标准", thought):
+            return "禁止为了让检查点成立而改界面；按当前屏验证"
+        return ""
+
+    def _force_current_assert(self, decision, *, note: str = "") -> None:
+        cur = self._seq_current()
+        exp = (cur.expected if cur else "") or ""
+        decision.status = "continue"
+        decision.action = AgentAction(capability_id="assert_visual", params={"expectation": exp})
+        if cur and cur.cp_id:
+            decision.checkpoint_ids = [cur.cp_id]
+        thought = (decision.thought or "").strip()
+        suffix = note or "〔校验：只看当前屏，不改界面〕"
+        if suffix not in thought:
+            decision.thought = f"{thought} {suffix}".strip()
+
+    def _constrain_seq_decision(self, decision, cap: str):
+        """卡住当前步骤/阶段：不能提前验后面的点，校验不能改界面。"""
+        if not self._seq_enabled:
+            return decision, cap
+        cur = self._seq_current()
+        if not cur:
+            decision.status = "done"
+            decision.action = None
+            return decision, ""
+        if cur.cp_id:
+            decision.checkpoint_ids = [cur.cp_id]
+        else:
+            decision.checkpoint_ids = []
+
+        if self._seq_phase == "check":
+            if not cur.expected:
+                decision.status = "done"
+                decision.action = None
+                return decision, ""
+            if decision.status in ("done", "give_up"):
+                self._force_current_assert(decision)
+                return decision, "assert_visual"
+            if cap not in _CHECK_ONLY_CAPS:
+                self._force_current_assert(decision)
+                return decision, "assert_visual"
+            if cap == "assert_visual" and decision.action:
+                params = dict(decision.action.params or {})
+                params["expectation"] = cur.expected
+                decision.action.params = params
+            return decision, cap
+
+        if cap == "assert_visual":
+            exp = str((decision.action.params or {}).get("expectation") or "")
+            if cur.expected and (cur.expected in exp or exp in cur.expected or not exp):
+                self._seq_phase = "check"
+                self._force_current_assert(decision)
+                return decision, "assert_visual"
+            self._record_synthetic(
+                len(self.results) + 1, EventStatus.SKIPPED, "skip_out_of_order",
+                f"禁止提前验后面的预期，先做完步骤 {cur.n}",
+            )
+            decision.status = "continue"
+            decision.action = None
+            return decision, ""
+        return decision, cap
+
+    def _seq_on_check_pass(self) -> str:
+        """check 通过后前进。返回 pass|continue。"""
+        cur = self._seq_current()
+        if cur and cur.cp_id:
+            self._mark_checkpoints([cur.cp_id])
+        if not self._seq_advance():
+            return "pass"
+        return "continue"
+
+    def _seq_on_check_fail(self, reason: str, *, loading: bool) -> Optional[str]:
+        """失败：加载中可再等；否则产品未达。返回 continue 表示继续转圈等待。"""
+        if loading and self._check_waits < 3:
+            self._check_waits += 1
+            self._assert_feedback = reason
+            self._oscillation_advice = "当前仍在加载，wait_ms 后再按同一预期校验，不要点关闭。"
+            return "continue"
+        return None
 
     def _history_block(self) -> str:
         """只保留「最近做过什么、结果如何」，不回灌 thought 和完整 params。"""
@@ -684,16 +950,16 @@ class AgentExecutor:
         if ans:
             src = "号池" if str(ans.get("source") or "") == "account_pool" else "人工"
             extras.append(f"[{src}回复] {_clip_hist(ans.get('answer'), 40)}")
-        if self._assert_feedback:
+        if self._assert_feedback and not self._seq_enabled:
             extras.append(f"[校验未通过] {_clip_hist(self._assert_feedback, 80)}")
-        left = max(0, self.opts.max_steps - self._decision_used)
+        left = self._wall_left_label()
         if self._in_create_flow():
             extras.append(
-                f"[预算] 创作/发布进行中，本步不占决策"
-                f"（{self._create_used}/{self.opts.max_create_steps}）；剩余 {left}/{self.opts.max_steps}"
+                f"[时限] 创作/发布进行中"
+                f"（{self._create_used}/{self.opts.max_create_steps}）；剩余 {left}"
             )
         else:
-            extras.append(f"[预算] 剩余 {left}/{self.opts.max_steps}")
+            extras.append(f"[时限] 剩余 {left}")
         body = "\n".join(lines)
         if len(body) > _HISTORY_BLOCK_MAX_CHARS:
             body = body[-_HISTORY_BLOCK_MAX_CHARS:]
@@ -701,6 +967,19 @@ class AgentExecutor:
             if cut > 0:
                 body = body[cut + 1 :]
         return "\n".join(x for x in (body, *extras) if x)
+
+    def _wall_left_sec(self) -> int:
+        started = self._started_ts or time.time()
+        return max(0, int(self.opts.max_case_wall_sec - (time.time() - started)))
+
+    def _wall_left_label(self) -> str:
+        m, s = divmod(self._wall_left_sec(), 60)
+        return f"{m}分{s}秒"
+
+    def _wall_exceeded(self) -> bool:
+        if self._started_ts <= 0:
+            return False
+        return (time.time() - self._started_ts) >= max(1, int(self.opts.max_case_wall_sec))
 
     def _memory_block(self) -> str:
         if not self._memory:
@@ -714,12 +993,17 @@ class AgentExecutor:
             for cp in (self.goal.checkpoints or [])
             if not getattr(cp, "done", False) and str(cp.description or "").strip()
         ]
+        cur = self._seq_current()
+        steps_text = self.case_steps_text
+        if cur:
+            open_cps = [x for x in (cur.instruction, cur.expected) if x]
+            steps_text = cur.instruction or steps_text
         return build_case_intent_for_knowledge(
             case_name=self.case_name,
             goal=self.goal.goal or self.case_brief,
-            steps_text=self.case_steps_text,
+            steps_text=steps_text,
             preconditions=self.case_preconditions,
-            success_criteria=self.goal.success_criteria or "",
+            success_criteria=(cur.expected if cur else "") or self.goal.success_criteria or "",
             open_checkpoints=open_cps,
         )
 
@@ -857,14 +1141,23 @@ class AgentExecutor:
         return "\n".join(s for s in snippets if s).strip()
 
     def _decide(self, screen, *, knowledge_hint: str):
+        hier = ""
+        try:
+            from server.services.runtime.playwright_hub import get_hub, is_web_slot
+
+            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                hier = get_hub().a11y_text(str(getattr(self.ctx, "sn", "") or ""))
+        except Exception:
+            hier = ""
         return planner.decide_next_action(
-            goal=self.goal.goal,
-            success_criteria=self.goal.success_criteria,
+            goal=self._seq_decide_goal() if self._seq_enabled else self.goal.goal,
+            success_criteria=self._seq_decide_success() if self._seq_enabled else self.goal.success_criteria,
             checkpoints_block=self._checkpoints_block(),
             run_context=self.ctx,
             history_block=self._history_block(),
             width=screen.width, height=screen.height,
             image_base64=screen.image_base64, image_mime=screen.image_mime,
+            hierarchy_text=hier,
             knowledge_hint=knowledge_hint,
             memory_block=self._memory_block(),
             session_block=self._session_block_text(),
@@ -885,8 +1178,14 @@ class AgentExecutor:
 
     def _screen_dump(self):
         try:
-            from server.services.regression import hierarchy as H
+            from server.services.runtime.playwright_hub import get_hub, is_web_slot
+            from server.services.regression.hierarchy import UiDump
+
             serial = str(getattr(self.ctx, "sn", "") or "")
+            if is_web_slot(serial, getattr(self.ctx, "platform", "")):
+                text = get_hub().a11y_text(serial)
+                return UiDump(ok=bool(text), source="playwright", raw_text=text)
+            from server.services.regression import hierarchy as H
             if serial:
                 return H.dump_ui_nodes(serial, force_fresh=False)
         except Exception as exc:
@@ -999,13 +1298,15 @@ class AgentExecutor:
 
     def run(self) -> RunReport:
         started_ts = time.time()
+        self._started_ts = started_ts
         started_at = _now_iso()
         overall = "fail"
         blocked_reason = ""
         decline_reason = ""
         failure_category = ""   # success | goal_unreachable | execution_error | budget_exhausted | needs_human
+        wall_min = max(1, int(self.opts.max_case_wall_sec // 60))
         SLog.i(TAG, f"[{self.run_id}] >>> agent case={self.case_id} goal={self.goal.goal!r} "
-                    f"checkpoints={len(self.goal.checkpoints)} decision_budget={self.opts.max_steps}")
+                    f"checkpoints={len(self.goal.checkpoints)} wall_limit={wall_min}min")
         self._emit("start")
         self._note_issued_account()
         self._maybe_bootstrap_restart()
@@ -1017,8 +1318,20 @@ class AgentExecutor:
             gated = None
         if gated:
             overall, decline_reason, failure_category = gated
+            return self._build_report(
+                overall, started_at, started_ts, blocked_reason, decline_reason, failure_category,
+            )
+
         capture_fails = 0
-        while (not gated) and self._decision_used < self.opts.max_steps:
+        while True:
+            if self._wall_exceeded():
+                decline_reason = (
+                    f"单用例执行超过 {wall_min} 分钟仍未完成目标"
+                    f"（已决策 {self._decision_used}）"
+                )
+                overall = "partial"
+                failure_category = "budget_exhausted"
+                break
             if self._task_cancelled():
                 overall = "fail"
                 decline_reason = "任务已取消"
@@ -1063,6 +1376,30 @@ class AgentExecutor:
             knowledge_hint = self._compose_knowledge_hint(shown_knowledge)
             self._maybe_inspect_session(screen, knowledge=shown_knowledge)
             step_idx = len(self.results) + 1
+            if self._seq_enabled and self._seq_phase == "check":
+                cur = self._seq_current()
+                if cur and not cur.expected:
+                    outcome, reason = self._run_seq_check(screen, step_idx)
+                    self._count_decision()
+                    overall, decline_reason, failure_category = self._apply_check_outcome(outcome, reason)
+                    if overall:
+                        break
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
+                self._emit(
+                    "think",
+                    step=step_idx,
+                    thumb=thumb,
+                    summary="正在校验…",
+                    knowledge=shown_knowledge,
+                )
+                outcome, reason = self._run_seq_check(screen, step_idx)
+                self._count_decision()
+                overall, decline_reason, failure_category = self._apply_check_outcome(outcome, reason)
+                if overall:
+                    break
+                time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                continue
             self._emit(
                 "think",
                 step=step_idx,
@@ -1103,9 +1440,25 @@ class AgentExecutor:
                             knowledge_hint=self._compose_knowledge_hint(shown_knowledge, body=expanded),
                         )
             cap = decision.action.capability_id if decision.action else ""
+            decision, cap = self._constrain_seq_decision(decision, cap)
+            if self._seq_enabled:
+                made = self._outcome_manufacture_reason(decision, cap)
+                if made:
+                    self._record_synthetic(step_idx, EventStatus.FAIL, "give_up", made, shot_hash, shot_phash)
+                    self._count_decision()
+                    overall = "fail"
+                    decline_reason = made
+                    failure_category = "expect_fail"
+                    break
+            if self._seq_enabled and self._seq_phase == "check":
+                # 校验必须用操作之后的新图，不要拿决策时那张旧屏去判。
+                self._count_decision()
+                time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                continue
             self._ingest_decision_memory(decision, cap)
             SLog.i(TAG, f"[{self.run_id}] step{step_idx} status={decision.status} "
-                        f"act={cap or '-'} decision={self._decision_used}/{self.opts.max_steps} "
+                        f"act={cap or '-'} decision={self._decision_used} "
+                        f"wall_left={self._wall_left_label()} "
                         f"thought={decision.thought[:80]!r}")
             self._emit(
                 "step",
@@ -1115,24 +1468,42 @@ class AgentExecutor:
                 knowledge=shown_knowledge,
             )
 
-            # ---- done：用成功标准断言；不通过则回灌理由继续，不立即失败（弥合 done/assert 分裂） ----
+            # ---- done：有步骤指针时 = 本步操作结束，进入同号校验；无指针才用整案成功标准 ----
+            seq_check_after_action = False
             if decision.status == "done":
-                ok, reason = self._assert_goal(screen, step_idx)
-                self._count_decision()
-                if ok:
-                    overall = "pass"
-                    failure_category = "success"
-                    break
-                self._false_done += 1
-                self._assert_feedback = reason
-                SLog.w(TAG, f"[{self.run_id}] done 但校验未过({self._false_done}/{self.opts.max_false_done}): {reason[:80]}")
-                if self._false_done >= self.opts.max_false_done:
-                    overall = "fail"
-                    failure_category = "execution_error"
-                    decline_reason = f"多次判定完成但成功标准始终未在屏幕出现：{reason[:200]}"
-                    break
-                time.sleep(self.opts.pause_ms_between_steps / 1000.0)
-                continue
+                if self._seq_enabled:
+                    cur = self._seq_current()
+                    if not cur:
+                        overall = "pass"
+                        failure_category = "success"
+                        self._count_decision()
+                        break
+                    pending_mutate = bool(cap in _MUTATE_CAPS and decision.action)
+                    if pending_mutate:
+                        decision.status = "continue"
+                        seq_check_after_action = True
+                    else:
+                        self._seq_phase = "check"
+                        self._count_decision()
+                        time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                        continue
+                else:
+                    ok, reason = self._assert_goal(screen, step_idx)
+                    self._count_decision()
+                    if ok:
+                        overall = "pass"
+                        failure_category = "success"
+                        break
+                    self._false_done += 1
+                    self._assert_feedback = reason
+                    SLog.w(TAG, f"[{self.run_id}] done 但校验未过({self._false_done}/{self.opts.max_false_done}): {reason[:80]}")
+                    if self._false_done >= self.opts.max_false_done:
+                        overall = "fail"
+                        failure_category = "execution_error"
+                        decline_reason = f"多次判定完成但成功标准始终未在屏幕出现：{reason[:200]}"
+                        break
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
 
             # ---- give_up：agent 判定客观无法完成（如应用无此功能/环境不符） ----
             if decision.status == "give_up":
@@ -1166,6 +1537,10 @@ class AgentExecutor:
 
             # ---- continue：执行一个动作 ----
             if decision.action is None or not cap:
+                if self._seq_enabled:
+                    self._count_decision()
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
                 self._record_synthetic(step_idx, EventStatus.FAIL, "noop", "continue 但无有效 action", shot_hash, shot_phash)
                 self._count_decision()
                 if self._is_oscillating():
@@ -1187,40 +1562,46 @@ class AgentExecutor:
             event_params = self._normalize_action_params(cap, dict(decision.action.params or {}))
             # 同一入口再点：不看页面有没有切，跳过这次点击，改做后面的检查点/成功标准。
             if cap == "tap_element" and self._repeats_last_mutate(cap, event_params):
-                SLog.w(TAG, f"[{self.run_id}] 同一入口再点，跳过点击，不检测页面切换")
+                SLog.w(TAG, f"[{self.run_id}] 同一入口再点，跳过点击")
                 self._record_synthetic(
                     step_idx, EventStatus.SKIPPED, "skip_repeat_tap",
-                    "入口已点过，不检测页面是否切换，改为后续操作",
+                    "入口已点过，跳过这次点击",
                     shot_hash, shot_phash, thumb=thumb,
                 )
                 self._count_decision()
                 self._static_repeat = 1
                 self._oscillation_advice = _PROCEED_AFTER_ENTRY
-                self._remember("fact", "入口已点过，不检测页面是否切换，改为后续操作")
-                if self._followup_after_repeat:
+                self._remember("fact", "入口已点过，不再重复点击")
+                if self._seq_enabled:
+                    cur = self._seq_current()
+                    if cur and cur.expected:
+                        self._seq_phase = "check"
+                        time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                        continue
                     time.sleep(self.opts.pause_ms_between_steps / 1000.0)
                     continue
-                self._followup_after_repeat = True
-                self._skip_nav_verify_checkpoints()
-                nxt = self._next_undone_checkpoint()
-                if nxt is None:
-                    ok, reason = self._assert_goal(screen, len(self.results) + 1)
-                    if ok:
-                        overall = "pass"
-                        failure_category = "success"
-                        break
-                    self._assert_feedback = reason
+                elif self._followup_after_repeat:
                     time.sleep(self.opts.pause_ms_between_steps / 1000.0)
                     continue
-                cap = "assert_visual"
-                is_wait = False
-                event_params = {"expectation": nxt.description}
-                decision.action = AgentAction(capability_id=cap, params=dict(event_params))
-                decision.checkpoint_ids = [nxt.id]
-                decision.thought = (
-                    f"入口已点过，不检测页面是否切换，改为验证：{nxt.description}"
-                )
-                step_idx = len(self.results) + 1
+                else:
+                    self._followup_after_repeat = True
+                    nxt = self._next_undone_checkpoint()
+                    if nxt is None:
+                        ok, reason = self._assert_goal(screen, len(self.results) + 1)
+                        if ok:
+                            overall = "pass"
+                            failure_category = "success"
+                            break
+                        self._assert_feedback = reason
+                        time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                        continue
+                    cap = "assert_visual"
+                    is_wait = False
+                    event_params = {"expectation": nxt.description}
+                    decision.action = AgentAction(capability_id=cap, params=dict(event_params))
+                    decision.checkpoint_ids = [nxt.id]
+                    decision.thought = f"入口已点过，改为验证：{nxt.description}"
+                    step_idx = len(self.results) + 1
             if cap == "assert_visual":
                 mem = self._memory_block()
                 if mem:
@@ -1288,9 +1669,17 @@ class AgentExecutor:
             else:
                 self._count_decision()
 
+            if seq_check_after_action and result.status == EventStatus.PASS:
+                self._seq_phase = "check"
+                time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                continue
+
             if cap == "assert_visual" and result.status == EventStatus.PASS:
                 if result.summary:
                     self._remember("observed", result.summary[:180])
+                if self._seq_enabled:
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
                 if decision.checkpoint_ids:
                     self._mark_checkpoints(list(decision.checkpoint_ids))
                 if not decision.checkpoint_ids:
@@ -1301,6 +1690,16 @@ class AgentExecutor:
                     )
                     if _PROCESS_HINT_RE.search(blob):
                         self._mark_next_process_checkpoint()
+            elif cap == "assert_visual" and self._seq_enabled:
+                reason = result.error or result.summary or "本步预期未在当前屏成立"
+                loading = bool(_LOADING_HINT_RE.search(reason))
+                if self._seq_on_check_fail(reason, loading=loading) == "continue":
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
+                overall = "fail"
+                failure_category = "expect_fail"
+                decline_reason = reason[:240]
+                break
 
             if result.status == EventStatus.BLOCKED:
                 overall = "blocked"
@@ -1315,13 +1714,6 @@ class AgentExecutor:
                 self._remember("fact", "入口已点过，不检测页面是否切换，改为后续操作")
 
             time.sleep(self.opts.pause_ms_between_steps / 1000.0)
-        else:
-            decline_reason = (
-                f"达到决策步上限 max_steps={self.opts.max_steps} 仍未完成目标"
-                f"（wait 未计入，已决策 {self._decision_used}）"
-            )
-            overall = "partial"
-            failure_category = "budget_exhausted"
 
         return self._build_report(overall, started_at, started_ts, blocked_reason, decline_reason, failure_category)
 
@@ -1343,6 +1735,13 @@ class AgentExecutor:
         """
         if not self.opts.recovery_enabled:
             return ""
+        try:
+            from server.services.runtime.playwright_hub import is_web_slot
+
+            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                return ""
+        except Exception:
+            pass
         if self._recovery_rounds >= self.opts.max_recovery_rounds:
             return ""
         if not self._checked_at_start:
@@ -1498,7 +1897,7 @@ class AgentExecutor:
             self._note_published({"note": decision.thought[:200]})
         if cap in _MUTATE_CAPS and decision.thought:
             self._remember("before", f"操作前：{decision.thought[:180]}", replace_kind="before")
-        if decision.checkpoint_ids:
+        if decision.checkpoint_ids and not self._seq_enabled:
             self._mark_checkpoints(decision.checkpoint_ids)
 
     def _mark_checkpoints(self, ids: list[str]) -> None:
@@ -1623,6 +2022,17 @@ class AgentExecutor:
         if not pkg:
             SLog.i(TAG, f"[{self.run_id}] skip restart decide: no target_package")
             return
+        try:
+            from server.services.runtime.playwright_hub import is_web_slot
+
+            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                self._record_synthetic(
+                    len(self.results) + 1, EventStatus.SKIPPED, "skip_restart",
+                    "网页槽已打开目标网址，不再强停重启",
+                )
+                return
+        except Exception:
+            pass
         screen = capture_screen(
             self.ctx, prefer=self.router.capture_prefer,
             timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
@@ -1794,21 +2204,167 @@ class AgentExecutor:
 
     # ---------- 子过程 ----------
 
+    def _stamp_expect(self, n: int, code: str) -> None:
+        if not n:
+            return
+        bits = [p.strip() for p in str(code or "").split("|") if p.strip()]
+        if not bits:
+            return
+        prev = str(self._expect_codes.get(int(n)) or "")
+        if prev:
+            have = {p.strip() for p in prev.split("|") if p.strip()}
+            bits = [p for p in bits if p not in have]
+            if not bits:
+                return
+            self._expect_codes[int(n)] = prev + "|" + "|".join(bits)
+            return
+        self._expect_codes[int(n)] = "|".join(bits)
+
+    def _stamp_check_row(self, n: int, row, *, observed_ok=None) -> None:
+        claims = list(getattr(row, "claims", None) or [])
+        if not claims:
+            if observed_ok is True:
+                self._stamp_expect(n, f"EXPECT.PASS.{getattr(row, 'kind', '') or 'unknown'}")
+            elif observed_ok is False:
+                self._stamp_expect(n, f"EXPECT.FAIL.{getattr(row, 'kind', '') or 'unknown'}")
+            else:
+                self._stamp_expect(n, getattr(row, "code", "") or "EXPECT.UNKNOWN")
+            return
+        codes = []
+        for c in claims:
+            if c.gap:
+                codes.append(c.code)
+            elif observed_ok is True:
+                codes.append(f"EXPECT.PASS.{c.kind}")
+            elif observed_ok is False:
+                codes.append(f"EXPECT.FAIL.{c.kind}")
+            else:
+                codes.append(c.code)
+        self._stamp_expect(n, "|".join(codes))
+
+    def _settle_screen(self, screen, *, kind: str = ""):
+        if kind in {"page_nav", "text_present", "text_absent", "node", "meaning"}:
+            time.sleep(_CHECK_SETTLE_SEC)
+        if not self.router:
+            return screen
+        fresh = capture_screen(
+            self.ctx, prefer=self.router.capture_prefer,
+            timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
+        )
+        return fresh if fresh and fresh.has_image() else screen
+
+    def _run_seq_check(self, screen, step_idx: int) -> tuple[str, str]:
+        """校验当前步骤预期。返回 pass|fail|advance|wait 与原因。"""
+        from server.services.regression.expect_catalog import classify_expect_text, gap_summary
+
+        cur = self._seq_current()
+        if not cur:
+            return "pass", ""
+        if not cur.expected:
+            self._stamp_expect(cur.n, "EXPECT.SKIPPED.no_expect")
+            nxt = self._seq_on_check_pass()
+            return ("pass", "") if nxt == "pass" else ("advance", "")
+        row = classify_expect_text(cur.expected)
+        note = gap_summary(row)
+        dom = None
+        try:
+            from server.services.runtime.playwright_hub import get_hub, is_web_slot
+            from server.services.regression.playwright_check import check_expect
+
+            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                page = get_hub().current_page(str(getattr(self.ctx, "sn", "") or ""))
+                if page is not None:
+                    dom = check_expect(page, row)
+        except Exception as exc:
+            SLog.d(TAG, f"[{self.run_id}] playwright check skipped: {exc}")
+            dom = None
+        if dom is not None:
+            ok, reason = dom
+            shot_hash = _screen_hash(screen.image_base64) if screen and screen.has_image() else ""
+            shot_phash = _screen_phash(screen.image_base64) if screen and screen.has_image() else ""
+            thumb = agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else ""
+            self._record_synthetic(
+                step_idx,
+                EventStatus.PASS if ok else EventStatus.FAIL,
+                "assert_dom",
+                reason,
+                shot_hash,
+                shot_phash,
+                thumb=thumb,
+            )
+            if ok:
+                self._stamp_check_row(cur.n, row, observed_ok=True)
+                nxt = self._seq_on_check_pass()
+                return ("pass", "") if nxt == "pass" else ("advance", "")
+            self._stamp_check_row(cur.n, row, observed_ok=False)
+            return "fail", reason
+        if row.skipped:
+            self._record_synthetic(
+                step_idx, EventStatus.SKIPPED, "assert_skip",
+                note or "无法验证",
+                _screen_hash(screen.image_base64) if screen and screen.has_image() else "",
+                _screen_phash(screen.image_base64) if screen and screen.has_image() else "",
+                thumb=agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else "",
+            )
+        if row.gap:
+            self._stamp_check_row(cur.n, row)
+            nxt = self._seq_on_check_pass()
+            return ("pass", "") if nxt == "pass" else ("advance", note or "无法验证")
+        screen = self._settle_screen(screen, kind=row.kind)
+        ok, reason = self._assert_expectation(
+            screen, len(self.results) + 1, row.prompt_text or cur.expected, cap_id="assert_visual",
+        )
+        if ok:
+            self._stamp_check_row(cur.n, row, observed_ok=True)
+            nxt = self._seq_on_check_pass()
+            return ("pass", "") if nxt == "pass" else ("advance", "")
+        loading = bool(_LOADING_HINT_RE.search(reason or ""))
+        if self._seq_on_check_fail(reason, loading=loading) == "continue":
+            return "wait", reason
+        self._stamp_check_row(cur.n, row, observed_ok=False)
+        return "fail", reason
+
+    def _expect_has_gap(self) -> bool:
+        blob = "|".join(str(v or "") for v in self._expect_codes.values())
+        return "UNVERIFIABLE" in blob or "UNKNOWN" in blob or "step_not_done" in blob
+
+    def _apply_check_outcome(self, outcome: str, reason: str) -> tuple[str, str, str]:
+        """把校验结果变成 (overall, decline, failure_category)。空 overall 表示继续循环。"""
+        if outcome == "fail":
+            return "fail", (reason or "校验不通过")[:240], "expect_fail"
+        if outcome == "pass":
+            if self._expect_has_gap():
+                return "unverifiable", "无法验证", "expect_unverifiable"
+            return "pass", "", "success"
+        return "", "", ""
+
     def _assert_goal(self, screen, step_idx: int) -> tuple[bool, str]:
+        return self._assert_expectation(
+            screen, step_idx,
+            self.goal.success_criteria or self.goal.goal,
+            cap_id="assert_goal",
+        )
+
+    def _assert_expectation(self, screen, step_idx: int, expectation: str, *, cap_id: str) -> tuple[bool, str]:
         t0 = time.time()
         started_at = _now_iso()
+        extra = (
+            "只根据当前截图判定。图上有的东西就是有；禁止假设会被关掉或点掉。"
+            "不要因为「可以关掉所以算不出现」而判通过。"
+        )
+        ctx = (self._assert_context_block() + "\n" + extra).strip()
         res = planner.assert_visual(
-            expectation=self.goal.success_criteria or self.goal.goal,
+            expectation=expectation or self.goal.goal,
             image_base64=screen.image_base64, image_mime=screen.image_mime,
             provider_id=self.provider_id, timeout_sec=self.opts.step_timeout_sec,
-            context_block=self._assert_context_block(),
+            context_block=ctx,
         )
         elapsed_ms = int((time.time() - t0) * 1000)
         thumb = agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else ""
         status = EventStatus.PASS if res.passed else EventStatus.FAIL
         summary = res.evidence or res.ai_reasoning[:120]
         self.results.append(EventResult(
-            seq=step_idx, capability_id="assert_goal", event_kind="assert_visual",
+            seq=step_idx, capability_id=cap_id, event_kind="assert_visual",
             status=status,
             executor_used="vlm", summary=summary,
             error="" if res.passed else res.ai_reasoning[:240],
@@ -1823,12 +2379,12 @@ class AgentExecutor:
             result_status=str(status.value),
             summary=summary,
             elapsed_ms=elapsed_ms,
-            capability_id="assert_goal",
-            knowledge=self._match_step_knowledge(extra=f"assert_goal {summary}"),
+            capability_id=cap_id,
+            knowledge=self._match_step_knowledge(extra=f"{cap_id} {summary}"),
         )
-        SLog.i(TAG, f"[{self.run_id}] 成功断言 passed={res.passed} conf={res.confidence} "
+        SLog.i(TAG, f"[{self.run_id}] 断言 {cap_id} passed={res.passed} conf={res.confidence} "
                     f"elapsed={elapsed_ms}ms {res.ai_reasoning[:80]!r}")
-        return res.passed, (res.ai_reasoning or res.evidence or "成功标准未满足")
+        return res.passed, (res.ai_reasoning or res.evidence or "本步预期未在当前屏成立")
 
     def _pool_value_for_field(self, field: str) -> str:
         picked = getattr(self.ctx, "picked_account", None) or {}
@@ -2128,6 +2684,10 @@ class AgentExecutor:
         return True
 
     def _build_report(self, overall, started_at, started_ts, blocked_reason, decline_reason, failure_category="") -> RunReport:
+        if overall == "pass" and self._expect_has_gap():
+            overall = "unverifiable"
+            failure_category = "expect_unverifiable"
+            decline_reason = decline_reason or "无法验证"
         counts = {EventStatus.PASS: 0, EventStatus.FAIL: 0, EventStatus.SKIPPED: 0,
                   EventStatus.BLOCKED: 0, EventStatus.DECLINED: 0}
         for r in self.results:
@@ -2145,11 +2705,15 @@ class AgentExecutor:
             decline_reason=decline_reason, blocked_reason=blocked_reason,
         )
         # 统一失败分类（extra="allow"）：success|goal_unreachable|execution_error|budget_exhausted|needs_human|device_unhealthy
-        report.failure_category = failure_category or ("success" if overall == "pass" else "")
+        report.failure_category = failure_category or (
+            "success" if overall == "pass" else ("expect_unverifiable" if overall == "unverifiable" else "")
+        )
         # 环境干预可见化：这次跑得干净不干净，是几个数字而不是埋在 wait 里
         report.env_interventions = self._recovery_rounds
         report.recovery_hits = list(self._recovery_hits)
         report.failure_label = _CATEGORY_LABEL.get(report.failure_category, "")
+        if self._expect_codes:
+            report.expect_outcomes = {str(k): v for k, v in self._expect_codes.items()}
         fact = getattr(self.ctx, "session_fact", None) or {}
         if fact:
             report.session_fact = dict(fact)
@@ -2178,11 +2742,9 @@ def run_agent_case(
     """端到端跑一条 case（agent 模式）：extract_goal → AgentExecutor.run。"""
     opts = options or AgentOptions()
     case_steps = count_case_steps(case_spec)
-    opts = replace(opts, max_steps=compute_decision_budget(case_spec, opts))
     nested = case_needs_nested_publish(case_spec)
-    SLog.i(TAG, f"[{run_id}] decision budget={opts.max_steps} "
-                f"(case_steps={case_steps} × {opts.steps_per_case_step}, "
-                f"wait 不计入, nested_publish={nested}, cap {opts.min_steps}-{opts.max_steps_cap})")
+    SLog.i(TAG, f"[{run_id}] wall_limit={opts.max_case_wall_sec}s "
+                f"(case_steps={case_steps}, nested_publish={nested})")
 
     goal = planner.extract_goal(case_spec, run_context=run_context, provider_id=provider_id)
     if not nested:
@@ -2197,11 +2759,16 @@ def run_agent_case(
         case_name=case_spec.name or "",
         case_steps_text=case_steps_text(case_spec),
         nested_publish=nested,
+        seq_nodes=build_seq_nodes(case_spec, goal),
     )
     report = ex.run()
 
     # 成功轨迹仍落盘，暂不注入 decide（上次路径占 token，且尚未作为产品能力使用）
-    if report.overall_status == "pass":
+    gap_outcomes = any(
+        "UNVERIFIABLE" in str(v) or "UNKNOWN" in str(v)
+        for v in (getattr(report, "expect_outcomes", None) or {}).values()
+    )
+    if report.overall_status == "pass" and not gap_outcomes:
         from server.services.regression import agent_memory
 
         device_sig = getattr(run_context, "device_signature", "") or ""

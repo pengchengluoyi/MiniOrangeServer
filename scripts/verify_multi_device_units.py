@@ -104,15 +104,24 @@ def test_mixed_platform_helpers() -> None:
     check("android 包名", target_id_from_snapshot(snap, "android"), "com.example.android")
     check("ios bundle", target_id_from_snapshot(snap, "ios"), "com.example.ios")
     check("缺 ios 不回落到安卓包", target_id_from_snapshot({"android": {"package": "com.a"}}, "ios"), "")
+    check(
+        "web 取 base_url",
+        target_id_from_snapshot({"web": {"base_url": "https://admin.example.com"}}, "web"),
+        "https://admin.example.com",
+    )
+    check("缺 web 不回落到安卓包", target_id_from_snapshot({"android": {"package": "com.a"}}, "web"), "")
 
     check("任务全安卓", _task_platform_of(["android", "android"]), "android")
     check("任务混选", _task_platform_of(["android", "ios"]), "mixed")
     check("任务全 iOS", _task_platform_of(["ios", "ios"]), "ios")
+    check("任务全 Web", _task_platform_of(["web", "web"]), "web")
+    check("安卓+Web 混选", _task_platform_of(["android", "web"]), "mixed")
 
     check("device_type=android 不被 platform=ios 带偏", _is_ios_target("PIXEL8", "ios", "android"), False)
     check("真机 UDID 仍是 iOS", _is_ios_target("00008140-001879181139801C", "android", ""), True)
     check("kind: iphone", device_platform_kind("iphone"), "ios")
     check("kind: pixel", device_platform_kind("pixel 8"), "android")
+    check("kind: web-local", device_platform_kind("web", sn="web-local"), "web")
 
     run_doc = {
         "platform": "mixed",

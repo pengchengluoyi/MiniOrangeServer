@@ -395,10 +395,7 @@ def run_case(
     del baseline, options, use_persisted_baseline, app_cache_cleared, execution_mode
     from server.services.regression.agent_executor import run_agent_case
 
-    flags = run_context.connectivity_flags if run_context else {}
-    has_channel = bool(
-        flags.get("adb") or flags.get("remote") or flags.get("ios_wda")
-    )
+    has_channel = bool(run_context and run_context.has_control_channel)
     if not has_channel:
         SLog.e(TAG, f"[{run_id}] agent refused: no control channel case={case_spec.case_id}")
         return RunReport(
@@ -406,7 +403,9 @@ def run_case(
             case_id=case_spec.case_id,
             sn=getattr(run_context, "sn", "") or "",
             overall_status="fail",
-            decline_reason="无可用执行通道（adb / remote / ios_wda）",
+            decline_reason="无可用执行通道（adb / remote / ios_wda / playwright）",
+            failure_category="execution_error",
+            failure_label="执行期-引擎故障",
         )
 
     agent_router = router or CapabilityRouter(run_context)

@@ -3,7 +3,7 @@ display_name: 元素拖拽
 event_kind: swipe_element_to_element
 category: ui_interaction
 description: 把一个元素拖拽到另一个元素（如调整列表顺序、拖到回收站）
-platforms: [android, ios]
+platforms: [android, ios, web]
 trigger_phrases: [拖动, 拖拽, 拖到, drag]
 needs_vlm: true
 
@@ -41,6 +41,13 @@ implementations:
     needs_vlm: true
     locate_prompt: LOCATE_VISION
     cost: 6
+
+  - id: playwright_drag
+    display_name: Playwright 拖拽
+    executor: playwright
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: false
+    cost: 3
 
 ui:
   shown_in_settings: true
