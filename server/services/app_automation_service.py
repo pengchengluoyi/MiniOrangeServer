@@ -314,6 +314,13 @@ def save_automation_config(app, config: Dict[str, Any]) -> Dict[str, Any]:
     env["automation"] = current
     app.env = env
     flag_modified(app, "env")
+    if "qa_process" in config:
+        try:
+            from server.services.knowledge_facts import ingest_app_docs
+
+            ingest_app_docs(str(getattr(app, "id", "") or ""), qp=current.get("qa_process") or {})
+        except Exception as exc:
+            SLog.w(TAG, f"ingest_app_docs skipped: {exc}")
     return current
 
 

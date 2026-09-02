@@ -1016,7 +1016,10 @@ def _load_knowledge_from_yaml() -> List[Dict[str, Any]]:
 
 _KNOWLEDGE_RUNTIME_KEYS = ("score", "match_pct", "used", "skip_reason")
 _KNOWLEDGE_REVIEW_STATUSES = ("pending", "approved", "rejected")
-_KNOWLEDGE_SOURCES = ("manual", "case_run", "task_run")
+_KNOWLEDGE_SOURCES = (
+    "manual", "case_run", "task_run", "requirement", "release", "doc",
+    "trace", "login_learn",
+)
 PLAYBOOK_KNOWLEDGE_CATEGORY = "应用基础逻辑"
 # 原「应用基础逻辑」页上的字段，作为知识库默认槽位（标题固定，正文可空）。
 PLAYBOOK_KNOWLEDGE_SLOTS: Tuple[Dict[str, Any], ...] = (
@@ -1163,7 +1166,7 @@ def _write_knowledge_yaml(row: Dict[str, Any]) -> None:
     )
 
 
-def upsert_knowledge_item(item: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_knowledge_item(item: Dict[str, Any], *, skip_extract: bool = False) -> Dict[str, Any]:
     """新建或更新单条知识条目，不影响其他条目。"""
     title = (item.get("title") or "").strip()
     if not title:
@@ -1208,6 +1211,13 @@ def upsert_knowledge_item(item: Dict[str, Any]) -> Dict[str, Any]:
     row = _normalize_knowledge_row(merged, require_body=False)
     if not row:
         raise ValueError("标题不能为空")
+    try:
+        from server.services.knowledge_situation import enrich_item
+
+        row = enrich_item(row, previous=existing, incoming=item, skip_extract=skip_extract)
+        row = _normalize_knowledge_row(row, require_body=False) or row
+    except Exception as exc:
+        SLog.w(TAG, f"knowledge situation enrich skipped: {exc}")
 
     # 1. 写 yaml（首选持久化路径）
     try:
@@ -1283,7 +1293,14 @@ def review_knowledge_item(kid: str, *, action: str, updates: Optional[Dict[str, 
     payload["review_method"] = "human"
     payload["review_decision"] = "approve"
     payload["reviewed_by"] = "human"
-    return upsert_knowledge_item(payload)
+    row = upsert_knowledge_item(payload)
+    try:
+        from server.services.knowledge_facts import on_fact_approved
+
+        return on_fact_approved(row)
+    except Exception as exc:
+        SLog.w(TAG, f"on_fact_approved skipped: {exc}")
+        return row
 
 
 # 原始分 25 视为 100%；低于 40% 不注入 prompt，避免低相关知识误导模型。
@@ -1296,6 +1313,10 @@ _KNOWLEDGE_CORE_KEYS = (
     "playbook_slot", "question", "expert_note",
     "review_method", "review_decision", "reviewed_by", "review_reason",
     "review_confidence",
+    "facet", "situation", "bind", "situation_fp",
+    "proposal_kind", "conflicts_with", "superseded_by",
+    "valid_from", "invalid_from", "source_ref", "aligned_count",
+    "expert_aligned", "expert_conflicts",
     *_KNOWLEDGE_RUNTIME_KEYS,
 )
 
@@ -1416,6 +1437,12 @@ def knowledge_body_text(item: Dict[str, Any]) -> str:
 def knowledge_prompt_snippet(item: Dict[str, Any], *, max_chars: int = 1200) -> str:
     title = str(item.get("title") or "").strip() or str(item.get("id") or "")
     body = knowledge_body_text(item).strip()
+    bind = item.get("bind") if isinstance(item.get("bind"), dict) else {}
+    slot = str(bind.get("slot") or "").strip()
+    value = str(bind.get("value") or "").strip()
+    if slot and value:
+        bind_line = f"绑定 {slot}={value}，当前屏在问对应字段时直接填，不要问人。"
+        body = f"{bind_line}\n{body}".strip() if body else bind_line
     if len(body) > max_chars:
         body = body[:max_chars].rstrip() + "…"
     return f"「{title}」: {body}" if body else f"「{title}」"

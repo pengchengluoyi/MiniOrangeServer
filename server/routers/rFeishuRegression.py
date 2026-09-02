@@ -130,8 +130,6 @@ def parse_url(body: Dict[str, Any]):
 def run_feishu_regression(body: FeishuRunRequest, db: Session = Depends(get_db)):
     """兼容旧入口：执行改走 CaseRunner，用例来自流程草稿。"""
     app = _get_app(db, body.app_id)
-    if not body.sn:
-        raise HTTPException(status_code=400, detail="请选择执行设备")
     try:
         from server.services.regression import case_runner as cr
 

@@ -65,8 +65,14 @@ def _classify_line(line: str) -> Tuple[str, str]:
         return "check_logged_in", "after_launch"
     if re.search(r"未登录|游客|未登陆", t):
         return "check_not_logged_in", "after_launch"
+    if re.search(r"测试环境|预发环境|正式环境|生产环境|开发环境|切换环境|客户端环境", t):
+        return "check_env", "after_launch"
     if re.search(r"保留权限(询问|弹窗|框)?|不要(预)?授权|拒绝权限|测(试)?权限拒绝|keep_permission", t, re.I):
         return "keep_permission_prompt", "before_launch"
+    if re.search(r"当前已打开|已打开\s*(造好物|.+)?\s*(App|APP|应用)|前台(是|为|应用)|应用在前台|目标应用已打开", t):
+        return "check_app_foreground", "before_launch"
+    if re.search(r"客户端版本|应用版本|app版本|versionName|版本\s*[≥>=≤<=]", t, re.I):
+        return "check_app_version", "before_launch"
     return "unknown", "before_launch"
 
 
@@ -190,6 +196,60 @@ def _check_wechat(engine, *, must_exist: bool) -> Tuple[bool, str]:
     return (True, "未安装微信") if not installed else (False, "已安装微信，与「未装微信」前置不符")
 
 
+def _engine_shell(engine, cmd: str) -> str:
+    if engine is None:
+        return ""
+    try:
+        return str(engine.shell(cmd) or "")
+    except Exception:
+        return ""
+
+
+def _check_app_version(engine, package: str, line: str) -> Tuple[bool, str, Dict[str, Any]]:
+    from server.services.runtime.app_query import (
+        compare_version,
+        parse_package_version,
+        parse_version_constraint,
+        version_dump_shell,
+    )
+
+    if not package:
+        return False, "未配置应用包名，无法读版本", {}
+    raw = _engine_shell(engine, version_dump_shell(package))
+    parsed = parse_package_version(raw)
+    name = str(parsed.get("version_name") or "").strip()
+    meta: Dict[str, Any] = {"package": package, **parsed}
+    if not name:
+        return False, f"dumpsys 读不到 {package} 的 versionName", meta
+    constraint = parse_version_constraint(line)
+    if not constraint:
+        return True, f"{package} {name}", meta
+    op, expected = constraint["op"], constraint["expected"]
+    ok = compare_version(name, op, expected)
+    msg = f"{package} {name} {op} {expected}"
+    if re.search(r"测试服|预发|正式服|生产", line or ""):
+        msg += "；环境标签不从 adb 读取"
+    if not ok:
+        return False, f"版本不满足：{msg}", meta
+    return True, msg, meta
+
+
+def _check_app_foreground(engine, package: str) -> Tuple[bool, str, Dict[str, Any]]:
+    from server.services.runtime.app_query import FOREGROUND_SHELL, parse_foreground
+
+    raw = _engine_shell(engine, FOREGROUND_SHELL)
+    parsed = parse_foreground(raw)
+    fg = str(parsed.get("package") or "").strip()
+    meta: Dict[str, Any] = {**parsed, "expected_package": package}
+    if not fg:
+        return True, "读不到前台应用，开场启动后再看时间线", meta
+    if package and fg == package:
+        return True, f"前台已是 {fg}", meta
+    if package:
+        return True, f"开场前前台是 {fg}，不是 {package}；开场启动后以时间线为准", meta
+    return True, f"前台 {fg}", meta
+
+
 def _clear_app_data(engine, package: str) -> Tuple[bool, str]:
     if not package:
         return False, "未配置应用包名，无法清除缓存"
@@ -291,6 +351,7 @@ def _check_logged_in(
     expect_logged_in: bool,
     package: str = "",
 ) -> Tuple[bool, str]:
+    """底栏 / 界面树启发式。会话闸门不再调用；仅给历史校验脚本用。"""
     from server.services.local.navigation.page_navigation_service import _screen_is_login_home
     from server.services.shared.page_context.page_context_service import _identify_page_by_screen_keywords
     from server.services.ai import app_profile as ap
@@ -368,6 +429,17 @@ def _run_one(
             entry["gap"] = True
             entry["msg"] = f"前置引擎无法执行（{kind}）"
             return _stamp_precondition_item(entry)
+        if kind == "web_config":
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["msg"] = "后台开关由用例步骤/预期验证，不单独查后台"
+            return _stamp_precondition_item(entry)
+        if kind in ("check_app_version", "check_app_foreground") and (ios_plat or web_plat):
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["gap"] = True
+            entry["msg"] = "网页通道不读安装包版本/前台" if web_plat else "iOS 尚未接 dumpsys 读版本/前台"
+            return _stamp_precondition_item(entry)
         if web_plat and kind == "clear_cache":
             entry["ok"] = True
             entry["msg"] = "网页每次新开浏览器上下文，无持久化缓存"
@@ -378,15 +450,15 @@ def _run_one(
             entry["gap"] = True
             entry["msg"] = f"网页通道不检查 {kind}"
             return _stamp_precondition_item(entry)
-        if web_plat and kind == "check_not_logged_in":
-            entry["ok"] = True
-            entry["msg"] = "新浏览器上下文视为未登录"
-            return _stamp_precondition_item(entry)
-        if web_plat and kind == "check_logged_in":
+        if kind in ("check_logged_in", "check_not_logged_in"):
             entry["ok"] = True
             entry["skipped"] = True
-            entry["gap"] = True
-            entry["msg"] = "网页「已登录」不在开跑前检查，由用例步骤完成登录"
+            entry["msg"] = "登录态由开场看图与本应用登录知识对齐，不按界面树/底栏/本地存储判定"
+            return _stamp_precondition_item(entry)
+        if kind == "check_env":
+            entry["ok"] = True
+            entry["skipped"] = True
+            entry["msg"] = "客户端环境由开跑前环境闸门对齐"
             return _stamp_precondition_item(entry)
         if kind == "unknown":
             entry["ok"] = True
@@ -412,13 +484,15 @@ def _run_one(
             ok, msg = _check_platform("ios", platform)
         elif kind == "check_android_device":
             ok, msg = _check_platform("android", platform)
-        elif kind == "check_logged_in":
-            ok, msg = _check_logged_in(engine, expect_logged_in=True, package=package)
-        elif kind == "check_not_logged_in":
-            ok, msg = _check_logged_in(engine, expect_logged_in=False, package=package)
         elif kind == "keep_permission_prompt":
             ok, msg = True, "已标记保留权限询问，预置层不 pm grant / 不自动点允许"
             entry["skipped"] = True
+        elif kind == "check_app_version":
+            ok, msg, meta = _check_app_version(engine, package, line)
+            entry.update(meta)
+        elif kind == "check_app_foreground":
+            ok, msg, meta = _check_app_foreground(engine, package)
+            entry.update(meta)
         else:
             ok, msg = True, f"前置未命中引擎库: {line}"
             entry["skipped"] = True
@@ -439,7 +513,18 @@ def precondition_cleared_app_cache(items: List[Dict[str, Any]]) -> bool:
     )
 
 
-def has_precondition_phase(precondition_raw: str, phase: str) -> bool:
+def has_precondition_phase(
+    precondition_raw: str,
+    phase: str,
+    scene: Optional[dict] = None,
+) -> bool:
+    if scene:
+        from server.services.runtime.session_gate import clamp_case_scene
+
+        return any(
+            str(it.get("phase") or "") == phase
+            for it in (clamp_case_scene(scene).get("prep_items") or [])
+        )
     try:
         from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
 
@@ -449,11 +534,11 @@ def has_precondition_phase(precondition_raw: str, phase: str) -> bool:
         return False
     except Exception:
         pass
-    for line in split_precondition_lines(precondition_raw):
-        _, line_phase = _classify_line(line)
-        if line_phase == phase:
-            return True
-    return False
+    from server.services.runtime.session_gate import split_precondition_text
+
+    if phase != "before_launch":
+        return False
+    return bool(split_precondition_text(precondition_raw))
 
 
 def run_preconditions(
@@ -463,30 +548,37 @@ def run_preconditions(
     platform: str,
     package: str,
     phase: str,
+    scene: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """
     执行指定阶段的前置条件。
     phase: before_launch（清缓存/SIM/微信/设备类型）| after_launch（已登录等）
+    有 CaseScene 时只读 prep_items，不再扫关键字。
     """
     tasks: List[Tuple[str, str]] = []
-    try:
-        from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
+    if scene:
+        from server.services.runtime.session_gate import clamp_case_scene
 
-        for item in parse_precondition_items(precondition_raw):
-            if item.get("phase") != phase:
+        for item in clamp_case_scene(scene).get("prep_items") or []:
+            if str(item.get("phase") or "") != phase:
                 continue
-            kind = str(item.get("kind") or "").strip() or _classify_line(item.get("text") or "")[0]
-            if kind == "unknown":
-                kind = _classify_line(item.get("text") or "")[0]
-            tasks.append((kind, item.get("text") or ""))
-    except Exception:
-        tasks = []
-    if not tasks:
-        for line in split_precondition_lines(precondition_raw):
-            kind, line_phase = _classify_line(line)
-            if line_phase != phase:
-                continue
-            tasks.append((kind, line))
+            tasks.append((str(item.get("kind") or "unknown"), str(item.get("text") or "")))
+    else:
+        try:
+            from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
+
+            for item in parse_precondition_items(precondition_raw):
+                if item.get("phase") != phase:
+                    continue
+                tasks.append((str(item.get("kind") or "unknown"), item.get("text") or ""))
+        except Exception:
+            tasks = []
+        if not tasks:
+            from server.services.runtime.session_gate import split_precondition_text
+
+            if phase == "before_launch":
+                for line in split_precondition_text(precondition_raw):
+                    tasks.append(("unknown", line))
 
     if not tasks:
         return {"ok": True, "items": [], "msg": ""}
@@ -504,9 +596,9 @@ def run_preconditions(
     from server.services.runtime.playwright_hub import is_web_slot
 
     web = is_web_slot(sn, plat) or plat in ("web", "browser", "playwright")
-    no_engine = {"check_ios_device", "check_android_device", "unknown"} | set(UNSUPPORTED_PREP_KINDS)
+    no_engine = {"check_ios_device", "check_android_device", "unknown", "web_config"} | set(UNSUPPORTED_PREP_KINDS)
     if ios:
-        no_engine = set(no_engine) | {"check_sim"}
+        no_engine = set(no_engine) | {"check_sim", "check_app_version", "check_app_foreground"}
     if web:
         no_engine = set(no_engine) | {
             "clear_cache",
@@ -516,6 +608,8 @@ def run_preconditions(
             "check_logged_in",
             "check_not_logged_in",
             "keep_permission_prompt",
+            "check_app_version",
+            "check_app_foreground",
         }
 
     engine = None

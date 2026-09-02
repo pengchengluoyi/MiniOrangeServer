@@ -1,0 +1,33 @@
+id: get_foreground_app
+display_name: 读取前台应用
+event_kind: get_foreground_app
+category: system
+description: |
+  用 dumpsys 读当前前台包名 / Activity。
+  前置写「当前已打开某某 App」时走这条，不要看图猜是不是目标应用。
+platforms: [android]
+trigger_phrases: [前台应用, 当前应用, 已打开 App, 在前台]
+needs_vlm: false
+
+implementations:
+  - id: adb_dumpsys_foreground
+    display_name: ADB dumpsys activity
+    executor: adb
+    requires_caps: [read_system_data]
+    needs_vlm: false
+    low_level:
+      shell: "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'"
+    cost: 1
+
+  - id: remote_dumpsys_foreground
+    display_name: Remote dumpsys activity
+    executor: remote
+    requires_caps: [read_system_data]
+    needs_vlm: false
+    low_level:
+      shell: "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity'"
+    cost: 2
+
+ui:
+  shown_in_settings: true
+  examples: ["当前已打开造好物 App"]

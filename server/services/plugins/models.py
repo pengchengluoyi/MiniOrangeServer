@@ -54,6 +54,8 @@ class Capability(BaseModel):
     #   system L0 系统层处置 agent 可见
     # 缺省两者都可见（向后兼容：老 yaml 不写这个字段行为不变）。
     visible_to: list[str] = Field(default_factory=lambda: ["case", "system"])
+    # 可选：OpenAI tools 的参数表。缺省时 tool_schema.PARAM_DEFAULTS 补。
+    params: list[dict[str, Any]] = Field(default_factory=list)
 
     # ↓ 加载器填充，不写入 yaml
     source_path: str = ""

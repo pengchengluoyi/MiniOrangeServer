@@ -45,6 +45,46 @@ class CaseSpec(BaseModel):
     raw_row: dict[str, Any] = Field(default_factory=dict)
 
 
+PREP_KIND_VALUES = (
+    "clear_cache",
+    "check_sim",
+    "check_wechat",
+    "check_no_wechat",
+    "check_ios_device",
+    "check_android_device",
+    "check_logged_in",
+    "check_not_logged_in",
+    "keep_permission_prompt",
+    "check_app_foreground",
+    "check_app_version",
+    "web_config",
+    "remote_config",
+    "backend_data",
+    "sms_live",
+    "external_channel",
+    "device_mock",
+    "unknown",
+)
+DEVICE_NEED_VALUES = ("app", "web", "app_web", "ab_pair")
+SCENE_PLATFORM_VALUES = ("android", "ios", "web", "any")
+
+
+class CaseScene(BaseModel):
+    """开跑前对用例原文的场景理解。只出枚举，不看图、不写覆盖码。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    session_prep: Literal["relogin", "logout", "skip"] = "skip"
+    required_session: Literal["logged_in", "guest", "any"] = "any"
+    auth_under_test: bool = True
+    device_need: Literal["app", "web", "app_web", "ab_pair"] = "app"
+    platform: Literal["android", "ios", "web", "any"] = "android"
+    prep_items: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+    how: Literal["llm", "clamp", "fallback"] = "fallback"
+    parse_warnings: list[str] = Field(default_factory=list)
+
+
 # ============== Baseline（首次执行后存到 case memory，复用时回灌） ==============
 
 
@@ -245,6 +285,7 @@ class EventResult(BaseModel):
     seq: int
     capability_id: str
     event_kind: str = ""
+    lane: str = Field("", description="prep | step | expect：这条事件服务用例哪一列")
     status: EventStatus
     executor_used: str = Field("", description="实际跑这事件的 executor id（adb / remote / vlm / hitl / ai_persona）")
     elapsed_ms: int = 0

@@ -24,6 +24,7 @@ _SUPPORTED_CAPS: set[str] = {
     "press_key",
     "wait_ms",
     "tap_element",
+    "multi_tap",
     "long_press_element",
     "input_text",
     "swipe_direction",
@@ -83,6 +84,8 @@ class PlaywrightExecutor:
                 )
             if cap == "tap_element":
                 return self._tap(event, page, started_at, t0)
+            if cap == "multi_tap":
+                return self._multi_tap(event, page, started_at, t0)
             if cap == "long_press_element":
                 return self._long_press(event, page, started_at, t0)
             if cap == "input_text":
@@ -136,6 +139,23 @@ class PlaywrightExecutor:
         page.mouse.click(x, y)
         label = f"「{name[:40]}」({x},{y})" if name else f"({x},{y})"
         return self._ok(event, started_at, t0, f"点击 {label}")
+
+    def _multi_tap(self, event: PlanEvent, page, started_at: str, t0: float) -> EventResult:
+        from server.services.regression.executors.multi_tap import parse_multi_tap
+
+        parsed, err = parse_multi_tap(event.params)
+        if err:
+            return self._fail(event, started_at, t0, err)
+        _, _, count, interval = parsed
+        try:
+            x, y = self._xy(event, page)
+        except ValueError:
+            return self._fail(event, started_at, t0, "multi_tap 缺坐标")
+        for i in range(count):
+            page.mouse.click(x, y)
+            if i + 1 < count:
+                time.sleep(interval / 1000.0)
+        return self._ok(event, started_at, t0, f"连点 ({x},{y}) ×{count} 间隔{interval}ms")
 
     def _long_press(self, event: PlanEvent, page, started_at: str, t0: float) -> EventResult:
         name = _name_from_params(event.params or {})

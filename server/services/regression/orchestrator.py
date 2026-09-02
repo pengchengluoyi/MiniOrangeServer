@@ -392,7 +392,10 @@ def run_case(
     旧 Plan 循环（generate_overview + Orchestrator）已停用，不再按
     execution_mode / adb / claw 分叉。execution_mode 参数仅兼容旧调用方，忽略。
     """
-    del baseline, options, use_persisted_baseline, app_cache_cleared, execution_mode
+    del baseline, options, use_persisted_baseline, execution_mode
+    if app_cache_cleared:
+        run_context.session_dirty = True
+        run_context.task_session = {}
     from server.services.regression.agent_executor import run_agent_case
 
     has_channel = bool(run_context and run_context.has_control_channel)

@@ -1,0 +1,48 @@
+id: multi_tap
+display_name: 连点
+event_kind: multi_tap
+category: ui_interaction
+description: |
+  连点同一坐标（调试面板/版本号彩蛋）。必须一次发出，禁止拆成多次 tap_element。
+platforms: [android, ios, web]
+visible_to: [case, system]
+trigger_phrases: [连点, 连按, 连点头像, 连点版本号]
+needs_vlm: true
+params:
+  - { name: x, type: integer, required: true, description: "横向千分比 0-1000", minimum: 0, maximum: 1000 }
+  - { name: y, type: integer, required: true, description: "纵向千分比 0-1000", minimum: 0, maximum: 1000 }
+  - { name: count, type: integer, required: false, description: "连点次数，默认 6", minimum: 2, maximum: 12 }
+  - { name: interval_ms, type: integer, required: false, description: "间隔毫秒，默认 80", minimum: 40, maximum: 400 }
+
+implementations:
+  - id: adb_multi_tap
+    display_name: ADB 连点
+    executor: adb
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    cost: 4
+
+  - id: remote_multi_tap
+    display_name: Remote 连点
+    executor: remote
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    cost: 5
+
+  - id: ios_wda_multi_tap
+    display_name: WDA 连点
+    executor: ios_wda
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: true
+    cost: 4
+
+  - id: playwright_multi_tap
+    display_name: Playwright 连点
+    executor: playwright
+    requires_caps: [ui_native_input, ui_screenshot]
+    needs_vlm: false
+    cost: 3
+
+ui:
+  shown_in_settings: true
+  examples: ["连点头像 6 次打开调试面板"]

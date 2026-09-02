@@ -37,6 +37,14 @@ _PRECONDITION_KINDS = frozenset(
         "check_logged_in",
         "check_not_logged_in",
         "keep_permission_prompt",
+        "check_app_version",
+        "check_app_foreground",
+        "web_config",
+        "remote_config",
+        "backend_data",
+        "sms_live",
+        "external_channel",
+        "device_mock",
         "unknown",
     }
 )
@@ -228,6 +236,10 @@ def _classify_precondition_rules(line: str) -> Tuple[str, str]:
         return "check_not_logged_in", "after_launch"
     if re.search(r"保留权限(询问|弹窗|框)?|不要(预)?授权|拒绝权限|测(试)?权限拒绝|keep_permission", t, re.I):
         return "keep_permission_prompt", "before_launch"
+    if re.search(r"当前已打开|已打开\s*(造好物|.+)?\s*(App|APP|应用)|前台(是|为|应用)|应用在前台|目标应用已打开", t):
+        return "check_app_foreground", "before_launch"
+    if re.search(r"客户端版本|应用版本|app版本|versionName|版本\s*[≥>=≤<=]", t, re.I):
+        return "check_app_version", "before_launch"
     return "unknown", "before_launch"
 
 
@@ -242,11 +254,13 @@ def _llm_parse_precondition_items(text: str) -> Optional[List[Dict[str, Any]]]:
         "1. 每条含 text（原文要点）、kind、phase。\n"
         "2. kind 取值：clear_cache|check_sim|check_wechat|check_no_wechat|"
         "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|"
-        "keep_permission_prompt|unknown。\n"
-        "3. phase：清缓存/SIM/微信/设备类型/保留权限询问 → before_launch；已登录/未登录 → after_launch。\n"
+        "keep_permission_prompt|check_app_version|check_app_foreground|web_config|"
+        "remote_config|backend_data|sms_live|external_channel|device_mock|unknown。\n"
+        "3. phase：清缓存/SIM/微信/设备类型/保留权限询问/客户端版本/已打开 App → before_launch；已登录/未登录 → after_launch。\n"
         "4. 含「已登录」必须用 check_logged_in，含「未登录/游客」必须用 check_not_logged_in；后面跟账号标签也不改成 unknown。\n"
-        "5. 无法自动化的环境描述才用 kind=unknown（版本号、后台开关、运营配置等）。\n"
-        "6. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
+        "5. 含客户端版本 / versionName 用 check_app_version；含当前已打开 App / 前台应用用 check_app_foreground。后台开关仍不算这两类。\n"
+        "6. 无法自动化的环境描述才用 kind=unknown（运营配置、远程开关等）。\n"
+        "7. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
     )
     data = _llm_chat_json(system=system, user_payload={"precondition": raw}, max_tokens=500)
     if not data:
@@ -263,13 +277,13 @@ def _llm_parse_precondition_items(text: str) -> Optional[List[Dict[str, Any]]]:
         if not text_line:
             continue
         kind = str(row.get("kind") or "unknown").strip().lower()
-        rk, rp = _classify_precondition_rules(text_line)
-        if kind not in _PRECONDITION_KINDS or kind == "unknown":
-            if rk != "unknown":
-                kind = rk
+        if kind not in _PRECONDITION_KINDS:
+            kind = "unknown"
         phase = str(row.get("phase") or "").strip().lower()
         if phase not in ("before_launch", "after_launch"):
-            phase = rp
+            from server.services.runtime.session_gate import prep_kind_phase
+
+            phase = prep_kind_phase(kind)
         try:
             num = int(row.get("num") or i + 1)
         except (TypeError, ValueError):
@@ -303,19 +317,16 @@ def parse_precondition_items(
     if use_llm and case_text_llm_enabled() and _llm_configured():
         rows = _llm_parse_precondition_items(raw)
     if not rows:
-        parts = re.split(r"(?:\n|^)\s*\d+[.、．)\）]\s*", raw, flags=re.M)
-        lines = [p.strip() for p in parts if p and p.strip()]
-        if len(lines) <= 1:
-            lines = [raw]
         rows = []
-        for i, line in enumerate(lines):
-            kind, phase = _classify_precondition_rules(line)
+        from server.services.runtime.session_gate import split_precondition_text, prep_kind_phase
+
+        for i, line in enumerate(split_precondition_text(raw) or [raw]):
             rows.append(
                 {
                     "num": i + 1,
                     "text": line,
-                    "kind": kind,
-                    "phase": phase,
+                    "kind": "unknown",
+                    "phase": prep_kind_phase("unknown"),
                     "parse_method": "rules",
                 }
             )

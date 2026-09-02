@@ -44,7 +44,7 @@ from server.core.database import get_db
 from server.models.project import App
 from server.services.regression import case_runner as cr
 from server.services.regression import task_store
-from server.services.runtime.qa_process_lock import blocking_reservation, reservations_by_sn
+from server.services.runtime.qa_process_lock import blocking_reservation
 from script.log import SLog
 
 router = APIRouter(prefix="/case-runner", tags=["Case Runner"])
@@ -126,72 +126,72 @@ def run_cases(body: RunRequest, db: Session = Depends(get_db)):
     """
     app = _get_app(db, body.app_id)
     device_sns = _normalize_sns(body.sn, body.sns)
-    if not device_sns:
-        raise HTTPException(status_code=400, detail="请选择执行设备")
 
     cov = str(body.coverage or "").strip().lower()
     if cov not in ("", "once", "per_device"):
         raise HTTPException(status_code=400, detail="coverage 必须是 once 或 per_device")
-    if not cov or len(device_sns) == 1:
+    if device_sns and (not cov or len(device_sns) == 1):
         cov = "once"
 
     from server.models.mDevice import MDevice
     from server.services.runtime.run_context import device_platform_kind
 
-    rows = db.query(MDevice).filter(MDevice.sn.in_(device_sns)).all()
-    by_sn = {str(r.sn): r for r in rows}
     platforms_by_sn: dict[str, str] = {}
-    for sn in device_sns:
-        row = by_sn.get(sn)
-        platforms_by_sn[sn] = device_platform_kind(
-            getattr(row, "device_type", "") if row else "",
-            getattr(row, "channels", None) if row else None,
-            sn=sn,
+    platform = (body.platform or "android").lower()
+    if device_sns:
+        rows = db.query(MDevice).filter(MDevice.sn.in_(device_sns)).all()
+        by_sn = {str(r.sn): r for r in rows}
+        for sn in device_sns:
+            row = by_sn.get(sn)
+            platforms_by_sn[sn] = device_platform_kind(
+                getattr(row, "device_type", "") if row else "",
+                getattr(row, "channels", None) if row else None,
+                sn=sn,
+            )
+        platform = (
+            platforms_by_sn[device_sns[0]]
+            if len(set(platforms_by_sn.values())) == 1
+            else "mixed"
         )
-    platform = (
-        platforms_by_sn[device_sns[0]]
-        if len(set(platforms_by_sn.values())) == 1
-        else "mixed"
-    )
 
-    for sn in device_sns:
-        busy_task_id = task_store.busy_task_for_sn(sn)
-        if busy_task_id:
+        for sn in device_sns:
+            busy_task_id = task_store.busy_task_for_sn(sn)
+            if busy_task_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "device busy",
+                        "busy_task_id": busy_task_id,
+                        "sn": sn,
+                    },
+                )
+
+        reserved = blocking_reservation(
+            db,
+            device_sns,
+            slot_id=body.slot_id or "",
+            requirement_id=body.requirement_id or "",
+            release_id=body.release_id or "",
+            run_type=body.run_type or "",
+        )
+        if reserved:
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": "device busy",
-                    "busy_task_id": busy_task_id,
-                    "sn": sn,
+                    "message": "device reserved",
+                    "reason": "schedule",
+                    "sn": reserved.get("sn") or "",
+                    "slot_id": reserved.get("slot_id") or "",
+                    "reserved_title": reserved.get("title") or reserved.get("app_name") or "",
+                    "reserved_until": reserved.get("reserved_until") or "",
+                    "app_id": reserved.get("app_id") or "",
                 },
             )
-
-    reserved = blocking_reservation(
-        db,
-        device_sns,
-        slot_id=body.slot_id or "",
-        requirement_id=body.requirement_id or "",
-        release_id=body.release_id or "",
-        run_type=body.run_type or "",
-    )
-    if reserved:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "device reserved",
-                "reason": "schedule",
-                "sn": reserved.get("sn") or "",
-                "slot_id": reserved.get("slot_id") or "",
-                "reserved_title": reserved.get("title") or reserved.get("app_name") or "",
-                "reserved_until": reserved.get("reserved_until") or "",
-                "app_id": reserved.get("app_id") or "",
-            },
-        )
 
     try:
         snapshot = cr.run_cases(
             app,
-            sn=device_sns[0],
+            sn=device_sns[0] if device_sns else "",
             sns=device_sns,
             coverage=cov,
             platform=platform,
@@ -374,7 +374,7 @@ def list_traces(
     return {"code": 200, "ok": True, "data": {"count": len(rows), "items": rows}}
 
 
-@router.get("/traces/{run_id}")
+@router.get("/traces/{run_id:path}")
 def get_trace_detail(run_id: str):
     """单条 trace 详情（含 plan_payload / event_results / run_context）。"""
     detail = cr.get_trace_detail(run_id)
@@ -422,65 +422,11 @@ def list_devices(only_online: bool = True, db: Session = Depends(get_db)):
     busy_task_id 非空表示该设备正被这条任务占用；reserved_slot_id 表示当前时刻
     已被某条测试排期锁住（跨应用）。下发前应禁用/提示。
     """
-    from server.models.mDevice import MDevice
-    from server.services.runtime.channels import channels_to_brief
+    from server.services.runtime.device_catalog import list_device_catalog
 
-    busy = task_store.busy_map()
-    reserved = reservations_by_sn(db)
-    items = []
     try:
-        q = db.query(MDevice)
-        if only_online:
-            q = q.filter(MDevice.status == "online")
-        for d in q.order_by(MDevice.sn).all():
-            hit = reserved.get(d.sn) or {}
-            items.append({
-                "sn": d.sn,
-                "model": d.model or "",
-                "device_type": d.device_type or "",
-                "type": d.device_type or "",
-                "os_version": d.os_version or "",
-                "resolution": d.resolution or "",
-                "role": d.role or "",
-                "status": d.status or "offline",
-                "channels": channels_to_brief(d.channels or {}),
-                "busy_task_id": busy.get(d.sn, ""),
-                "reserved_slot_id": hit.get("slot_id") or "",
-                "reserved_title": hit.get("title") or "",
-                "reserved_until": hit.get("reserved_until") or "",
-                "reserved_kind": hit.get("kind") or "",
-                "reserved_app_id": hit.get("app_id") or "",
-            })
+        items = list_device_catalog(db, only_online=only_online)
     except Exception as e:
         SLog.w(TAG, f"/devices failed: {e}")
-    from server.services.runtime.playwright_hub import WEB_SLOT_SN, is_web_slot, probe_playwright
-
-    if not any(is_web_slot(str(it.get("sn") or "")) for it in items):
-        state, meta = probe_playwright()
-        available = state in ("connected", "available")
-        if available or not only_online:
-            hit = reserved.get(WEB_SLOT_SN) or {}
-            items.insert(0, {
-                "sn": WEB_SLOT_SN,
-                "model": "本机浏览器",
-                "device_type": "web",
-                "type": "web",
-                "os_version": "",
-                "resolution": "1280x800",
-                "role": "",
-                "status": "online" if available else "offline",
-                "channels": {
-                    "playwright_state": state,
-                    "playwright_reason": (meta or {}).get("reason") or "",
-                    "remote_state": "not_applicable",
-                    "adb_state": "not_applicable",
-                    "ios_state": "not_applicable",
-                },
-                "busy_task_id": busy.get(WEB_SLOT_SN, ""),
-                "reserved_slot_id": hit.get("slot_id") or "",
-                "reserved_title": hit.get("title") or "",
-                "reserved_until": hit.get("reserved_until") or "",
-                "reserved_kind": hit.get("kind") or "",
-                "reserved_app_id": hit.get("app_id") or "",
-            })
+        items = []
     return {"code": 200, "ok": True, "data": {"count": len(items), "items": items}}

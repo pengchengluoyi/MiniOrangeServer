@@ -9,7 +9,6 @@ from script.log import SLog
 
 from server.services.ai.regression import prompts as P
 from server.services.ai.regression.llm_client import call_chat_text, resolve_regression_provider
-from server.services.system_settings_service import upsert_knowledge_item
 
 TAG = "KnowledgeCapture"
 _CATEGORIES = {"应用基础逻辑", "业务逻辑", "UI导航", "登录注册", "Tab切换", "交互规范", "其他"}
@@ -34,27 +33,18 @@ def _step_lines(events: list, *, limit: int = 8) -> str:
 
 
 def _fallback_items(*, failed: bool, case_id: str, name: str, summary: str) -> list[dict[str, Any]]:
-    if failed:
-        return [{
-            "title": f"失败处理：{case_id or name or '用例'}"[:48],
-            "category": "业务逻辑",
-            "tags": [case_id] if case_id else [],
-            "question": "这种情况该如何操作？请补充正确路径或需要等待/点击的控件。",
-            "content": (
-                f"【失败现象】{summary or '用例未通过'}\n"
-                f"【用例】{case_id} {name}\n"
-                "【请补充】当前界面下正确的操作方式（点击哪里、等待什么、如何判断成功）。"
-            ),
-        }]
+    if not failed:
+        return []
     return [{
-        "title": f"界面事实：{case_id or name or '用例'}"[:48],
+        "proposal_kind": "new_fact",
+        "title": f"待确认：{case_id or name or '用例'}"[:48],
         "category": "业务逻辑",
         "tags": [case_id] if case_id else [],
-        "question": "",
+        "question": "这种情况该如何操作？请补充正确路径或需要等待/点击的控件。",
         "content": (
-            f"【用例】{case_id} {name} 已通过。\n"
-            f"【摘要】{summary or '—'}\n"
-            "【请核对】本版本关键入口/文案/加载态是否仍准确，不准确请改后再审核。"
+            f"【失败现象】{summary or '用例未通过'}\n"
+            f"【用例】{case_id} {name}\n"
+            "【请补充】当前界面下正确的操作方式（点击哪里、等待什么、如何判断成功）。"
         ),
     }]
 
@@ -78,13 +68,25 @@ def _parse_items(raw: Any) -> list[dict[str, Any]]:
         if cat not in _CATEGORIES:
             cat = "其他"
         tags = [str(t).strip() for t in (it.get("tags") or []) if str(t).strip()][:8]
-        out.append({
+        kind = str(it.get("proposal_kind") or "").strip().lower()
+        row = {
             "title": title[:48],
             "category": cat,
             "tags": tags,
             "content": content[:4000],
             "question": str(it.get("question") or "").strip()[:200],
-        })
+        }
+        if kind in ("align", "conflict", "new_fact"):
+            row["proposal_kind"] = kind
+        if it.get("conflicts_with"):
+            row["conflicts_with"] = str(it.get("conflicts_with") or "").strip()[:24]
+        if it.get("facet"):
+            row["facet"] = it.get("facet")
+        if isinstance(it.get("situation"), dict):
+            row["situation"] = it.get("situation")
+        if isinstance(it.get("bind"), dict):
+            row["bind"] = it.get("bind")
+        out.append(row)
     return out
 
 
@@ -123,35 +125,39 @@ def _persist(
     origin_task_id: str = "",
     origin_case_id: str = "",
     auto_review: bool = True,
+    app_version: str = "",
 ) -> list[dict[str, Any]]:
+    from server.services.knowledge_facts import apply_proposal
+    from server.services.system_settings_service import knowledge_review_enabled, list_testing_knowledge
+
+    can_review = bool(auto_review)
+    if can_review and not knowledge_review_enabled():
+        SLog.i(TAG, f"skip auto review, disabled in settings n={len(drafts)}")
+        can_review = False
+
+    existing = [
+        x for x in list_testing_knowledge()
+        if not app_id or app_id in [str(a) for a in (x.get("app_ids") or [])]
+        or not (x.get("app_ids") or [])
+    ]
     saved: list[dict[str, Any]] = []
     for draft in drafts:
-        row = {
-            **draft,
-            "app_ids": [app_id] if app_id else [],
-            "enabled": True,
-            "source": source,
-            "review_status": "pending",
-            "origin_task_id": origin_task_id,
-            "origin_case_id": origin_case_id,
-        }
         try:
-            saved.append(upsert_knowledge_item(row))
+            kind = str(draft.get("proposal_kind") or "").strip().lower()
+            rows = apply_proposal(
+                draft,
+                existing=existing + saved,
+                app_id=app_id,
+                source=source,
+                origin_task_id=origin_task_id,
+                origin_case_id=origin_case_id,
+                app_version=app_version,
+                auto_review=can_review and kind != "conflict",
+            )
+            saved.extend(rows)
         except Exception as exc:
             SLog.w(TAG, f"upsert draft failed: {exc}")
-    if saved and auto_review:
-        from server.services.system_settings_service import knowledge_review_enabled
-
-        if not knowledge_review_enabled():
-            SLog.i(TAG, f"skip auto review, disabled in settings n={len(saved)}")
-            return saved
-        try:
-            from server.services.knowledge_review_service import review_new_items
-
-            saved = review_new_items(saved)
-        except Exception as exc:
-            SLog.w(TAG, f"auto review failed: {exc}")
-    elif saved and not auto_review:
+    if saved and not auto_review:
         SLog.i(TAG, f"keep pending drafts out of Index n={len(saved)} source={source}")
     return saved
 
@@ -166,6 +172,7 @@ def capture_case_knowledge(
     summary: str = "",
     events: Optional[list] = None,
     provider_id: str = "",
+    app_version: str = "",
 ) -> list[dict[str, Any]]:
     from server.services.system_settings_service import knowledge_capture_enabled
 
@@ -181,11 +188,15 @@ def capture_case_knowledge(
         f"最近步骤：\n{_step_lines(list(events or []))}\n"
     )
     drafts = _ask_llm(context, provider_id=provider_id)
+    used_fallback = False
     if not drafts:
         drafts = _fallback_items(failed=failed, case_id=case_id, name=case_name, summary=summary)
+        used_fallback = True
     return _persist(
         drafts, app_id=app_id, source="case_run",
         origin_task_id=task_id, origin_case_id=case_id,
+        auto_review=not used_fallback,
+        app_version=app_version,
     )
 
 
@@ -201,6 +212,12 @@ def capture_task_knowledge(
     if not knowledge_capture_enabled():
         SLog.i(TAG, f"skip task capture, disabled in settings task={task_id}")
         return []
+    try:
+        from server.services.knowledge_facts import ensure_app_facts
+
+        ensure_app_facts(app_id)
+    except Exception as exc:
+        SLog.w(TAG, f"ensure_app_facts on task capture failed: {exc}")
     rows = [c for c in (cases or []) if isinstance(c, dict)]
     if not rows:
         return []
@@ -257,6 +274,7 @@ def capture_login_flow(
     drafts = _ask_llm_login(context, image_base64=image_base64, image_mime=image_mime, provider_id=provider_id)
     if not drafts:
         drafts = [{
+            "proposal_kind": "new_fact",
             "title": "如何登录",
             "category": "登录注册",
             "tags": ["登录", case_id] if case_id else ["登录"],

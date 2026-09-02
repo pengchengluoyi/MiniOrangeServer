@@ -1,0 +1,13 @@
+id: get_otp
+display_name: 取一次性口令
+kind: resource
+caller: fill
+description: |
+  当前屏在问口令时由系统调用。来源由环境解释决定：账号固定码、知识绑定、解码平台、或问人。
+  业务模型不许在 prompt 里挑选 888888 还是问人。
+params:
+  - { name: account_id, required: true }
+returns:
+  - value
+  - source
+visible_to: []

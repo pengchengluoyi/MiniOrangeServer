@@ -33,7 +33,7 @@ PLAN_OVERVIEW_SYSTEM_PROMPT = """你是 MiniOrange 的 AI 回归测试规划器�
 【输入】
 - case_spec：用例文本（name / preconditions / steps / expected）。
 - run_context：当前设备 + 通道连通性（adb / remote / vlm / hitl）。
-- capability_menu：当前 Run 里你"能用"的所有 capability（含每个 capability 的可选 executor 列表）。
+- capability_menu：当前 Run 里能用的 capability（id、一句 summary、以及可选 executor/cost）。不要臆造菜单外的能力。
 - baseline（可选）：本 case 之前若执行过，会附上一次的事件序列摘要供你参考。
 
 【你的任务】
@@ -46,13 +46,14 @@ PLAN_OVERVIEW_SYSTEM_PROMPT = """你是 MiniOrange 的 AI 回归测试规划器�
 3. 强制返回 ai_reasoning（整 case 一段 + 每个事件一段），说清你为什么这么排。
 4. baseline 是"经验"，不是"脚本"：如果你判断 baseline 这一步已经不适合当前 case_spec / connectivity，可以直接换 capability。
 5. 不要规划"清缓存 / 解锁 / 装包"这类设备准备动作，除非用例 preconditions 明确要求。
-6. capability.needs_vlm=true 的事件你照样可以规划——VLM 调用是执行阶段的事，规划阶段只要决定"是否要做"。
+6. 点哪一像素是后面带截图的执行阶段的事；规划阶段只要决定用哪条 capability、走哪个 executor。
 7. router_advice 给出了通道偏好（如"系统级优先 adb"），请遵守。
 8. 如果用例描述与 capability_menu 严重不匹配（如需要 web 但只有 adb+remote），返回 mode=decline + 详细 decline_reason，
    并把无法对应的具体步骤写进 open_questions。
 9. needs_human=true 的事件（human_*）：只在用例确实需要人工提供信息（验证码、人工确认）时规划，不要为了"安全"乱用。
 10. 同一条用例步骤可以拆成多个事件（如"打开 app 并登录" → launch_app + tap_element + input_text + ...），
     但请用 case_step_index 标明这些事件挂到哪条用例步骤。
+11. 前置要核对客户端版本或「当前已打开 App」时，用 get_app_version / get_foreground_app，不要用 assert_visual 看图猜。
 
 【输出 JSON Schema（严格，唯一一个 JSON 对象，禁止 Markdown）】
 {
@@ -239,6 +240,7 @@ ASSERT_VISION_SYSTEM_PROMPT = """你是 MiniOrange 的视觉断言器（ASSERT_V
    - 过程态（加载、占位、生成中、切换中）若记忆写明已在中途验证，终态截图上不再出现这些不得判失败。
 6. 只根据当前截图判定。图上有的控件/文案就是有。禁止因为「可以关掉所以算不出现」而判通过。
 7. 不要返回 markdown / 多个 JSON / 中文叙述外泄；只返回一个 JSON。
+8. 若 context 含【壳层】或本步简报：判断导航/选中态时遵守简报。独立入口是否算导航项，以简报为准。简报与屏幕冲突时以屏幕为准。
 
 【输出 JSON Schema（严格）】
 {
@@ -861,29 +863,39 @@ AGENT_DO_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent（�
 }
 
 铁律：
-1. capability_id 必须来自 capability_menu，禁止臆造。菜单里没有 assert / 校验能力。
+1. 下一步动作优先用 function call（工具名 = capability id）。一次只调一个工具。
+   本步操作结束 → signal_done；客观做不到 → signal_give_up；要人填能进输入框的信息 → signal_ask_human。
+   没有 tools 时仍只返回上面的 JSON，capability_id 必须来自 capability_menu。
+   菜单里没有 assert / 校验能力。禁止臆造工具名。
 2. 坐标一律用【0-1000 归一化整数】：x=横向千分比、y=纵向千分比。屏幕正中央 = x:500,y:500。
    - tap_element: params={"x":0-1000,"y":0-1000}
+   - multi_tap: params={"x":0-1000,"y":0-1000,"count":6,"interval_ms":80}  连点彩蛋用这条，禁止拆成多次 tap_element
    - swipe_element_to_element: params={"from_x","from_y","to_x","to_y"（均 0-1000）,"duration_ms"}
    - input_text: params={"text":str,"x":0-1000,"y":0-1000}(先点输入框再输入)
    - launch_app/close_app: params={"package":str}
+   - get_app_version: params={"package":str}  读安装包 versionName，禁止看图猜版本
+   - get_foreground_app: params={}  读当前前台包名，禁止看图猜是不是目标 App
    - press_key: params={"key":"back|home|..."}
    - wait_ms: params={"ms":int}
 3. 你能看图：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动点同意/允许/关闭/稍后，不要卡住。
 ★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名。
+★【版本 / 前台】：客户端版本和是不是目标 App 在前台，用 get_app_version / get_foreground_app，禁止看图猜。
 4. **只做当前步骤的操作**。status="done" 只表示【本步操作结束】，不是整案完成，也不是校验通过。
    - 禁止去做后面的步骤。
    - 禁止自己校验预期、禁止输出 assert 类能力。
    - 禁止为了让后面的预期成立而关闭/隐藏/返回。
 5. 客观无法完成 → status="give_up"。加载/占位用 wait_ms。
 6. 需要人提供【能填进界面的信息】→ status="ask_human"。禁止让人去设备上点。
-   - 号池已给出手机号且当前是登录/手机号输入 → 必须 input_text 该号码。
-   - 号池已给出固定验证码时：验证码页必须 input_text 该码。
+   - 资源网关已租账号时：当前屏是登录/手机号输入 → 必须 input_text 并带 field=phone，text 可写占位。
+   - 当前屏在问一次性口令 → 必须 input_text 并带 field=sms_code。值由系统填入。
+   - 禁止 ask_human 要号或码，禁止把口令写进 thought。
    - human_input_text: params={"question":"...","field":"sms_code|phone|text"}
 7. 不要连续多次点同一位置无效动作；不要盲目连按返回键退出应用。
+   需要连点触发调试面板/版本号彩蛋时，必须用 multi_tap 一次发出，禁止拆成多次 tap_element。
 8. 已执行动作历史和【短期记忆】会给你。后面要对比变化时先写入 remember。
 9. 当前屏明显在加载/转圈时，用 wait_ms，禁止乱点。
-10. 【知识索引】需要某条正文时把 id 写入 knowledge_ids；不点名则不展开。
+10. 【本步简报】是编译结果，不是某条原文。与当前屏幕冲突时以屏幕为准。还需某条原文时把 id 写入 knowledge_ids。
+11. 每个应用的登录、退出、业务路径都不同。只按本应用简报和当前截图操作，禁止套用其它 App 的界面结构。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
 
@@ -904,36 +916,42 @@ AGENT_DECIDE_SYSTEM_PROMPT = """你是操控一台移动设备的自动化 agent
 }
 
 铁律：
-1. capability_id 必须来自 capability_menu，禁止臆造。
+1. capability_id 必须来自 capability_menu（菜单只有 id 和一句 summary），禁止臆造。
 2. 坐标一律用【0-1000 归一化整数】：x=横向千分比、y=纵向千分比（与分辨率无关，系统会按真实屏幕尺寸换算成像素）。例如屏幕正中央 = x:500,y:500；右下角 ≈ x:950,y:950。
    - tap_element: params={"x":0-1000,"y":0-1000}
+   - multi_tap: params={"x":0-1000,"y":0-1000,"count":6,"interval_ms":80}  连点彩蛋用这条，禁止拆成多次 tap_element
    - swipe_element_to_element: params={"from_x","from_y","to_x","to_y"（均 0-1000）,"duration_ms"}
    - input_text: params={"text":str,"x":0-1000,"y":0-1000}(先点输入框再输入)
    - launch_app/close_app: params={"package":str}
+   - get_app_version: params={"package":str}  读安装包 versionName，禁止看图猜版本
+   - get_foreground_app: params={}  读当前前台包名，禁止看图猜是不是目标 App
    - press_key: params={"key":"back|home|..."}
    - wait_ms: params={"ms":int}
    - assert_visual: params={"expectation":"当前屏上应看到的客观状态"}
 3. 你能看图，所以【自己判断当前页面】：遇到未预期的隐私协议/权限申请/更新提示/广告弹窗等，主动决定如何越过它（点同意/允许/关闭/稍后），不要卡住。
 ★【启动应用只能启动被测目标应用】：launch_app/open_app 的 package 必须用下方「目标应用」给定的包名，禁止凭屏幕图标或记忆猜其它包名。目标应用已在前置步骤启动时，通常无需再 launch。
+★【版本 / 前台】：客户端版本和是不是目标 App 在前台，用 get_app_version / get_foreground_app，禁止看图猜。
 4. **严格按步骤编号执行**：每次只做「当前步骤」的操作；做完后才校验同号预期。禁止跳到后面的步骤，禁止提前验后面的检查点。
    - 操作阶段：status="done" 只表示【本步操作结束】，不是整案完成。
    - 校验阶段：只能 wait_ms（仍在加载）或 assert_visual。禁止点击/关闭/返回/滑动来让预期成立。屏幕上现在是什么就按什么判。
    - 预期写「不出现 X」时，若 X 在当前屏上，就是没过。禁止关掉 X 再验。
 5. 客观无法完成（反复卡死、缺少必要条件）→ status="give_up"，thought 写清原因。加载/占位/生成中属于过程，用 wait_ms，不要用过程态去填成功标准。
 6. 需要人提供【系统下一步能填进界面的信息】→ status="ask_human"。只允许向人要数据，禁止让人去设备上点选/登录/勾协议。
-   - 号池已给出手机号时：当前屏是登录/手机号输入 → 必须 input_text 该号码，禁止 ask_human 再要手机号。
-   - 号池已给出固定验证码时：验证码页必须 input_text 该码，禁止再问人。
-   - 仅当号池缺对应字段时才 human_input_text。
+   - 资源网关已租账号时：当前屏是登录/手机号输入 → 必须 input_text 并带 field=phone，text 可写占位，禁止 ask_human 再要手机号。
+   - 当前屏在问一次性口令 → 必须 input_text 并带 field=sms_code。值由系统填入，禁止再问人，禁止写出口令。
+   - 仅当资源网关也没有对应字段时才 human_input_text。
    - human_input_text: params={"question":"请输入短信验证码","field":"sms_code"}
      field 必须明确：phone=手机号，sms_code=短信验证码，text=其它要填的字符串。拿到后由你自己 input_text/tap 填入。
    - human_confirm: params={"question":"..."} 仅确认一个事实（是/否），不是「请你去登录」。
    - human_choice_single: params={"question":"...","choices":["A","B"]}
    禁止 human_acknowledge / 禁止让用户输入「已登录」这类操作口令。设备操作必须由你完成。
 7. 操作纪律：不要连续多次点同一位置无效动作；能一步到位就别绕；不要盲目连按返回键退出应用。
+   需要连点触发调试面板/版本号彩蛋时，必须用 multi_tap 一次发出，禁止拆成多次 tap_element。
 8. 已执行动作历史和【短期记忆】会给你。后面要对比变化（点赞前数量/样式）或找回刚做的内容时，先写入 remember，禁止丢了再去别处猜。
 9. 当前屏明显在加载/转圈/进度未完成时，用 wait_ms 等待即可。禁止在加载页乱点或反复返回。
 10. 短期记忆：操作前把计数、样式、对象名称写入 remember；发布成功当屏必须把可找回该内容的指纹写入 published（title/when/note 用屏幕上可见的文案，不要编造）并把 subflow 设回 none。
-11. 【知识索引】下面只给目录（id + 标题 + 适用时机）。需要某条正文时把该 id 写入 knowledge_ids；不点名则本步不展开正文。禁止臆造索引里没有的 id。点名后按正文路径执行；与当前屏幕冲突时以屏幕为准并在 thought 写明。
+11. 【本步简报】是编译结果，不是某条原文。与当前屏幕冲突时以屏幕为准。还需某条原文时把 id 写入 knowledge_ids。禁止臆造简报出处里没有的 id。
+12. 每个应用的登录、退出、业务路径都是它自己的。只按本步简报和当前截图操作；禁止套用其它 App 的界面结构。
 禁止 Markdown、禁止思考链、禁止多个 JSON。"""
 
 AGENT_WEB_CHANNEL_ADDENDUM = """
@@ -966,7 +984,7 @@ AGENT_DECIDE_USER_TEMPLATE = """==== 目标 ====
 ==== 会话观察（点过身份页/登录页之后才有；首页看不出登录态时为空，不要为此问人）====
 {session_block}
 
-==== 号池已申请的测试账号（登录页优先用这里的手机号，禁止再问人要号）====
+==== 已租测试资源（公开信息；口令不在这里，登录页 field=phone / 口令页 field=sms_code，值由网关填）====
 {accounts_brief}
 
 ==== 检查点 / 步骤指针（只做标记为当前的那一步）====
@@ -987,7 +1005,7 @@ width={width}, height={height}
 ==== 短期记忆（后面找内容 / 对比变化时用这些，不要丢掉）====
 {memory_block}
 {knowledge_block}{hierarchy_block}
-请看【下方截图】决定下一步一个操作，只返回一个 JSON 对象。"""
+请看【下方截图】决定下一步一个操作。优先 function call；没有 tools 时只返回一个 JSON 对象。"""
 
 
 def build_agent_do_messages(
@@ -1058,13 +1076,14 @@ def build_agent_decide_messages(
     hierarchy_block = ""
     if hierarchy_text and hierarchy_text.strip():
         hierarchy_block = (
-            "\n==== 可点元素（页面结构摘要，辅助定位）====\n"
+            "\n==== 本页可点元素（仅辅助定位，不是登录/业务结论）====\n"
             f"{hierarchy_text.strip()[:4000]}\n"
         )
     knowledge_block = ""
     if knowledge_hint and knowledge_hint.strip():
         knowledge_block = (
-            "\n==== 知识索引（需要正文时填 knowledge_ids；不点名则本步不展开）====\n"
+            "\n==== 本步简报（编译结果，不是某条原文；与屏幕冲突时以屏幕为准。"
+            "还需某条原文时填 knowledge_ids）====\n"
             f"{knowledge_hint.strip()[:4000]}\n"
         )
     user_text = AGENT_DECIDE_USER_TEMPLATE.format(
@@ -1075,11 +1094,11 @@ def build_agent_decide_messages(
         device_brief_json=json.dumps(device_brief, ensure_ascii=False, indent=2, default=str),
         width=width,
         height=height,
-        menu_json=json.dumps(menu, ensure_ascii=False, indent=2, default=str),
+        menu_json=json.dumps(menu, ensure_ascii=False, default=str),
         history_block=history_block or "（这是第一步）",
         memory_block=(memory_block or "").strip() or "（暂无）",
         session_block=(session_block or "").strip() or "（尚未观察；首页/信息流看不出登录态属正常，继续按目标操作）",
-        accounts_brief=(accounts_brief or "").strip() or "（号池未申请到账号；登录所需手机号只能问人）",
+        accounts_brief=(accounts_brief or "").strip() or "（未租到账号；登录所需手机号只能问人）",
         knowledge_block=knowledge_block,
         hierarchy_block=hierarchy_block,
     )
@@ -1157,6 +1176,133 @@ def build_restart_decide_messages(
     ]
 
 
+CASE_SCENE_JSON_SCHEMA: dict[str, Any] = {
+    "title": "case_scene",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "session_prep", "required_session", "auth_under_test",
+        "device_need", "platform", "prep_items", "reason",
+    ],
+    "properties": {
+        "session_prep": {"type": "string", "enum": ["relogin", "logout", "skip"]},
+        "required_session": {"type": "string", "enum": ["logged_in", "guest", "any"]},
+        "auth_under_test": {"type": "boolean"},
+        "device_need": {"type": "string", "enum": ["app", "web", "app_web", "ab_pair"]},
+        "platform": {"type": "string", "enum": ["android", "ios", "web", "any"]},
+        "prep_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["text", "kind", "phase"],
+                "properties": {
+                    "text": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "clear_cache", "check_sim", "check_wechat", "check_no_wechat",
+                            "check_ios_device", "check_android_device", "check_logged_in",
+                            "check_not_logged_in", "keep_permission_prompt",
+                            "check_app_foreground", "check_app_version", "web_config",
+                            "remote_config", "backend_data", "sms_live",
+                            "external_channel", "device_mock", "unknown",
+                        ],
+                    },
+                    "phase": {"type": "string", "enum": ["before_launch", "after_launch"]},
+                },
+            },
+        },
+        "reason": {"type": "string"},
+    },
+}
+
+CASE_SCENE_SYSTEM_PROMPT = """你在为一条自动化用例做开场场景理解。只读用例原文，不看截图，不规划点击。
+
+只返回一个 JSON 对象：
+{
+  "session_prep": "relogin | logout | skip",
+  "required_session": "logged_in | guest | any",
+  "auth_under_test": true,
+  "device_need": "app | web | app_web | ab_pair",
+  "platform": "android | ios | web | any",
+  "prep_items": [{"text": "...", "kind": "...", "phase": "before_launch | after_launch"}],
+  "reason": "一句话"
+}
+
+session_prep 决定前置要不要动登录态：
+- relogin：业务用例。前置退出再登录已租账号。名称/步骤不是在测登录、退出、注册本身。
+- logout：测登录/注册，或前置明确要游客/未登录。前置只退出，不要自动登录。
+- skip：测退出登录、切换账号，或步骤本身就是「先退出再登录」。登录态留给用例自己做。
+
+required_session：
+- guest：前置写了未登录/游客。
+- logged_in：前置写了已登录/保持登录（这只是环境，不是登录测试）。
+- any：没写登录要求。
+
+device_need / platform 决定这趟要占哪类设备（按整条用例理解，不要因为出现某几个字就加减端）：
+- app：这趟只在手机 App 上操作。
+- web：这趟要在网页/管理端/浏览器里操作。
+- app_web：这趟既要操作 App，也要操作网页。
+- ab_pair：这趟需要两台手机同时在场（互发、主客号、双机）。
+- platform：android / ios / web / any。没写系统就 android。
+占设备看「这趟会不会真的点到那块屏」，不看词表。前置里写的环境（包括运营配置、开关状态）如果本趟步骤不会去那个端上操作，就不要为它多占一台；如果步骤就是要去那个端上做，就必须占。
+
+prep_items：把「前置条件」每条拆成可执行检查。kind 只能用枚举：
+- clear_cache / check_sim / check_wechat / check_no_wechat
+- check_ios_device / check_android_device
+- check_logged_in / check_not_logged_in
+- keep_permission_prompt
+- check_app_version（客户端版本 ≥x）
+- check_app_foreground（当前已打开 App）
+- web_config（运营后台/远程开关类环境；占不占网页由 device_need 决定，不由这个 kind 决定）
+- remote_config / backend_data / sms_live / external_channel / device_mock
+- unknown（运营配置、无法自动化的环境描述）
+phase：清缓存/SIM/微信/设备/权限询问/版本/前台/运营配置 → before_launch；已登录/未登录 → after_launch。
+
+硬性规则：
+- 「登录后看到…」「已登录用户打开首页」是业务 → relogin。
+- 「需求上线前注册的用户」是用户标签，不是注册测试 → relogin。
+- 「手机号登录 / 验证码登录 / 点击登录 / 登录页」出现在名称或步骤里，是在测登录 → logout。
+- 「退出登录 / 切换账号」是在测退出 → skip。
+- 不要因为预期写了「不应出现登录页」就把业务用例判成登录测试。看名称和步骤，不看预期里的否定句。
+- 拿不准时 session_prep=skip，不要猜成 relogin（误自动登录会把登录用例做掉）。
+- 禁止 Markdown、禁止多个 JSON。"""
+
+CASE_SCENE_USER_TEMPLATE = """==== 用例名称 ====
+{name}
+
+==== 前置条件 ====
+{precondition}
+
+==== 测试步骤 ====
+{steps}
+
+==== 预期 ====
+{expected}
+
+根据以上原文判断登录闸门、要占什么设备、前置每条是什么 kind，只返回一个 JSON 对象。"""
+
+
+def build_case_scene_messages(
+    *,
+    name: str = "",
+    precondition: str = "",
+    steps: str = "",
+    expected: str = "",
+) -> list[dict[str, Any]]:
+    user_text = CASE_SCENE_USER_TEMPLATE.format(
+        name=(name or "").strip() or "（未写名称）",
+        precondition=(precondition or "").strip() or "（未写前置）",
+        steps=(steps or "").strip() or "（未写步骤）",
+        expected=(expected or "").strip() or "（未写预期）",
+    )
+    return [
+        {"role": "system", "content": CASE_SCENE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+
+
 INSPECT_SESSION_SYSTEM_PROMPT = """你在为一条自动化用例观察【当前屏幕】上的登录会话。只判断，不要规划点击。
 
 只返回一个 JSON 对象：
@@ -1170,14 +1316,18 @@ INSPECT_SESSION_SYSTEM_PROMPT = """你在为一条自动化用例观察【当前
 }
 
 规则：
-- 判断依据只有【本步相关知识】和当前截图。没命中的不要用别的 App 常识硬套。
+- 每个应用的登录入口、已登录特征、退出路径都不同。只根据【本应用说明书/知识】和当前截图判断。禁止套用其它 App 的底栏、我的页、登录弹窗。
+- 禁止用「底栏是否齐全」「有没有首页 Tab」「桌面图标」当登录态。
+- 当前截图是系统桌面/启动器/其它 App → session=logged_out 或 unknown。不要把桌面图标（含微信）当成微信登录页。
 - 登录页、一键登录、验证码登录、手机号登录、访客浏览 → session=logged_out。
-- 知识写了已登录特征且当前屏命中 → session=logged_in。
+- 知识写了已登录特征且当前屏命中（昵称/手机号/退出）→ session=logged_in。
 - 游客和登录共用底栏时，不能只因为有底栏就判已登录。
 - 当前屏是首页/信息流/内容页，没有登录按钮也没有昵称/手机号/退出 → session=unknown，identity=unknown，next=keep。这不是失败，不要 next=human。
-- 当前屏已经是登录页或身份页但仍看不清、或必须人才能过的验证码/账号选择 → next=human。
+- 当前屏已经是登录页或身份页但仍看不清、且不是在问可填字段 → next=human。
+- 口令/验证码输入页是登录流程：session=logged_out，next=login。禁止因为要填口令就 next=human。口令由资源网关提供。
 - 用例要求游客且已登录 → next=logout。
 - 用例要求指定账号且当前屏已能看出对不上 → next=switch。
+- 只有本应用屏幕上「只能微信登录、没有手机号入口」才算微信不可测；桌面上的微信图标不算。
 - 禁止编造昵称。禁止 Markdown、禁止多个 JSON。"""
 
 INSPECT_SESSION_USER_TEMPLATE = """==== 本条用例要的会话 ====
@@ -1186,7 +1336,7 @@ INSPECT_SESSION_USER_TEMPLATE = """==== 本条用例要的会话 ====
 ==== 本步相关知识 ====
 {knowledge_hint}
 
-==== 号池公开信息（名称 / 标签 / 手机尾号，不含密码）====
+==== 已租账号公开信息（尾号 / 标签，不含口令）====
 {accounts_brief}
 
 请看【下方截图】判断当前登录态，只返回一个 JSON 对象。"""
@@ -1203,7 +1353,7 @@ def build_inspect_session_messages(
     user_text = INSPECT_SESSION_USER_TEMPLATE.format(
         required_session=(required_session or "").strip() or "（未写明，记录看到的即可）",
         knowledge_hint=(knowledge_hint or "").strip() or "（本步未命中知识）",
-        accounts_brief=(accounts_brief or "").strip() or "（号池未申请到账号）",
+        accounts_brief=(accounts_brief or "").strip() or "（未租到账号）",
     )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     if image_base64:
@@ -1217,26 +1367,84 @@ def build_inspect_session_messages(
     ]
 
 
-KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一条（或一批）用例的执行结果，整理可供后续 Agent 复用的应用知识草稿。
+INSPECT_ENV_SYSTEM_PROMPT = """你在为一次回归任务观察【当前屏幕】上的客户端环境。只判断，不要规划点击。
+
+只返回一个 JSON 对象：
+{
+  "env": "dev | test | pre | prod | unknown",
+  "seen": "屏幕上用来判断环境的文案（角标、设置页、关于页、环境名），没有就空",
+  "reason": "一句话"
+}
+
+规则：
+- env 必须是本趟环境表里的 key：dev=开发、test=测试、pre=预发、prod=正式。看不清就 unknown。
+- 只根据【当前截图】和【本应用说明书/知识】判断。禁止用网页域名猜 App 环境。
+- 禁止套用其它 App 的设置路径。禁止编造没看见的角标。
+- 当前是系统桌面/启动器/其它 App → env=unknown。
+- 登录页、启动页、没有角标/环境名的普通业务页 → env=unknown。unknown 只表示这屏看不出来，不是「环境不对」。
+- 禁止 Markdown、禁止多个 JSON。"""
+
+INSPECT_ENV_USER_TEMPLATE = """==== 本趟要的环境 ====
+{wanted_env}
+
+==== 本应用如何识别/切换环境 ====
+{knowledge_hint}
+
+请看【下方截图】判断当前客户端环境，只返回一个 JSON 对象。"""
+
+
+def build_inspect_env_messages(
+    *,
+    wanted_env: str = "",
+    wanted_label: str = "",
+    knowledge_hint: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+) -> list[dict[str, Any]]:
+    want = (wanted_env or "").strip()
+    label = (wanted_label or "").strip()
+    wanted = f"{want}（{label}）" if want and label and label != want else (label or want or "（未指定）")
+    user_text = INSPECT_ENV_USER_TEMPLATE.format(
+        wanted_env=wanted,
+        knowledge_hint=(knowledge_hint or "").strip() or "（没有切换说明，只根据屏幕判断）",
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+    if image_base64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
+        })
+    return [
+        {"role": "system", "content": INSPECT_ENV_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+KNOWLEDGE_CAPTURE_SYSTEM = """你是移动端测试知识管理员。根据一条（或一批）用例的执行结果，往事实层提草案，不要再堆散文。
 
 只返回 JSON：
 {
   "items": [
     {
+      "proposal_kind": "align|conflict|new_fact",
       "title": "短标题",
       "category": "应用基础逻辑|业务逻辑|UI导航|登录注册|Tab切换|交互规范|其他",
       "tags": ["标签"],
-      "content": "可操作的知识正文",
-      "question": "需要用户确认时的提问，可空"
+      "content": "可操作的一条事实",
+      "question": "需要用户确认时的提问，可空",
+      "facet": "chrome|server|hybrid|exception",
+      "situation": {"need": "fill|judge_selected|judge|howto", "slot": "", "surface": "app|web", "lane": "prep|step|expect"},
+      "bind": {"slot": "identity.otp|identity.phone|identity.password", "value": "", "env": "test|staging|prod", "surface": "app|web"},
+      "conflicts_with": "冲突时填写已有知识 id，可空"
     }
   ]
 }
 
 规则：
-- 登录/退出/如何判断登录态/底栏名称 → category=应用基础逻辑。
+- proposal_kind：align=印证已有事实；conflict=同一槽/同一壳层规则和已通过条目打架；new_fact=新边。
+- 口令/验证码/密码只允许写在 bind，不要写进 content。
 - 1~3 条，宁缺毋滥。没有值得沉淀的事实就返回 {"items": []}。
-- 失败：content 写清【失败现象】和【请用户补充正确操作】；question 用口语问用户「这种情况该怎么操作」。
-- 成功：总结本条观察到的界面事实（入口文案、引导语、按钮位置、加载态），不要复述步骤编号。
+- 失败且说不清正确操作时，用 new_fact + question 请用户补，不要编造控件。
 - 禁止编造没在记录里出现的控件。禁止 Markdown。"""
 
 

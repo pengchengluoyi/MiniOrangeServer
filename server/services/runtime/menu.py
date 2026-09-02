@@ -34,47 +34,51 @@ def _visible_to(cap: Capability, audience: str) -> bool:
     return audience in allowed
 
 
-def available_menu_brief(ctx: RunContext, *, audience: str = "case") -> list[dict[str, Any]]:
-    """喂给 PLAN_OVERVIEW prompt 的"菜单"精简结构。
+def _cap_summary(cap: Capability) -> str:
+    text = (cap.description or "").strip().splitlines()[0].strip()
+    return text[:120] if text else ""
 
-    刻意去掉文档级字段（description / ui / examples），只保留决策时必需信息：
-      - id / type / needs_vlm / implementations[ {executor, requires_caps} ]
 
-    audience 决定按 capability.visible_to 过滤：业务菜单不该出现系统层专用能力
-    （否则业务 agent 会自己去调，白烧决策预算）。
+def _executor_costs(cap: Capability) -> list[dict[str, Any]]:
+    """同一 executor 只留 cost 最低的一条。规划模型选通道用，不需要 impl id / requires_caps。"""
+    seen: dict[str, int] = {}
+    for impl in sorted(cap.implementations or [], key=lambda i: getattr(i, "cost", 5)):
+        ex = str(getattr(impl, "executor", "") or "").strip()
+        if not ex or ex in seen:
+            continue
+        seen[ex] = int(getattr(impl, "cost", 5))
+    return [{"executor": ex, "cost": cost} for ex, cost in seen.items()]
+
+
+def available_menu_brief(
+    ctx: RunContext,
+    *,
+    audience: str = "case",
+    kind: str = "plan",
+) -> list[dict[str, Any]]:
+    """喂给大模型的能力菜单。YAML 里的 trigger_phrases / platforms / 实现细节不进 prompt。
+
+    kind="plan"  文本规划 / 拟人展开：id + summary + implementations[{executor, cost}]
+    kind="agent" 看图决策：只给 id + summary。点哪、走哪条通道由系统提示词和 Router 负责。
+
+    audience 决定按 capability.visible_to 过滤：业务菜单不该出现系统层专用能力。
     """
-    caps = [c for c in available_capabilities(ctx) if _visible_to(c, audience)]
+    kind = (kind or "plan").strip().lower()
+    if kind not in {"plan", "agent"}:
+        kind = "plan"
     out: list[dict[str, Any]] = []
-    for cap in caps:
-        is_hitl = (cap.category or "").lower() == "hitl"
-        impls = list(cap.implementations or [])
-        impl_vlm = [bool(getattr(i, "needs_vlm", False)) for i in impls]
-        # 菜单里只剩 playwright_tap（needs_vlm=false）时，不要仍写 cap 级 true，
-        # 否则模型会以为必须先看图要坐标。
-        needs_vlm = all(impl_vlm) if impl_vlm else bool(cap.needs_vlm)
-        out.append({
-            "id": cap.id,
-            "event_kind": cap.event_kind,
-            "category": cap.category,
-            "needs_vlm": needs_vlm,
-            "is_human_in_the_loop": is_hitl,
-            "summary": (cap.description or "").strip().splitlines()[0][:160] if cap.description else "",
-            "platforms": list(cap.platforms or []),
-            "trigger_phrases": list(cap.trigger_phrases or []),
-            "implementations": [
-                {
-                    "id": impl.id,
-                    "executor": impl.executor,
-                    "requires_caps": list(impl.requires_caps or []),
-                    "needs_vlm": impl.needs_vlm,
-                    # cost 越低越优先（adb 系统级实现通常 cost 更低）。双通道在线时两渠道
-                    # implementations 都在此列出，按 cost 升序引导大模型优先选 adb。
-                    "cost": getattr(impl, "cost", 5),
-                    "notes": (impl.description or "")[:160],
-                }
-                for impl in sorted(cap.implementations, key=lambda i: getattr(i, "cost", 5))
-            ],
-        })
+    for cap in available_capabilities(ctx):
+        if not _visible_to(cap, audience):
+            continue
+        row: dict[str, Any] = {"id": cap.id}
+        summary = _cap_summary(cap)
+        if summary:
+            row["summary"] = summary
+        if kind == "plan":
+            impls = _executor_costs(cap)
+            if impls:
+                row["implementations"] = impls
+        out.append(row)
     return out
 
 

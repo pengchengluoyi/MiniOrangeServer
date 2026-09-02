@@ -1,0 +1,14 @@
+id: provision_session
+display_name: 备会话
+kind: resource
+caller: orchestrator
+description: |
+  按已租账号把设备登录态对齐（登录/退出）。失败只打前置不足，不准开始业务。
+  与看图做业务是两次循环。测登录/注册/游客的用例跳过本步。
+params:
+  - { name: account_id, required: true }
+  - { name: intent, required: true, enum: [login, logout, relogin, switch] }
+returns:
+  - ok
+  - observed
+visible_to: []

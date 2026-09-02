@@ -2382,7 +2382,8 @@ _SKILL_CN = {
     "draft_sign": "验收草稿",
     "pick_regression": "圈回归范围",
     "draft_gate": "发版草稿",
-    "pick_account": "筛测试账号",
+    "pick_device": "申请执行设备",
+    "pick_account": "租账号",
 }
 
 

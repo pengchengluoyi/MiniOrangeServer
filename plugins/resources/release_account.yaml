@@ -1,0 +1,11 @@
+id: release_account
+display_name: 还账号
+kind: resource
+caller: teardown
+description: |
+  用例结束释放租约。中断和失败也要还。业务模型不能选要不要还。
+params:
+  - { name: account_id, required: true }
+returns:
+  - ok
+visible_to: []

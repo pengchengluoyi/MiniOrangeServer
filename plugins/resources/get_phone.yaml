@@ -1,0 +1,12 @@
+id: get_phone
+display_name: 取登录号
+kind: resource
+caller: fill
+description: |
+  当前屏在问手机号/账号时由系统调用。值来自已租账号、知识绑定、解码平台或问人。
+params:
+  - { name: account_id, required: true }
+returns:
+  - value
+  - source
+visible_to: []

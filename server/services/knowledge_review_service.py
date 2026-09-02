@@ -54,82 +54,25 @@ def _parse_expert(raw: Any) -> dict[str, Any]:
     }
 
 
-def _flatten_atlas_paths(atlas: dict) -> list[str]:
-    from server.services.ai.app_atlas import flatten_tree
-
-    rows = []
-    for item in flatten_tree(atlas)[:80]:
-        path = str(item.get("path") or item.get("name") or "").strip()
-        if path:
-            rows.append(path)
-    return rows
-
-
-def _req_lines(requirements: list) -> list[str]:
-    out: list[str] = []
-    for req in requirements or []:
-        if not isinstance(req, dict):
-            continue
-        title = str(req.get("title") or req.get("external_id") or "").strip()
-        if not title:
-            continue
-        und = req.get("understanding") if isinstance(req.get("understanding"), dict) else {}
-        excerpt = str(und.get("source_excerpt") or "").strip().replace("\n", " ")[:80]
-        ac = und.get("ac") if isinstance(und.get("ac"), list) else []
-        ac0 = str(ac[0] or "").strip()[:40] if ac else ""
-        bit = title
-        if excerpt:
-            bit += f"：{excerpt}"
-        elif ac0:
-            bit += f"：{ac0}"
-        out.append(bit)
-        if len(out) >= 16:
-            break
-    return out
-
-
 def load_app_brief(app_id: str = "") -> str:
+    """机审用的应用理解：编译简报，不是标题清单。"""
     aid = str(app_id or "").strip()
     if not aid:
         return "没有绑定具体应用。只根据知识正文判断，不要编造产品能力。"
     try:
-        from sqlalchemy.orm import joinedload
+        from server.services.knowledge_briefing import compile_briefing
 
-        from server.core.database import SessionLocal
-        from server.models.project import App
-        from server.services.app_automation_service import get_automation_config
-
-        db = SessionLocal()
-        try:
-            app = db.query(App).options(joinedload(App.project)).filter(App.id == aid).first()
-            if not app:
-                return f"应用 {aid} 不存在。只根据知识正文判断。"
-            cfg = get_automation_config(app)
-            qp = cfg.get("qa_process") or {}
-            atlas = qp.get("app_atlas") or {}
-            reqs = qp.get("requirements") or []
-            paths = _flatten_atlas_paths(atlas)
-            req_lines = _req_lines(reqs)
-            known = [
-                str(x.get("title") or "").strip()
-                for x in list_testing_knowledge()
-                if str(x.get("review_status") or "") == "approved"
-                and aid in (x.get("app_ids") or [])
-                and str(x.get("title") or "").strip()
-            ][:12]
-            lines = [
-                f"应用：{app.name}（{aid}）",
-                f"项目：{getattr(getattr(app, 'project', None), 'name', '') or '—'}",
-                f"图谱路径：{'；'.join(paths) if paths else '还没有确认的骨架'}",
-                f"需求：{'；'.join(req_lines) if req_lines else '还没有需求'}",
-                f"已通过知识：{'；'.join(known) if known else '暂无'}",
-            ]
-            return "\n".join(lines)
-        finally:
-            db.close()
+        packet = compile_briefing(
+            aid,
+            {"lane": "prep"},
+            synthesize=True,
+        )
+        text = str(getattr(packet, "text", "") or "").strip()
+        if text:
+            return text
     except Exception as exc:
-        SLog.w(TAG, f"load_app_brief failed {aid}: {exc}")
-        return f"应用 {aid} 简报读取失败，只根据知识正文判断。"
+        SLog.w(TAG, f"compile briefing for review failed {aid}: {exc}")
+    return f"应用 {aid} 还没有可编译的简报。只根据知识正文判断，不要编造产品能力。"
 
 
 def _item_block(item: dict[str, Any]) -> str:
@@ -225,6 +168,13 @@ def apply_verdict(item: dict[str, Any], verdict: dict[str, Any], *, expert: Opti
     reason = str(verdict.get("reason") or "").strip()
     auto = action in ("approve", "reject") and confidence >= CONFIDENCE_AUTO
     expert = expert or {}
+    try:
+        from server.services.knowledge_facts import should_hold_proposal
+
+        if should_hold_proposal(item, expert):
+            auto = False
+    except Exception:
+        pass
     meta = {
         "review_method": "machine",
         "review_decision": action if auto else "hold",
@@ -243,6 +193,12 @@ def apply_verdict(item: dict[str, Any], verdict: dict[str, Any], *, expert: Opti
         _mark_task(item, "rejected")
         return {**item, **meta, "review_status": "rejected", "deleted": True}
     row = upsert_knowledge_item({**item, "review_status": "approved", **meta})
+    try:
+        from server.services.knowledge_facts import on_fact_approved
+
+        row = on_fact_approved(row)
+    except Exception as exc:
+        SLog.w(TAG, f"on_fact_approved skipped: {exc}")
     _mark_task(row, "approved")
     return row
 

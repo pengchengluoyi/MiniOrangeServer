@@ -14,7 +14,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
+import time
 from typing import Any, Optional
 
 from pydantic import ValidationError
@@ -44,6 +46,9 @@ from server.services.runtime import available_menu_brief
 from server.services.runtime.run_context import RunContext
 
 TAG = "RegressionPlanner"
+
+_SCENE_CACHE: dict[str, dict[str, Any]] = {}
+_SCENE_CACHE_MAX = 256
 
 
 def _chat(*, job: str, provider, messages, **kwargs):
@@ -850,6 +855,119 @@ def _checkpoints_from_expected(case_spec: CaseSpec) -> list[CaseCheckpoint]:
     ]
 
 
+def _case_scene_blob(
+    *,
+    name: str = "",
+    steps: str = "",
+    expected: str = "",
+    precondition: str = "",
+) -> str:
+    return "\n".join([
+        str(name or "").strip(),
+        str(precondition or "").strip(),
+        str(steps or "").strip(),
+        str(expected or "").strip(),
+    ])
+
+
+def _case_scene_key(blob: str) -> str:
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _steps_from_spec(case_spec: CaseSpec) -> str:
+    raw = case_spec.raw_row or {}
+    if isinstance(raw, dict):
+        text = str(raw.get("steps_raw") or "").strip()
+        if text:
+            return text
+    lines: list[str] = []
+    for i, step in enumerate(case_spec.steps or [], 1):
+        inst = str(getattr(step, "instruction", "") or "").strip()
+        if inst:
+            lines.append(f"{i}. {inst}")
+    return "\n".join(lines)
+
+
+def classify_case_scene(
+    case_spec: Optional[CaseSpec] = None,
+    *,
+    name: str = "",
+    steps: str = "",
+    expected: str = "",
+    precondition: str = "",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 30,
+    run_context: Optional[RunContext] = None,
+) -> dict[str, Any]:
+    """开跑前理解登录闸门、设备需求和前置 kind。按原文缓存；失败则 skip，不自动登录、不占 Web。"""
+    from server.services.runtime.session_gate import clamp_case_scene, fallback_case_scene
+
+    if case_spec is not None:
+        name = name or (case_spec.name or "")
+        expected = expected or (case_spec.expected or "")
+        precondition = precondition or (case_spec.preconditions or "")
+        steps = steps or _steps_from_spec(case_spec)
+    blob = _case_scene_blob(
+        name=name, steps=steps, expected=expected, precondition=precondition,
+    )
+    key = _case_scene_key(blob)
+    cached = _SCENE_CACHE.get(key)
+    if cached:
+        scene = clamp_case_scene(cached)
+        if run_context is not None:
+            run_context.case_scene = dict(scene)
+        return scene
+
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        scene = fallback_case_scene(
+            f"未启用 AI：{gate.get('reason')}，不自动登录",
+            precondition=precondition,
+        )
+        _put_scene_cache(key, scene, run_context)
+        return scene
+
+    messages = P.build_case_scene_messages(
+        name=name, precondition=precondition, steps=steps, expected=expected,
+    )
+    raw, meta = _chat(
+        job="case-scene",
+        provider=provider,
+        messages=messages,
+        temperature=0.1,
+        max_tokens=1200,
+        timeout_sec=timeout_sec,
+        response_schema=P.CASE_SCENE_JSON_SCHEMA,
+    )
+    if not isinstance(raw, dict):
+        err = str((meta or {}).get("error") or "").strip() or "场景理解返回空"
+        scene = fallback_case_scene(f"{err}，不自动登录", precondition=precondition)
+        SLog.w(TAG, f"classify_case_scene failed err={err!r}")
+        _put_scene_cache(key, scene, run_context)
+        return scene
+
+    scene = clamp_case_scene(raw)
+    SLog.i(
+        TAG,
+        f"classify_case_scene prep={scene.get('session_prep')} "
+        f"required={scene.get('required_session')} "
+        f"device={scene.get('device_need')} how={scene.get('how')} "
+        f"reason={(scene.get('reason') or '')[:80]!r}",
+    )
+    _put_scene_cache(key, scene, run_context)
+    return scene
+
+
+def _put_scene_cache(
+    key: str, scene: dict[str, Any], run_context: Optional[RunContext],
+) -> None:
+    if len(_SCENE_CACHE) >= _SCENE_CACHE_MAX:
+        _SCENE_CACHE.clear()
+    _SCENE_CACHE[key] = dict(scene)
+    if run_context is not None:
+        run_context.case_scene = dict(scene)
+
+
 def extract_goal(
     case_spec: CaseSpec,
     *,
@@ -992,13 +1110,23 @@ def decide_next_action(
     session_block: str = "",
     provider_id: Optional[str] = None,
     timeout_sec: int = 90,
+    menu_ids: Optional[set[str]] = None,
 ) -> AgentDecision:
     """看图决定下一步一个动作（D2 直接出坐标 / D3 每步看图）。永远返回 AgentDecision。"""
-    menu = available_menu_brief(run_context)
+    menu = available_menu_brief(run_context, kind="agent")
     if not menu:
         return AgentDecision(status="give_up", thought="capability_menu 为空（连通性丢失）",
                              parse_warnings=["empty menu"])
     menu = [c for c in menu if str(c.get("id") or "") not in {"assert_visual", "assert_goal", "assert"}]
+    if menu_ids:
+        allow = {str(x) for x in menu_ids}
+        menu = [c for c in menu if str(c.get("id") or "") in allow]
+        if not menu:
+            return AgentDecision(status="give_up", thought="备会话菜单为空（连通性丢失）",
+                                 parse_warnings=["empty session menu"])
+    from server.services.plugins.tool_schema import tools_chat_payload, tools_for_menu
+
+    tool_payload = tools_chat_payload(tools_for_menu(menu))
     provider, gate = resolve_regression_provider(provider_id)
     if provider is None:
         return AgentDecision(status="ask_human", thought=f"未启用 AI 视觉：{gate.get('reason')}",
@@ -1035,6 +1163,8 @@ def decide_next_action(
         "success_criteria": success_criteria,
         "device_brief": run_context.to_prompt_brief(),
         "target_package": str(getattr(run_context, "target_package", "") or ""),
+        "capability_menu": menu,
+        "tools": list(tool_payload.get("tools") or []),
         "image": {"width": width, "height": height, "mime": image_mime, "note": "image_base64 omitted"},
     }
     raw, meta = _chat(
@@ -1043,6 +1173,8 @@ def decide_next_action(
         # 省略该字段时豆包默认仍是 4096；decide JSON 通常 200 token，2048 足够。
         # 再放大只会让空白熔断更久。空白输出改由流式早停处理。
         temperature=0.1, max_tokens=2048, timeout_sec=timeout_sec,
+        json_mode=not bool(tool_payload.get("tools")),
+        extra_payload=tool_payload or None,
     )
     if raw is None:
         err = str(meta.get("error") or "").strip() or "LLM 返回空/解析失败"
@@ -1055,6 +1187,12 @@ def decide_next_action(
         )
 
     decision = _parse_agent_decision(raw, width, height)
+    allow_ids = {str(c.get("id") or "") for c in menu}
+    allow_ids.add("human_input_text")
+    if decision.action and str(decision.action.capability_id or "") not in allow_ids:
+        cid = decision.action.capability_id
+        decision.parse_warnings.append(f"capability_id={cid!r} 不在菜单，已丢弃")
+        decision.action = None
     # 覆盖 raw_llm：既保留输出，也带上“喂给模型的输入”用于 UI 可视化溯源。
     decision.raw_llm = {"llm_input": llm_input_debug, "llm_output": raw, "meta": meta}
     return decision
@@ -1100,48 +1238,7 @@ def decide_restart_app(
     return bool(restart), thought
 
 
-def inspect_session(
-    *,
-    required_session: str = "",
-    knowledge_hint: str = "",
-    accounts_brief: str = "",
-    image_base64: str = "",
-    image_mime: str = "image/png",
-    provider_id: Optional[str] = None,
-    timeout_sec: int = 60,
-) -> dict[str, Any]:
-    """观察当前屏登录态。失败或首页看不清时 unknown + keep，不点屏幕、不问人。"""
-    empty = {
-        "session": "unknown",
-        "identity": "unknown",
-        "seen": "",
-        "probe": False,
-        "next": "keep",
-        "reason": "未观察",
-    }
-    if not image_base64:
-        empty["reason"] = "无截图，跳过会话观察"
-        return empty
-    provider, gate = resolve_regression_provider(provider_id)
-    if provider is None:
-        empty["reason"] = f"未启用 AI：{gate.get('reason')}"
-        return empty
-    messages = P.build_inspect_session_messages(
-        required_session=required_session,
-        knowledge_hint=knowledge_hint,
-        accounts_brief=accounts_brief,
-        image_base64=image_base64,
-        image_mime=image_mime,
-    )
-    raw, meta = _chat(
-        job="inspect-session",
-        provider=provider, messages=messages,
-        temperature=0.1, max_tokens=512, timeout_sec=timeout_sec,
-    )
-    if not isinstance(raw, dict):
-        SLog.w(TAG, f"inspect_session LLM failed err={meta.get('error')!r}")
-        empty["reason"] = "LLM 返回空/解析失败"
-        return empty
+def _parse_inspect_session_raw(raw: dict[str, Any]) -> dict[str, Any]:
     session = str(raw.get("session") or "unknown").strip().lower()
     if session not in {"logged_out", "logged_in", "unknown"}:
         session = "unknown"
@@ -1167,4 +1264,127 @@ def inspect_session(
         "probe": bool(probe),
         "next": nxt,
         "reason": reason,
+        "ok": True,
     }
+
+
+def inspect_session(
+    *,
+    required_session: str = "",
+    knowledge_hint: str = "",
+    accounts_brief: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 60,
+) -> dict[str, Any]:
+    """观察当前屏登录态。空输出/解析失败重试；耗尽后 ok=False，不当成功。"""
+    empty = {
+        "session": "unknown",
+        "identity": "unknown",
+        "seen": "",
+        "probe": False,
+        "next": "keep",
+        "reason": "未观察",
+        "ok": False,
+    }
+    if not image_base64:
+        empty["reason"] = "无截图，跳过会话观察"
+        return empty
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        empty["reason"] = f"未启用 AI：{gate.get('reason')}"
+        return empty
+    messages = P.build_inspect_session_messages(
+        required_session=required_session,
+        knowledge_hint=knowledge_hint,
+        accounts_brief=accounts_brief,
+        image_base64=image_base64,
+        image_mime=image_mime,
+    )
+    last_err = "LLM 返回空/解析失败"
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        raw, meta = _chat(
+            job="inspect-session",
+            provider=provider, messages=messages,
+            temperature=0.1, max_tokens=512, timeout_sec=timeout_sec,
+        )
+        if isinstance(raw, dict) and str(raw.get("session") or "").strip():
+            row = _parse_inspect_session_raw(raw)
+            if attempt > 1:
+                SLog.i(TAG, f"inspect_session recovered on attempt {attempt}")
+            return row
+        last_err = str((meta or {}).get("error") or "").strip() or "LLM 返回空/解析失败"
+        SLog.w(TAG, f"inspect_session attempt {attempt}/{attempts} failed err={last_err!r}")
+        if attempt < attempts:
+            time.sleep(0.4)
+    empty["reason"] = last_err
+    return empty
+
+
+def _parse_inspect_env_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    from server.services.runtime.env_gate import canon_run_env
+
+    env_raw = str(raw.get("env") or "").strip()
+    env = canon_run_env(env_raw) or ("unknown" if env_raw.lower() == "unknown" or not env_raw else env_raw)
+    if env not in ("dev", "test", "pre", "prod", "unknown"):
+        env = "unknown"
+    return {
+        "env": env,
+        "seen": str(raw.get("seen") or "").strip()[:200],
+        "reason": str(raw.get("reason") or "").strip()[:240],
+        "ok": True,
+    }
+
+
+def inspect_env(
+    *,
+    wanted_env: str = "",
+    wanted_label: str = "",
+    knowledge_hint: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+    provider_id: Optional[str] = None,
+    timeout_sec: int = 45,
+) -> dict[str, Any]:
+    """观察当前屏客户端环境。空输出当 unknown，不当成功匹配。"""
+    empty = {
+        "env": "unknown",
+        "seen": "",
+        "reason": "未观察",
+        "ok": False,
+    }
+    if not image_base64:
+        empty["reason"] = "无截图，无法查看环境"
+        return empty
+    provider, gate = resolve_regression_provider(provider_id)
+    if provider is None:
+        empty["reason"] = f"未启用 AI：{gate.get('reason')}"
+        return empty
+    messages = P.build_inspect_env_messages(
+        wanted_env=wanted_env,
+        wanted_label=wanted_label,
+        knowledge_hint=knowledge_hint,
+        image_base64=image_base64,
+        image_mime=image_mime,
+    )
+    last_err = "LLM 返回空/解析失败"
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        raw, meta = _chat(
+            job="inspect-env",
+            provider=provider, messages=messages,
+            temperature=0.1, max_tokens=400, timeout_sec=timeout_sec,
+        )
+        if isinstance(raw, dict) and str(raw.get("env") or "").strip():
+            row = _parse_inspect_env_raw(raw)
+            if attempt > 1:
+                SLog.i(TAG, f"inspect_env recovered on attempt {attempt}")
+            return row
+        last_err = str((meta or {}).get("error") or "").strip() or "LLM 返回空/解析失败"
+        SLog.w(TAG, f"inspect_env attempt {attempt}/{attempts} failed err={last_err!r}")
+        if attempt < attempts:
+            time.sleep(0.4)
+    empty["reason"] = last_err
+    return empty

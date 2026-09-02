@@ -5,7 +5,8 @@
 支持的 capability：
   - launch_app / close_app / press_key / wait_ms
   - swipe_direction / install_apk / read_device_data / set_clipboard
-  - tap_element / input_text (需 VLM 在 ctx.screen 上先定位)
+  - get_app_version / get_foreground_app
+  - tap_element / multi_tap / input_text (需 VLM 在 ctx.screen 上先定位)
 """
 from __future__ import annotations
 
@@ -35,8 +36,11 @@ _SUPPORTED_CAPS: set[str] = {
     "swipe_element_to_element",
     "install_apk",
     "read_device_data",
+    "get_app_version",
+    "get_foreground_app",
     "set_clipboard",
     "tap_element",
+    "multi_tap",
     "long_press_element",
     "input_text",
     "exec_script",
@@ -93,10 +97,16 @@ class AdbExecutor:
                 return self._install_apk(event, ctx, serial, started_at, t0)
             if cap == "read_device_data":
                 return self._read_device_data(event, ctx, serial, started_at, t0)
+            if cap == "get_app_version":
+                return self._get_app_version(event, ctx, serial, started_at, t0)
+            if cap == "get_foreground_app":
+                return self._get_foreground_app(event, ctx, serial, started_at, t0)
             if cap == "set_clipboard":
                 return self._set_clipboard(event, ctx, serial, started_at, t0)
             if cap == "tap_element":
                 return self._tap_element(event, ctx, serial, started_at, t0)
+            if cap == "multi_tap":
+                return self._multi_tap(event, ctx, serial, started_at, t0)
             if cap == "long_press_element":
                 return self._long_press_element(event, ctx, serial, started_at, t0)
             if cap == "input_text":
@@ -341,6 +351,58 @@ class AdbExecutor:
             elapsed_ms=elapsed, summary=f"读取 {key} 失败", error=err or out,
         )
 
+    def _get_app_version(self, event, ctx, serial, started_at, t0):
+        from server.services.runtime.app_query import parse_package_version, version_dump_shell
+
+        pkg = str((event.params or {}).get("package") or getattr(ctx.run_context, "target_package", "") or "").strip()
+        if not pkg:
+            return self._fail(event, started_at, t0, "get_app_version 缺 params.package")
+        rc, out, err = self._adb_shell(serial, "sh", "-c", version_dump_shell(pkg), timeout_sec=20.0)
+        elapsed = int((time.time() - t0) * 1000)
+        parsed = parse_package_version(out)
+        name = str(parsed.get("version_name") or "").strip()
+        if rc == 0 and name:
+            from server.services.runtime.run_context import stamp_app_version
+
+            stamp_app_version(ctx, name)
+            code = parsed.get("version_code")
+            extra = f" ({code})" if code is not None else ""
+            return make_event_result(
+                event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+                elapsed_ms=elapsed, summary=f"{pkg} {name}{extra}",
+                raw_response={"package": pkg, **parsed, "rc": rc},
+            )
+        return make_event_result(
+            event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary=f"读不到 {pkg} 的版本",
+            error=err or out or f"rc={rc}",
+            raw_response={"package": pkg, **parsed, "rc": rc, "stdout": (out or "")[:400]},
+        )
+
+    def _get_foreground_app(self, event, ctx, serial, started_at, t0):
+        from server.services.runtime.app_query import FOREGROUND_SHELL, parse_foreground
+
+        rc, out, err = self._adb_shell(serial, "sh", "-c", FOREGROUND_SHELL, timeout_sec=20.0)
+        elapsed = int((time.time() - t0) * 1000)
+        parsed = parse_foreground(out)
+        pkg = str(parsed.get("package") or "").strip()
+        expect = str((event.params or {}).get("package") or getattr(ctx.run_context, "target_package", "") or "").strip()
+        if rc == 0 and pkg:
+            summary = parsed.get("activity") or pkg
+            if expect:
+                summary = f"{summary}（目标 {expect}{'命中' if pkg == expect else '未命中'}）"
+            return make_event_result(
+                event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+                elapsed_ms=elapsed, summary=str(summary),
+                raw_response={**parsed, "expected_package": expect, "match": (pkg == expect) if expect else None, "rc": rc},
+            )
+        return make_event_result(
+            event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary="读不到前台应用",
+            error=err or out or f"rc={rc}",
+            raw_response={**parsed, "rc": rc, "stdout": (out or "")[:400]},
+        )
+
     def _set_clipboard(self, event, ctx, serial, started_at, t0):
         text = (event.params or {}).get("text") or ""
         if not text:
@@ -380,6 +442,30 @@ class AdbExecutor:
         return make_event_result(
             event, status=EventStatus.FAIL, executor_used=self.id, started_at=started_at,
             elapsed_ms=elapsed, summary=f"点击 {label} 失败", error=err or out, raw_response=audit,
+        )
+
+    def _multi_tap(self, event, ctx, serial, started_at, t0):
+        from server.services.regression.executors.multi_tap import parse_multi_tap
+
+        parsed, err = parse_multi_tap(event.params)
+        if err:
+            return self._fail(event, started_at, t0, err)
+        x, y, count, interval = parsed
+        for i in range(count):
+            rc, out, err_s = self._adb_shell(serial, "input", "tap", str(x), str(y))
+            if rc != 0:
+                self._invalidate_hierarchy(serial)
+                return self._fail(
+                    event, started_at, t0,
+                    f"连点 ({x},{y}) 第 {i + 1}/{count} 次失败",
+                )
+            if i + 1 < count:
+                time.sleep(interval / 1000.0)
+        self._invalidate_hierarchy(serial)
+        elapsed = int((time.time() - t0) * 1000)
+        return make_event_result(
+            event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary=f"连点 ({x},{y}) ×{count} 间隔{interval}ms",
         )
 
     def _point_label(self, how: str, audit: dict, x: int, y: int) -> str:

@@ -61,13 +61,34 @@ class RunContext:
 
     # 应用基础逻辑快照（下发时从库拷入，本趟任务内不变）
     playbook: dict[str, Any] = field(default_factory=dict)
-    # 本条用例开跑前从号池申请的账号（公开信息；每条用例覆盖）
+    # 本条用例开跑前租到的测试资源（公开信息；每条用例覆盖）
     accounts_brief: str = ""
     picked_account: dict[str, Any] = field(default_factory=dict)
+    resource_lease: dict[str, Any] = field(default_factory=dict)
+    resource_env: dict[str, Any] = field(default_factory=dict)
     # 开跑前设备预置 / 登录态事实
     keep_permission_prompt: bool = False
     provision_report: dict[str, Any] = field(default_factory=dict)
     session_fact: dict[str, Any] = field(default_factory=dict)
+    # 本趟任务内已对齐的登录（按已租账号，跨用例复用，不沿用上一任务残留）
+    task_session: dict[str, Any] = field(default_factory=dict)
+    # 本趟任务黑板：上条用例记住的事实（发过的消息、刚登录的号）。不清缓存则下条可沿用。
+    task_memory: list = field(default_factory=list)
+    # 清缓存 / 杀进程之后，登录态不再可信，必须重新看图。
+    session_dirty: bool = False
+    # 本条用例开跑前的场景理解（登录闸门枚举）。按原文缓存，不看图。
+    case_scene: dict[str, Any] = field(default_factory=dict)
+    # 当前安装包 versionName；简报 as-of 该版本。
+    app_version: str = ""
+    # 本趟要跑的环境（项目 env key）以及设备上看见的环境。
+    env_profile: str = ""
+    env_label: str = ""
+    env_fact: dict[str, Any] = field(default_factory=dict)
+
+    def remember_app_version(self, version: str) -> None:
+        name = str(version or "").strip()
+        if name:
+            self.app_version = name
 
     # ---------- properties ----------
 
@@ -180,6 +201,9 @@ class RunContext:
         return {
             "sn": self.sn,
             "platform": self.platform,
+            "env_profile": self.env_profile,
+            "env_label": self.env_label,
+            "env_observed": str((self.env_fact or {}).get("observed") or ""),
             "device_signature": self.device_signature,
             "device_model": self.model,
             "device_os": self.os_version,
@@ -237,7 +261,22 @@ class RunContext:
             "keep_permission_prompt": self.keep_permission_prompt,
             "provision_report": dict(self.provision_report or {}),
             "session_fact": dict(self.session_fact or {}),
+            "task_session": dict(self.task_session or {}),
+            "session_dirty": bool(self.session_dirty),
+            "case_scene": dict(self.case_scene or {}),
+            "app_version": self.app_version,
+            "env_profile": self.env_profile,
+            "env_label": self.env_label,
+            "env_fact": dict(self.env_fact or {}),
         }
+
+
+def stamp_app_version(ctx: Any, version: str) -> None:
+    """从 PREP / get_app_version 把 versionName 记到 RunContext。"""
+    rc = getattr(ctx, "run_context", None) or ctx
+    fn = getattr(rc, "remember_app_version", None)
+    if callable(fn):
+        fn(version)
 
 
 # ============== builder ==============

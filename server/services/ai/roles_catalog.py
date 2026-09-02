@@ -16,6 +16,8 @@ from server.services.ai.regression.prompts import (
     AGENT_RESTART_USER_TEMPLATE,
     INSPECT_SESSION_SYSTEM_PROMPT,
     INSPECT_SESSION_USER_TEMPLATE,
+    CASE_SCENE_SYSTEM_PROMPT,
+    CASE_SCENE_USER_TEMPLATE,
     ASSERT_VISION_SYSTEM_PROMPT,
     ASSERT_VISION_USER_TEMPLATE,
     DIFF_SUMMARIZER_SYSTEM_PROMPT,
@@ -68,9 +70,9 @@ PRECONDITION_PARSE_SYSTEM_PROMPT = (
     "1. 每条含 text（原文要点）、kind、phase。\n"
     "2. kind 取值：clear_cache|check_sim|check_wechat|check_no_wechat|"
     "check_ios_device|check_android_device|check_logged_in|check_not_logged_in|"
-    "keep_permission_prompt|unknown。\n"
-    "3. phase：清缓存/SIM/微信/设备类型/保留权限询问 → before_launch；已登录/未登录 → after_launch。\n"
-    "4. 无法自动化的环境描述用 kind=unknown。\n"
+    "keep_permission_prompt|check_app_version|check_app_foreground|unknown。\n"
+    "3. phase：清缓存/SIM/微信/设备类型/保留权限询问/客户端版本/已打开 App → before_launch；已登录/未登录 → after_launch。\n"
+    "4. 客户端版本用 check_app_version，当前已打开 App 用 check_app_foreground。无法自动化的环境描述用 kind=unknown。\n"
     "5. 只输出 JSON：{\"items\":[{\"num\":1,\"text\":\"...\",\"kind\":\"...\",\"phase\":\"...\"}]}"
 )
 COPILOT_REWRITE_SYSTEM_PROMPT = (
@@ -373,9 +375,10 @@ TEST_ENGINEER_SYSTEM_PROMPT = """你是 MiniOrange 的测试工程师。你负�
 - 按用例步骤在真机/模拟器上执行：打开应用、点击、输入、滑动、断言。
 - 规划可执行步骤、根据截图定位元素、判断当前屏是否达到预期。
 - 失败时说明看到了什么、卡在哪一步、建议重试还是交给人。
-- 设备在调度时选定；环境（测试/预发/正式）来自流程节点，不由你临时改。
-- 开跑前调用「筛测试账号」：把这条用例要测的事写成一句话（例如「我要发作品」），从资产里的测试账号按环境和业务标签挑号。不要把手机号写死在步骤里。
-- 开场先读「应用基础逻辑」（登录/退出/判断登录态/访客浏览/底栏），用 inspect-session 看当前屏，不要拿别的 App 常识硬套。
+- 开跑前调用「申请执行设备」：看用例要 App、Web 还是 A-B 双机，从当前环境可用设备里挑并占用。人可以不指定设备；指定了就按指定的跑。
+- 环境（测试/预发/正式）来自流程节点，不由你临时改。
+- 开跑前调用「租账号」：把这条用例要测的事写成一句话（例如「我要发作品」），从测试资源里的账号管理按环境和业务标签租号。不要把手机号写死在步骤里。登录态由备会话对齐，不要在业务步骤里自己走登录。
+- 开场先读「应用基础逻辑」（登录/退出/判断登录态/访客浏览/底栏）。非登录用例在前置里退出再登录，结果写入 RunContext，后续跳过观察；登录/退出/注册用例不要自动登录。需要看图时才 inspect-session，不要拿别的 App 常识硬套。
 
 【你不管什么】
 - 不宣布「验收通过 / 带风险验收 / 退回重测」（需求QA BM）。
@@ -488,7 +491,26 @@ PRODUCT_EXPERT_SYSTEM_PROMPT = """你是 MiniOrange 的产品专家。你十分�
   "note": "给审核员的一句话"
 }"""
 
-PICK_ACCOUNT_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「筛测试账号」能力。根据场景一句话，从项目资产里的测试账号中挑最合适的号。
+PICK_DEVICE_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「申请执行设备」能力。根据场景理解给出的需求和当前环境的可用设备，决定占哪些设备。
+
+【你管什么】
+- 输入：环境、场景理解给出的需求（mode / want_web / want_ab）、用例摘要、可用设备列表（sn / platform / model / busy / reserved）。
+- 只从列表里选 sn。busy=true 或 reserved=true 或 status 不是 online 的不能选。
+- 按需求占：single 一台主设备；app_web 真机 + 网页槽；ab_pair 两台同端真机（primary + peer）。
+- 需求是场景理解对「这趟要操作哪些端」的结论。不要自己再扫用例里的字去加端或减端。
+- 人已经指定设备时不会问你。
+
+【你不管什么】
+- 不假装已经同时操作两块屏。选出并占用即可；配对执行由执行层稍后做。
+- 不编造列表里没有的 sn，不改环境。
+- 不要把 mode 改到需求之外。
+
+【输出 JSON（禁止 Markdown）】
+{"mode":"single|farm|app_web|ab_pair","slots":[{"role":"primary|peer|web","sn":"...","platform":"android|ios|web"}],"reason":"一句话"}
+farm 仅在多台同端加速拆分时使用。ab_pair 必须有 primary 和 peer。app_web 必须有 primary 和 web。
+"""
+
+PICK_ACCOUNT_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「租账号」能力。根据场景一句话，从项目测试资源的账号管理中挑最合适的号。
 
 【你管什么】
 - 输入：场景（如「我要发作品」）、目标环境、账号列表（名称、环境、标签、是否占用）。
@@ -496,7 +518,7 @@ PICK_ACCOUNT_SYSTEM_PROMPT = """你是 MiniOrange 测试工程师的「筛测试
 - 环境以流程节点为准；场景里写了「测试/预发/正式」时按该环境收窄。
 
 【你不管什么】
-- 不登录、不改号、不编造池子里没有的账号。
+- 不登录、不改号、不编造池子里没有的账号。登录由备会话完成。
 
 【输出 JSON（禁止 Markdown）】
 {"account_id":"首选id","reason":"一句话","ranked":[{"id":"...","score":12,"reason":"标签命中作品流"}]}
@@ -675,11 +697,13 @@ def _product_roles() -> List[dict[str, Any]]:
             group="product",
             kind="conversational",
             source="server/services/ai/roles_catalog.py",
-            used_in=["用例执行", "Agent", "视觉定位", "筛测试账号", "应用基础逻辑"],
-            summary="在选定设备上执行用例并给出屏幕证据。开跑前读应用基础逻辑、按场景从资产里筛测试账号。下发后自动跑，不做验收/发版门禁。",
+            used_in=["用例执行", "Agent", "视觉定位", "申请执行设备", "租账号", "应用基础逻辑"],
+            summary="在设备上执行用例并给出屏幕证据。开跑前按用例申请设备、读应用基础逻辑、从测试资源里租账号。下发后自动跑，不做验收/发版门禁。",
             system_prompt=TEST_ENGINEER_SYSTEM_PROMPT,
             related_ids=[
+                "pick_device",
                 "pick_account",
+                "case-scene",
                 "inspect-session",
                 "agent-decide",
                 "plan-overview",
@@ -802,13 +826,23 @@ def _runtime_roles() -> List[dict[str, Any]]:
             system_prompt=REQ_ANALYST_IMPACT_PROMPT,
         ),
         _role(
-            id="pick_account",
-            label="筛测试账号",
+            id="pick_device",
+            label="申请执行设备",
             group="runtime",
             kind="json",
             source="server/services/ai/roles_catalog.py",
-            used_in=["下发任务", "资产 · 效果测试"],
-            summary="按场景一句话和环境，从资产号池里挑最合适的测试账号。标签优先，占用中的往后排。",
+            used_in=["下发任务未指定设备", "App+Web / A-B 占用"],
+            summary="按用例从当前环境可用设备里申请并占用。人可以不选设备。App+Web / 双机占多台，本趟仍在主设备上执行。",
+            system_prompt=PICK_DEVICE_SYSTEM_PROMPT,
+        ),
+        _role(
+            id="pick_account",
+            label="租账号",
+            group="runtime",
+            kind="json",
+            source="server/services/ai/roles_catalog.py",
+            used_in=["下发任务", "测试资源 · 试筛账号"],
+            summary="按场景一句话和环境，从账号管理里租最合适的号。标签优先，占用中的往后排。",
             system_prompt=PICK_ACCOUNT_SYSTEM_PROMPT,
         ),
         _role(
@@ -943,13 +977,23 @@ def _runtime_roles() -> List[dict[str, Any]]:
             system_prompt=AGENT_RESTART_SYSTEM_PROMPT,
         ),
         _role(
+            id="case-scene",
+            label="用例场景理解",
+            group="runtime",
+            kind="json",
+            source="server/services/ai/regression/prompts.py",
+            used_in=["Agent 开场 CASE_SCENE"],
+            summary="读用例原文判断登录闸门、设备需求和前置 kind。只出枚举。占设备看这趟要操作哪些端。",
+            system_prompt=CASE_SCENE_SYSTEM_PROMPT,
+        ),
+        _role(
             id="inspect-session",
             label="观察登录会话",
             group="runtime",
             kind="json",
             source="server/services/ai/regression/prompts.py",
             used_in=["Agent 开场 INSPECT_SESSION"],
-            summary="看截图判断当前登录态和账号是否符合用例。只观察，不切号。依据检索命中的应用基础逻辑。",
+            summary="看截图判断当前登录态。只观察，不切号。业务用例前置重新登录成功后写入 RunContext，后续跳过。",
             system_prompt=INSPECT_SESSION_SYSTEM_PROMPT,
         ),
         _role(
@@ -1247,6 +1291,20 @@ def _aux_prompt_roles() -> List[dict[str, Any]]:
             triggers=["Agent 开场"],
         ),
         _role(
+            id="user-case-scene",
+            label="User · 用例场景理解",
+            group="meta",
+            kind="text",
+            source=src_reg,
+            used_in=["case-scene"],
+            summary="CASE_SCENE 的 user 侧模板。",
+            system_prompt=CASE_SCENE_USER_TEMPLATE,
+            related_ids=["case-scene"],
+            owner="test-engineer",
+            called="gated",
+            triggers=["Agent 开跑"],
+        ),
+        _role(
             id="user-inspect-session",
             label="User · 观察登录会话",
             group="meta",
@@ -1283,6 +1341,7 @@ def _all_catalog_rows() -> List[dict[str, Any]]:
 
 RUNTIME_META = {
     "propose_atlas": {"owner": "req-analyst", "called": "wired", "triggers": ["需求分析后判断影响范围", "流程 tick", "用例 Tab · 变更"]},
+    "pick_device": {"owner": "test-engineer", "called": "wired", "triggers": ["下发任务未指定设备", "App+Web / A-B"]},
     "pick_account": {"owner": "test-engineer", "called": "wired", "triggers": ["下发冒烟/功能/回归", "资产 → 效果测试"]},
     "plan-overview": {"owner": "test-engineer", "called": "gated", "triggers": ["Case Runner Plan 模式开跑一条用例"]},
     "single-step-replan": {"owner": "test-engineer", "called": "gated", "triggers": ["Plan 模式某步失败 / 偏离"]},
@@ -1297,7 +1356,8 @@ RUNTIME_META = {
     "goal-extract": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 模式开跑一条用例"]},
     "agent-decide": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 每一步看截图决策"]},
     "agent-restart": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场是否重开应用"]},
-    "inspect-session": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场观察登录态"]},
+    "inspect-session": {"owner": "test-engineer", "called": "gated", "triggers": ["登录相关用例开场观察；业务用例沿用 RunContext 则跳过"]},
+    "case-scene": {"owner": "test-engineer", "called": "gated", "triggers": ["开跑申请设备前，以及每条用例登录闸门"]},
     "knowledge-capture": {"owner": "version-qa-bm", "called": "gated", "triggers": ["每条用例结束 / 整次任务结束"]},
     "knowledge-review": {"owner": "knowledge-reviewer", "called": "gated", "triggers": ["沉淀知识写入后自动机审"]},
     "account-tag": {"owner": "test-engineer", "called": "wired", "triggers": ["每条用例结束"]},
@@ -1325,6 +1385,7 @@ RUNTIME_META = {
     "user-agent-decide": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 每一步"]},
     "user-agent-restart": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场"]},
     "user-inspect-session": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开场观察登录态"]},
+    "user-case-scene": {"owner": "test-engineer", "called": "gated", "triggers": ["Agent 开跑"]},
     "user-ai-plan": {"owner": "test-engineer", "called": "gated", "triggers": ["Copilot / 飞书逐步规划"]},
 }
 
@@ -1340,12 +1401,14 @@ _SKILL_PROMPT_ROLE = {
     "draft_sign": "req-qa-bm",
     "pick_regression": "version-qa-bm",
     "draft_gate": "version-qa-bm",
+    "pick_device": "pick_device",
     "pick_account": "pick_account",
     "knowledge-capture": "knowledge-capture",
     "knowledge-review": "knowledge-reviewer",
     "goal-extract": "goal-extract",
     "agent-decide": "agent-decide",
     "inspect-session": "inspect-session",
+    "case-scene": "case-scene",
     "assert-vision": "assert-vision",
     "plan-overview": "plan-overview",
     "locate-vision": "locate-vision",
@@ -1367,6 +1430,7 @@ _SKILL_PROMPT_ROLE = {
     "user-agent-decide": "user-agent-decide",
     "user-agent-restart": "user-agent-restart",
     "user-inspect-session": "user-inspect-session",
+    "user-case-scene": "user-case-scene",
     "user-ai-plan": "user-ai-plan",
     "publish_wiki": "doc-keeper",
 }

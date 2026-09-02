@@ -200,7 +200,7 @@ def _category_description(category: str) -> str:
 
 def build_server_groups() -> list[dict[str, Any]]:
     """Server 编排层：描述 Plan / Run / HITL / Plugin 等 meta 能力。"""
-    return [
+    groups = [
         {
             "key": "planning",
             "title": "AI 规划",
@@ -278,6 +278,12 @@ def build_server_groups() -> list[dict[str, Any]]:
             ],
         },
         {
+            "key": "test_resources",
+            "title": "测试资源",
+            "description": "租账号、取口令、备会话。开跑前/填框时由系统调用，不进业务看图菜单。",
+            "items": [],
+        },
+        {
             "key": "plugin_system",
             "title": "插件体系",
             "description": "Capability 与 Executor 都是 YAML 插件，运行时热加载。",
@@ -297,9 +303,17 @@ def build_server_groups() -> list[dict[str, Any]]:
             ],
         },
     ]
+    try:
+        from server.services.resources.catalog import list_resource_skills
 
-
-def build_skills_catalog() -> dict[str, Any]:
+        items = list_resource_skills()
+        for g in groups:
+            if g.get("key") == "test_resources":
+                g["items"] = items
+                break
+    except Exception:
+        pass
+    return groups
     """完整 /settings/skills 返回形状（旧字段兼容 + 新字段扩展）。"""
     components = build_executor_components()
     server_groups = build_server_groups()

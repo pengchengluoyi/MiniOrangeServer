@@ -52,9 +52,23 @@ _KEEP_PROMPT_RE = re.compile(
 _IOS_ALLOW_LABELS = ("允许", "Allow", "好", "OK", "始终允许", "Allow While Using App", "Allow Once")
 
 
-def wants_keep_permission_prompt(precondition: str = "") -> bool:
-    text = str(precondition or "")
-    return bool(_KEEP_PROMPT_RE.search(text))
+def wants_keep_permission_prompt(precondition: str = "", scene: Optional[dict[str, Any]] = None) -> bool:
+    if scene:
+        from server.services.runtime.session_gate import clamp_case_scene
+
+        return any(
+            str(it.get("kind") or "") == "keep_permission_prompt"
+            for it in (clamp_case_scene(scene).get("prep_items") or [])
+        )
+    try:
+        from server.services.shared.semantic.case_text_semantic_service import parse_precondition_items
+
+        return any(
+            str(it.get("kind") or "") == "keep_permission_prompt"
+            for it in parse_precondition_items(precondition)
+        )
+    except Exception:
+        return False
 
 
 def _adb_shell(sn: str, *args: str, timeout_sec: float = 20.0) -> tuple[int, str, str]:

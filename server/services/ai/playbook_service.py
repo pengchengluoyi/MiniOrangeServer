@@ -2,11 +2,13 @@
 # -*-coding:utf-8 -*-
 """应用基础逻辑（playbook）：按应用存在库里的说明书。
 
-代码侧（已登录 tab 判定等）仍可读结构化字段。
-Agent / 分析模型按知识库检索「应用基础逻辑」分类；prompt_block 只作没有知识条目时的兜底。
+每个应用的登录、退出、业务路径都是它自己的，没有统一底栏/我的页可套。
+Agent 看说明书 + 本应用知识 + 截图；界面树 / 底栏凑数不当登录结论。
+prompt_block / session_howto_block 在知识库条目为空时兜底。
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,6 +33,7 @@ _LIST_KEYS = (
     "foreground_markers",
     "packages",
     "surfaces",
+    "chrome_notes",
 )
 _TEXT_KEYS = (
     "version",
@@ -43,6 +46,7 @@ _TEXT_KEYS = (
     "guest_how",
     "identity_page",
     "new_user_how",
+    "center_action",
 )
 _CONTENT_KEYS = _TEXT_KEYS + _LIST_KEYS + ("lexicon", "guest_exists")
 
@@ -76,6 +80,8 @@ def empty_playbook() -> Dict[str, Any]:
         "foreground_markers": [],
         "lexicon": [],
         "surfaces": ["app", "web"],
+        "center_action": "",
+        "chrome_notes": [],
         "updated_at": "",
     }
 
@@ -157,12 +163,86 @@ def has_content(playbook: Optional[dict]) -> bool:
     return bool(pb.get("guest_exists"))
 
 
+_TAB_COUNT_VERDICT_RE = re.compile(r"底栏出现|命中「.+」至少|至少\s*\d+\s*个.*视为已登录")
+
+
+def _session_how_without_tab_verdict(text: str) -> str:
+    """说明书里历史种子会把「底栏凑数」写成判断登录态，运行期丢掉这一句。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    bits = [p.strip() for p in re.split(r"[；;]", raw) if p.strip()]
+    keep = [p for p in bits if not _TAB_COUNT_VERDICT_RE.search(p)]
+    return "；".join(keep)
+
+
+def session_howto_block(playbook: Optional[dict]) -> str:
+    """本应用如何登录 / 退出 / 看登录态。不含底栏凑数规则。"""
+    pb = normalize_playbook(playbook)
+    if not pb.get("enabled"):
+        return ""
+    lines = [
+        "==== 本应用登录/退出（每个应用都不同；只按这里和当前截图，不要套用其它 App）===="
+    ]
+    if pb.get("label"):
+        lines.append(f"应用：{pb['label']}")
+    has = False
+    if pb.get("login_how"):
+        lines.append(f"如何登录：{pb['login_how']}")
+        has = True
+    if pb.get("login_triggers"):
+        lines.append("会弹出登录的页面：" + "、".join(pb["login_triggers"]))
+        has = True
+    if pb.get("logout_how"):
+        lines.append(f"如何退出登录：{pb['logout_how']}")
+        has = True
+    how = _session_how_without_tab_verdict(str(pb.get("session_how") or ""))
+    if how:
+        lines.append(f"如何判断登录态：{how}")
+        has = True
+    if pb.get("guest_how"):
+        lines.append(f"访客浏览：{pb['guest_how']}")
+        has = True
+    if pb.get("identity_page"):
+        lines.append(f"身份页：{pb['identity_page']}")
+        has = True
+    if pb.get("env_switch_how"):
+        lines.append(f"如何在应用内切换环境：{pb['env_switch_how']}")
+        has = True
+    if pb.get("login_page_markers"):
+        lines.append("登录页可见文案：" + "、".join(pb["login_page_markers"]))
+        has = True
+    if pb.get("guest_markers"):
+        lines.append("游客特征文案：" + "、".join(pb["guest_markers"]))
+        has = True
+    if not has:
+        return ""
+    lines.append("底栏是否齐全、界面树、本地存储都不能当作登录结论。桌面/启动器不是本应用登录页。")
+    return "\n".join(lines)
+
+
+def env_howto_block(playbook: Optional[dict]) -> str:
+    """只写怎么切环境。给开跑前环境闸门和简报用。"""
+    pb = normalize_playbook(playbook)
+    how = str(pb.get("env_switch_how") or "").strip()
+    if not pb.get("enabled") or not how:
+        return ""
+    bits = ["==== 本应用如何切换环境（每个应用入口不同；与屏幕冲突时以屏幕为准）===="]
+    if pb.get("label"):
+        bits.append(f"应用：{pb['label']}")
+    bits.append(f"如何在应用内切换环境：{how}")
+    return "\n".join(bits)
+
+
 def prompt_block(playbook: Optional[dict]) -> str:
     """整份说明书。enabled 且有内容才返回；执行侧直接注入，不走检索。"""
     pb = normalize_playbook(playbook)
     if not pb.get("enabled") or not has_content(pb):
         return ""
-    lines = ["==== 应用基础逻辑（本应用说明书，默认生效；与当前屏幕冲突时以屏幕为准）===="]
+    lines = [
+        "==== 应用基础逻辑（本应用说明书；每个应用的入口和路径都不同。"
+        "与当前屏幕冲突时以屏幕为准，不要用底栏凑数当登录结论）===="
+    ]
     if pb.get("label") or pb.get("version"):
         bits = [x for x in (pb.get("label"), pb.get("version") and f"版本 {pb['version']}") if x]
         if bits:
@@ -175,8 +255,9 @@ def prompt_block(playbook: Optional[dict]) -> str:
         lines.append(f"如何退出登录：{pb['logout_how']}")
     if pb.get("env_switch_how"):
         lines.append(f"如何在应用内切换环境：{pb['env_switch_how']}")
-    if pb.get("session_how"):
-        lines.append(f"如何判断登录态：{pb['session_how']}")
+    how = _session_how_without_tab_verdict(str(pb.get("session_how") or ""))
+    if how:
+        lines.append(f"如何判断登录态：{how}")
     guest = "有" if pb.get("guest_exists") else "未声明有"
     guest_line = f"访客浏览：{guest}"
     if pb.get("guest_how"):
@@ -188,14 +269,14 @@ def prompt_block(playbook: Optional[dict]) -> str:
         lines.append(f"身份页（看当前是谁）：{pb['identity_page']}")
     nav = _as_str_list(list(pb.get("bottom_tabs") or []) + list(pb.get("segment_tabs") or []))
     if nav:
-        lines.append("主导航：" + "、".join(nav))
+        lines.append("主导航（仅供认路，不是登录结论）：" + "、".join(nav))
     if pb.get("logged_in_tabs"):
         lines.append(
-            f"已登录底栏信号：命中「{'、'.join(pb['logged_in_tabs'])}」至少 "
-            f"{pb.get('logged_in_tab_hits') or 3} 个"
+            "已登录时可能出现的导航名（仅供认路，不能单靠凑齐底栏判登录）："
+            + "、".join(pb["logged_in_tabs"])
         )
     if pb.get("logged_in_pages"):
-        lines.append("视为已登录的页面：" + "、".join(pb["logged_in_pages"]))
+        lines.append("身份相关页面名（仅供认路）：" + "、".join(pb["logged_in_pages"]))
     if pb.get("login_page_markers"):
         lines.append("登录页特征：" + "、".join(pb["login_page_markers"]))
     if pb.get("new_user_how"):
@@ -237,6 +318,8 @@ def to_ui_override(playbook: Optional[dict]) -> Dict[str, Any]:
         "foreground_markers": list(pb.get("foreground_markers") or []),
         "surfaces": list(pb.get("surfaces") or []),
         "lexicon": lex,
+        "center_action": str(pb.get("center_action") or "").strip(),
+        "chrome_notes": list(pb.get("chrome_notes") or []),
     }
 
 
@@ -272,17 +355,11 @@ def yaml_to_playbook(raw: dict) -> Dict[str, Any]:
         if ids:
             pb["surfaces"] = ids
     bits = []
-    if pb["logged_in_tabs"]:
-        bits.append(
-            f"底栏出现「{'、'.join(pb['logged_in_tabs'])}」中至少 "
-            f"{pb['logged_in_tab_hits']} 个，视为已登录"
-        )
-    if pb["logged_in_pages"]:
-        bits.append(f"处于「{'、'.join(pb['logged_in_pages'])}」视为已登录")
     if pb["login_page_markers"]:
         bits.append(f"出现「{'、'.join(pb['login_page_markers'])}」视为登录页")
     else:
         bits.append("出现一键登录、验证码登录、手机号登录、访客浏览等通用登录文案，视为未登录")
+    bits.append("是否已登录以当前屏可见的账号信息（昵称/手机号/退出）为准，不要只靠底栏是否凑齐")
     pb["session_how"] = "；".join(bits)
     if "我的" in pb["bottom_tabs"]:
         pb["identity_page"] = "我的"
@@ -291,7 +368,7 @@ def yaml_to_playbook(raw: dict) -> Dict[str, Any]:
     for key in _TEXT_KEYS:
         if str(row.get(key) or "").strip():
             pb[key] = str(row.get(key)).strip()
-    for key in ("login_triggers", "guest_markers"):
+    for key in ("login_triggers", "guest_markers", "chrome_notes"):
         if row.get(key):
             pb[key] = _as_str_list(row.get(key))
     return normalize_playbook(pb)

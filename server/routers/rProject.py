@@ -206,11 +206,27 @@ def update_project_env(project_id: str, item: ProjectEnvUpdate, db: Session = De
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     prev = project.env if isinstance(project.env, dict) else {}
+    incoming_envs = item.environments if item.environments is not None else prev.get("environments")
+    if isinstance(incoming_envs, list) and isinstance(prev.get("environments"), list):
+        prev_by_key = {
+            str(e.get("key") or ""): e
+            for e in prev.get("environments") or []
+            if isinstance(e, dict) and e.get("key")
+        }
+        merged_envs = []
+        for row in incoming_envs:
+            if not isinstance(row, dict):
+                continue
+            old = prev_by_key.get(str(row.get("key") or "")) or {}
+            if "secrets" not in row and old.get("secrets"):
+                row = {**row, "secrets": old.get("secrets")}
+            merged_envs.append(row)
+        incoming_envs = merged_envs
     doc = normalize_project_env(
         {
             "default_profile": item.default_profile,
             "profiles": item.profiles,
-            "environments": item.environments,
+            "environments": incoming_envs,
             "channels": item.channels,
             "pipeline": item.pipeline,
             "test_accounts": prev.get("test_accounts"),
@@ -236,6 +252,7 @@ class TestAccountSaveBody(BaseModel):
 class TestAccountPickBody(BaseModel):
     prompt: str = ""
     env: str = ""
+    surface: str = ""
 
 
 @router.get("/{project_id}/accounts")
@@ -254,6 +271,7 @@ def list_project_accounts(project_id: str, env: str = "", db: Session = Depends(
         "data": {
             "accounts": public_test_accounts(rows, include_password=True),
             "environments": doc.get("environments") or [],
+            "channels": doc.get("channels") or [],
         },
     }
 
@@ -281,7 +299,14 @@ def pick_project_accounts(project_id: str, body: TestAccountPickBody, db: Sessio
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     doc = load_project_env(db, project_id)
-    ranked = pick_test_accounts(list_test_accounts(doc), prompt=body.prompt, env=body.env)
+    ranked = pick_test_accounts(
+        list_test_accounts(doc),
+        prompt=body.prompt,
+        env=body.env,
+        surface=body.surface,
+        channels=doc.get("channels") or [],
+        env_doc=doc,
+    )
     return {"code": 200, "data": {"accounts": public_test_accounts(ranked)}}
 
 

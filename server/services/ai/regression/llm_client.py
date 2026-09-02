@@ -276,12 +276,16 @@ def extract_chat_content(resp_json: dict[str, Any]) -> tuple[str, dict[str, Any]
     choice = choices[0]
     message = choice.get("message") or {}
     content = ""
+    tool_calls = None
     if isinstance(message, dict):
         content = message.get("content") or ""
         if isinstance(content, list):
             content = "\n".join(
                 p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
             )
+        raw_calls = message.get("tool_calls")
+        if isinstance(raw_calls, list) and raw_calls:
+            tool_calls = raw_calls
     if not content:
         content = choice.get("text") or ""
     content = repair_utf8_mojibake(str(content or ""))
@@ -292,6 +296,8 @@ def extract_chat_content(resp_json: dict[str, Any]) -> tuple[str, dict[str, Any]
         "usage": resp_json.get("usage"),
         **parse_token_usage(resp_json.get("usage")),
     }
+    if tool_calls:
+        meta["tool_calls"] = tool_calls
     return content, meta
 
 
@@ -443,6 +449,7 @@ def _consume_sse_chat(
     first_token_at: Optional[float] = None
     deadline = started + max(float(timeout_sec or 90), 30.0)
     aborted = ""
+    tool_acc: list[dict[str, Any]] = []
     try:
         for raw in _iter_sse_text_lines(resp):
             now = time.time()
@@ -478,19 +485,28 @@ def _consume_sse_chat(
                 usage = chunk.get("usage")
             choices = chunk.get("choices") or []
             choice = choices[0] if choices and isinstance(choices[0], dict) else {}
-            piece = _delta_text(choice.get("delta") or {})
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if delta.get("tool_calls"):
+                from server.services.plugins.tool_schema import merge_tool_call_deltas
+
+                merge_tool_call_deltas(tool_acc, delta.get("tool_calls"))
+            piece = _delta_text(delta)
             if not piece:
                 piece = _delta_text(choice)
+            has_tool = bool(tool_acc) and any(
+                str((t.get("function") or {}).get("name") or "") for t in tool_acc
+            )
             if piece:
                 if first_token_at is None:
                     first_token_at = now
                 text += piece
-                if looks_like_output_melt(text):
+                if not has_tool and looks_like_output_melt(text):
                     aborted = "melt"
                     meta["error"] = "模型输出空白/无 JSON 键，已中止以免卡死"
                     break
                 if (
-                    first_token_at
+                    not has_tool
+                    and first_token_at
                     and (now - first_token_at) >= _MELT_KEY_DEADLINE_SEC
                     and len(text) >= 40
                     and not has_json_object_key(text)
@@ -518,9 +534,13 @@ def _consume_sse_chat(
             f"chat stream aborted kind={aborted} provider={meta.get('provider_id')} "
             f"len={len(text)} preview={text[:120]!r}",
         )
+    message: dict[str, Any] = {"content": text}
+    if tool_acc and any(str((t.get("function") or {}).get("name") or "") for t in tool_acc):
+        message["tool_calls"] = tool_acc
+        finish_reason = finish_reason or "tool_calls"
     return {
         "choices": [{
-            "message": {"content": text},
+            "message": message,
             "finish_reason": finish_reason or "stop",
         }],
         "usage": usage or {},
@@ -559,6 +579,7 @@ def _post_chat_completions(
         "attempts": 0,
         "retry_reasons": [],
         "json_mode_downgraded": False,
+        "tools_downgraded": False,
         "stream": False,
     }
     if not base or not api_key or not model:
@@ -571,6 +592,10 @@ def _post_chat_completions(
         meta["error"] = f"requests import failed: {e}"
         return None, meta
 
+    extra = dict(extra_payload or {})
+    if extra.get("tools"):
+        json_mode = False
+        response_schema = None
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -585,9 +610,9 @@ def _post_chat_completions(
     want_stream = bool(stream)
     if want_stream:
         payload["stream"] = True
-    if extra_payload:
-        payload.update(extra_payload)
-        if extra_payload.get("stream") is False:
+    if extra:
+        payload.update(extra)
+        if extra.get("stream") is False:
             want_stream = False
             payload.pop("stream", None)
 
@@ -616,6 +641,15 @@ def _post_chat_completions(
                     payload.pop("response_format", None)
                     meta["json_mode_downgraded"] = True
                     dropped = "response_format"
+                elif "parallel_tool_calls" in payload and "tools" in payload:
+                    payload.pop("parallel_tool_calls", None)
+                    dropped = "parallel_tool_calls"
+                elif "tools" in payload:
+                    payload.pop("tools", None)
+                    payload.pop("tool_choice", None)
+                    payload.pop("parallel_tool_calls", None)
+                    meta["tools_downgraded"] = True
+                    dropped = "tools"
                 if dropped:
                     meta["retry_reasons"].append(f"{resp.status_code}:{dropped}_unsupported")
                     SLog.w(TAG, f"provider={pid} model={model} 不支持 {dropped}，已降级重试")
@@ -701,6 +735,14 @@ def _parse_chat_json(resp_json: dict[str, Any], meta: dict[str, Any]) -> tuple[O
     meta["fail_kind"] = aborted_kind
     meta["error"] = aborted_err or meta.get("error") or ""
 
+    tool_calls = meta.get("tool_calls")
+    if tool_calls:
+        from server.services.plugins.tool_schema import decision_from_tool_calls
+
+        parsed_tools = decision_from_tool_calls(tool_calls, content=content)
+        if parsed_tools:
+            return parsed_tools, content
+
     parsed = _extract_first_json_object(content)
     if parsed is None and content:
         parsed = _salvage_truncated_json(content)
@@ -749,6 +791,9 @@ def _merge_round_meta(acc: dict[str, Any], round_meta: dict[str, Any]) -> dict[s
     out["retry_reasons"] = list(acc.get("retry_reasons") or []) + list(round_meta.get("retry_reasons") or [])
     out["json_mode_downgraded"] = bool(acc.get("json_mode_downgraded")) or bool(
         round_meta.get("json_mode_downgraded")
+    )
+    out["tools_downgraded"] = bool(acc.get("tools_downgraded")) or bool(
+        round_meta.get("tools_downgraded")
     )
     out["aborted"] = bool(round_meta.get("aborted"))
     if round_meta.get("fail_kind"):

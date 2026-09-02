@@ -48,11 +48,13 @@ _WAIT_CAPS = {"wait_ms", "wait_screen_ready"}
 # max_wait_rounds 等上限，不进震荡窗口。
 _OSCILLATION_IGNORE_CAPS = {
     "wait_ms", "wait_screen_ready", "assert_visual",
-    "skip_restart", "inspect_session", "pick_account", "exec_script", "capture_screen",
-    "skip_repeat_tap", "assert_skip",
+    "skip_restart", "inspect_session", "pick_account", "lease_account",
+    "get_otp", "get_phone", "release_account", "exec_script", "capture_screen",
+    "skip_repeat_tap", "assert_skip", "session_align", "session_gate", "case_scene",
+    "inspect_env", "env_align",
 }
 _MUTATE_CAPS = {
-    "tap_element", "swipe_element_to_element", "swipe_direction",
+    "tap_element", "multi_tap", "swipe_element_to_element", "swipe_direction",
     "input_text", "press_key",
 }
 # 同一入口再点：不检测页面有没有切过去，直接做后续操作。
@@ -60,16 +62,12 @@ _PROCEED_AFTER_ENTRY = (
     "【入口已点过】同一位置已经点过。不要再点这里。"
     "本步操作视为做完，进入【本步预期】校验：只看当前屏是什么，禁止点击/关闭/返回来让预期成立。"
 )
-# 导航是否成功不要靠「选中态/切没切页」挡后续；这些检查点直接跳过。
-_NAV_VERIFY_RE = re.compile(
-    r"选中态|已选中|底部.{0,16}(首页|tab|导航)|tab.{0,8}选中",
-    re.I,
-)
+# 导航选中态是本应用看图事件，不再按关键词跳过。
 _NESTED_PUBLISH_RE = re.compile(
     r"再发|发一条新|发布一条新|新帖后|发布新帖|再发布",
 )
 _OBSERVE_HEAD_RE = re.compile(r"^(查看|检查|观察|确认是否|确认一下|看一下|看看)")
-_DO_VERB_RE = re.compile(r"点击|点「|点选|输入|填写|滑动|上滑|下滑|打开应用|启动应用|长按|拖|按返回")
+_DO_VERB_RE = re.compile(r"点击|连点|点「|点选|输入|填写|滑动|上滑|下滑|打开应用|启动应用|长按|拖|按返回")
 _CHECK_ONLY_CAPS = {"wait_ms", "wait_screen_ready", "assert_visual", "capture_screen"}
 _CHECK_SETTLE_SEC = 0.8
 _LOADING_HINT_RE = re.compile(r"加载|转圈|转场|占位|生成中|尚未完成")
@@ -93,11 +91,18 @@ _HITL_FIELD_Q = {
     "sms_code": "请输入短信验证码（4-8位数字），系统会填进验证码框",
     "text": "请输入需要填进界面的文本",
 }
+SESSION_MENU_IDS = {
+    "tap_element", "multi_tap", "long_press_element", "input_text",
+    "swipe_direction", "swipe_element_to_element",
+    "wait_ms", "wait_screen_ready", "press_key", "launch_app",
+}
 
 # 开场/旁路步骤不进 decide 历史：模型看的是当前截图，这些只会挤掉真正做过的动作
 _HISTORY_NOISE_CAPS = {
-    "skip_restart", "inspect_session", "pick_account",
+    "skip_restart", "inspect_session", "pick_account", "lease_account",
+    "get_otp", "get_phone", "release_account",
     "capture_screen", "noop",
+    "inspect_env", "env_align",
 }
 _HISTORY_BLOCK_MAX_CHARS = 900
 
@@ -116,6 +121,12 @@ def history_action_brief(cap: str, params: dict | None) -> str:
         if x is not None and y is not None:
             return f"{cap} @{x},{y}"
         return cap or "?"
+    if cap == "multi_tap":
+        x, y = params.get("x"), params.get("y")
+        n = params.get("count") or 6
+        if x is not None and y is not None:
+            return f"{cap} @{x},{y} ×{n}"
+        return f"{cap} ×{n}"
     if cap == "swipe_element_to_element":
         return (
             f"{cap} @{params.get('from_x')},{params.get('from_y')}"
@@ -124,6 +135,9 @@ def history_action_brief(cap: str, params: dict | None) -> str:
     if cap == "swipe_direction":
         return f"{cap} {params.get('direction') or ''}".strip()
     if cap == "input_text":
+        field = str(params.get("field") or "").strip().lower()
+        if field == "sms_code":
+            return f"{cap} field=sms_code"
         text = _clip_hist(params.get("text"), 20)
         return f"{cap} 「{text}」" if text else cap
     if cap == "press_key":
@@ -162,6 +176,8 @@ _CATEGORY_LABEL = {
     "device_unhealthy": "设备/系统异常",
     "expect_fail": "校验不通过",
     "expect_unverifiable": "无法验证",
+    "step_unexecutable": "测试步骤无法执行",
+    "prep_insufficient": "执行期-前置准备不足",
 }
 
 
@@ -675,6 +691,7 @@ class AgentExecutor:
         case_preconditions: str = "",
         case_name: str = "",
         case_steps_text: str = "",
+        case_expected: str = "",
         nested_publish: bool = False,
         knowledge_hits: list[dict[str, Any]] | None = None,
         seq_nodes: Optional[list[SeqNode]] = None,
@@ -690,6 +707,7 @@ class AgentExecutor:
         self.case_preconditions = case_preconditions or ""
         self.case_name = case_name or ""
         self.case_steps_text = case_steps_text or ""
+        self.case_expected = case_expected or ""
         self._nested_publish = bool(nested_publish)
         self.knowledge_hits = knowledge_hits or []
         self.shared: dict[str, Any] = {}
@@ -716,11 +734,20 @@ class AgentExecutor:
         self._followup_after_repeat = False  # 已经把「后面的操作」跑过一次
         self._session_note = ""
         self._session_inspected = False
+        self._session_mode = False
+        self._session_kind = ""
+        self._prep_done = False
+        self._session_goal = ""
+        self._session_success = ""
+        self._session_knowledge_cache: Optional[str] = None
+        self._briefing_cache: dict[str, Any] = {}
+        self._last_briefing = None
         self._seq_nodes: list[SeqNode] = list(seq_nodes or [])
         self._seq_i = 0
         self._seq_phase = "do"
         self._check_waits = 0
         self._expect_codes: dict[int, str] = {}
+        self._seq_halted = False
         if self._seq_nodes:
             self._sync_seq_phase()
 
@@ -738,12 +765,17 @@ class AgentExecutor:
 
     @property
     def _seq_enabled(self) -> bool:
-        return bool(self._seq_nodes)
+        return bool(getattr(self, "_seq_nodes", None))
 
     def _seq_current(self) -> Optional[SeqNode]:
-        if 0 <= self._seq_i < len(self._seq_nodes):
-            return self._seq_nodes[self._seq_i]
+        nodes = getattr(self, "_seq_nodes", None) or []
+        i = int(getattr(self, "_seq_i", 0) or 0)
+        if 0 <= i < len(nodes):
+            return nodes[i]
         return None
+
+    def _all_steps_uncheckable(self) -> bool:
+        return bool(self._seq_nodes) and all(not (n.expected or "").strip() for n in self._seq_nodes)
 
     def _sync_seq_phase(self) -> None:
         cur = self._seq_current()
@@ -792,7 +824,10 @@ class AgentExecutor:
                 tag = "未到，禁止执行"
             bit = f"[{mark}] 步骤 {node.n} {tag}：{node.instruction or '（无操作）'}"
             if not node.expected:
-                bit += " ｜ 本步无预期（做完即过）"
+                if self._all_steps_uncheckable():
+                    bit += " ｜ 本步无预期（无法校验）"
+                else:
+                    bit += " ｜ 本步无预期（做完即过）"
             elif i < self._seq_i:
                 bit += " ｜ 已交系统校验"
             elif self._seq_phase == "check" and i == self._seq_i:
@@ -813,7 +848,7 @@ class AgentExecutor:
             if cur.expected:
                 lines.append("本步预期由系统单独校验。现在不要看预期、不要验、不要为它去点。")
         else:
-            lines.append(f"【当前只验步骤 {cur.n}】{cur.expected or '（无预期，视为通过）'}")
+            lines.append(f"【当前只验步骤 {cur.n}】{cur.expected or '（无预期，无法执行校验）'}")
             lines.append("校验由系统直接做，不要操作设备。")
         return "\n".join(lines)
 
@@ -910,6 +945,8 @@ class AgentExecutor:
 
     def _seq_on_check_pass(self) -> str:
         """check 通过后前进。返回 pass|continue。"""
+        if self._seq_halted:
+            return "fail"
         cur = self._seq_current()
         if cur and cur.cp_id:
             self._mark_checkpoints([cur.cp_id])
@@ -924,7 +961,16 @@ class AgentExecutor:
             self._assert_feedback = reason
             self._oscillation_advice = "当前仍在加载，wait_ms 后再按同一预期校验，不要点关闭。"
             return "continue"
+        self._seq_halted = True
         return None
+
+    def _stamp_remaining_unobserved(self, n: int, claims, *, from_i: int) -> None:
+        """红了就停：本步后面没看到的句子记未观察，不当失败。"""
+        for c in list(claims)[from_i:]:
+            if getattr(c, "gap", False):
+                self._stamp_expect(n, c.code)
+            else:
+                self._stamp_expect(n, "EXPECT.SKIPPED.step_not_done")
 
     def _history_block(self) -> str:
         """只保留「最近做过什么、结果如何」，不回灌 thought 和完整 params。"""
@@ -948,8 +994,8 @@ class AgentExecutor:
         extras: list[str] = []
         ans = self.shared.get("hitl_last_answer")
         if ans:
-            src = "号池" if str(ans.get("source") or "") == "account_pool" else "人工"
-            extras.append(f"[{src}回复] {_clip_hist(ans.get('answer'), 40)}")
+            src = str(ans.get("source") or "resource")
+            extras.append(f"[资源网关已填 来源 {src}]")
         if self._assert_feedback and not self._seq_enabled:
             extras.append(f"[校验未通过] {_clip_hist(self._assert_feedback, 80)}")
         left = self._wall_left_label()
@@ -1051,7 +1097,9 @@ class AgentExecutor:
             if not title:
                 continue
             body = knowledge_body_text(item)
-            used = item.get("used") is not False and bool(body)
+            bind = item.get("bind") if isinstance(item.get("bind"), dict) else {}
+            has_bind = bool(str(bind.get("slot") or "").strip() and str(bind.get("value") or "").strip())
+            used = item.get("used") is not False and bool(body or has_bind)
             tags = item.get("tags") or []
             when = " ".join(str(t) for t in tags if t)
             rows.append({
@@ -1079,15 +1127,15 @@ class AgentExecutor:
         categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        from server.services.system_settings_service import (
-            dedupe_knowledge_hits,
-            match_testing_knowledge,
-        )
+        from server.services.knowledge_situation import route_knowledge
+        from server.services.system_settings_service import dedupe_knowledge_hits
+
         query = self._knowledge_query(extra=extra, dump=dump)
         try:
-            hits = match_testing_knowledge(
+            hits = route_knowledge(
                 query,
                 app_id=str(getattr(self.ctx, "app_id", "") or ""),
+                scene=self._knowledge_scene(),
                 limit=limit,
                 categories=categories,
                 exclude_categories=exclude_categories,
@@ -1103,7 +1151,8 @@ class AgentExecutor:
         ))
 
     def _match_step_knowledge(self, *, extra: str = "", dump=None) -> list[dict[str, Any]]:
-        ranked = self._query_knowledge(extra=extra, dump=dump, limit=12)
+        packet = self._compile_briefing(dump=dump, extra=extra)
+        ranked = self._knowledge_rows_from_hits(getattr(packet, "knowledge", None) or [])
         self.knowledge_hits = ranked
         return ranked
 
@@ -1111,7 +1160,12 @@ class AgentExecutor:
         return build_knowledge_index_text(rows)
 
     def _compose_knowledge_hint(self, rows: list[dict[str, Any]], *, body: str = "") -> str:
-        parts = [self._knowledge_hint(rows)]
+        parts: list[str] = []
+        packet = self._last_briefing or self._compile_briefing()
+        if getattr(packet, "text", ""):
+            parts.append(packet.text)
+        elif rows:
+            parts.append(self._knowledge_hint(rows))
         if self._recovery_advice:
             parts.append("【系统框建议】" + self._recovery_advice)
         if self._oscillation_advice:
@@ -1149,10 +1203,32 @@ class AgentExecutor:
                 hier = get_hub().a11y_text(str(getattr(self.ctx, "sn", "") or ""))
         except Exception:
             hier = ""
+        if self._session_mode:
+            goal = self._session_goal
+            success = self._session_success
+            if getattr(self, "_session_kind", "") == "env":
+                checkpoints = (
+                    "（环境对齐）只确认/切换本应用当前环境。"
+                    "按说明书或知识里的切换路径操作。不要登录，不要做业务步骤。"
+                    "若不在目标应用内，先打开目标应用。"
+                )
+            else:
+                checkpoints = (
+                    "（备会话阶段）只做本应用的登录、退出或切到已租账号。"
+                    "每个应用入口完全不同：看截图，按本应用说明书/知识逐步操作，"
+                    "不要套用通用「我的→设置→退出」或通用底栏。"
+                    "当屏在问手机号或一次性口令时 input_text 并带 field=phone 或 field=sms_code，"
+                    "text 可写占位，值由资源网关填入。禁止 ask_human 要号或码，禁止自己编造。"
+                    "若不在目标应用内，先打开目标应用。不要开始业务步骤。"
+                )
+        else:
+            goal = self._seq_decide_goal() if self._seq_enabled else self.goal.goal
+            success = self._seq_decide_success() if self._seq_enabled else self.goal.success_criteria
+            checkpoints = self._checkpoints_block()
         return planner.decide_next_action(
-            goal=self._seq_decide_goal() if self._seq_enabled else self.goal.goal,
-            success_criteria=self._seq_decide_success() if self._seq_enabled else self.goal.success_criteria,
-            checkpoints_block=self._checkpoints_block(),
+            goal=goal,
+            success_criteria=success,
+            checkpoints_block=checkpoints,
             run_context=self.ctx,
             history_block=self._history_block(),
             width=screen.width, height=screen.height,
@@ -1162,6 +1238,7 @@ class AgentExecutor:
             memory_block=self._memory_block(),
             session_block=self._session_block_text(),
             provider_id=self.provider_id, timeout_sec=self.opts.step_timeout_sec,
+            menu_ids=SESSION_MENU_IDS if self._session_mode else None,
         )
 
     def _path_knowledge_nudge(
@@ -1177,6 +1254,7 @@ class AgentExecutor:
         )
 
     def _screen_dump(self):
+        """屏幕文案只给知识检索当 hint，不当登录/业务结论。"""
         try:
             from server.services.runtime.playwright_hub import get_hub, is_web_slot
             from server.services.regression.hierarchy import UiDump
@@ -1292,6 +1370,10 @@ class AgentExecutor:
                 for r in knowledge
                 if r.get("id") and r.get("title")
             ]
+        cap = capability_id
+        if not cap and decision is not None and getattr(decision, "action", None):
+            cap = str(decision.action.capability_id or "")
+        data["lane"] = self._lane(cap)
         agent_stream.emit_agent_event(data)
 
     # ---------- 主循环 ----------
@@ -1308,8 +1390,20 @@ class AgentExecutor:
         SLog.i(TAG, f"[{self.run_id}] >>> agent case={self.case_id} goal={self.goal.goal!r} "
                     f"checkpoints={len(self.goal.checkpoints)} wall_limit={wall_min}min")
         self._emit("start")
+        self._seed_task_memory()
         self._note_issued_account()
         self._maybe_bootstrap_restart()
+        gated = None
+        try:
+            gated = self._gate_env_before_loop()
+        except Exception as exc:
+            SLog.w(TAG, f"[{self.run_id}] env gate crashed: {exc}")
+            gated = ("fail", f"环境对齐异常: {exc}", "prep_insufficient")
+        if gated:
+            overall, decline_reason, failure_category = gated
+            return self._build_report(
+                overall, started_at, started_ts, blocked_reason, decline_reason, failure_category,
+            )
         gated = None
         try:
             gated = self._gate_session_before_loop()
@@ -1321,6 +1415,7 @@ class AgentExecutor:
             return self._build_report(
                 overall, started_at, started_ts, blocked_reason, decline_reason, failure_category,
             )
+        self._prep_done = True
 
         capture_fails = 0
         while True:
@@ -1374,9 +1469,13 @@ class AgentExecutor:
             dump = self._screen_dump()
             shown_knowledge = self._match_step_knowledge(dump=dump)
             knowledge_hint = self._compose_knowledge_hint(shown_knowledge)
-            self._maybe_inspect_session(screen, knowledge=shown_knowledge)
             step_idx = len(self.results) + 1
             if self._seq_enabled and self._seq_phase == "check":
+                if self._seq_halted:
+                    overall = "fail"
+                    failure_category = failure_category or "expect_fail"
+                    decline_reason = decline_reason or "校验不通过"
+                    break
                 cur = self._seq_current()
                 if cur and not cur.expected:
                     outcome, reason = self._run_seq_check(screen, step_idx)
@@ -1634,7 +1733,7 @@ class AgentExecutor:
                     result = result.model_copy(update={"knowledge": list(shown_knowledge)})
                 except Exception:
                     pass
-            self.results.append(result)
+            self.results.append(self._adopt(result, cap))
             self._push_step(step_idx, decision, result_status=str(result.status.value),
                             summary=result.summary or result.error, screen_hash=shot_hash,
                             phash=shot_phash)
@@ -1644,6 +1743,7 @@ class AgentExecutor:
                 result_status=str(result.status.value),
                 summary=result.summary or result.error,
                 elapsed_ms=int(getattr(result, "elapsed_ms", 0) or 0),
+                capability_id=cap,
                 knowledge=shown_knowledge,
             )
             # 有实际动作推进 → 清掉上次的 done 反馈
@@ -1696,6 +1796,16 @@ class AgentExecutor:
                 if self._seq_on_check_fail(reason, loading=loading) == "continue":
                     time.sleep(self.opts.pause_ms_between_steps / 1000.0)
                     continue
+                cur = self._seq_current()
+                if cur:
+                    from server.services.regression.expect_catalog import classify_expect_text
+                    row = classify_expect_text(cur.expected)
+                    done = len([p for p in str(self._expect_codes.get(cur.n) or "").split("|") if p.strip()])
+                    if not done:
+                        head = next((c for c in row.claims if not c.gap), None)
+                        self._stamp_expect(cur.n, f"EXPECT.FAIL.{getattr(head, 'kind', None) or 'unknown'}")
+                        done = 1
+                    self._stamp_remaining_unobserved(cur.n, row.claims, from_i=done)
                 overall = "fail"
                 failure_category = "expect_fail"
                 decline_reason = reason[:240]
@@ -1921,20 +2031,22 @@ class AgentExecutor:
         return None
 
     def _skip_nav_verify_checkpoints(self) -> list[str]:
-        """入口已点过：不要用「选中态 / 切没切页」挡住后面的操作。"""
-        skipped: list[str] = []
-        for cp in self.goal.checkpoints:
-            if cp.done:
-                continue
-            if _NAV_VERIFY_RE.search(cp.description or ""):
-                cp.done = True
-                skipped.append(cp.id)
-        if skipped:
-            SLog.i(TAG, f"[{self.run_id}] 跳过导航检查点 {skipped}（不检测页面切换）")
-        return skipped
+        """选中态是本应用看图事件，不再按关键词跳过。"""
+        return []
 
     def _assert_context_block(self) -> str:
         parts: list[str] = []
+        try:
+            packet = self._compile_briefing(extra_scene={
+                "lane": "expect",
+                "need": "judge_selected",
+                "facet": "chrome",
+                "screen_role": "chrome_nav",
+            })
+            if getattr(packet, "text", ""):
+                parts.append(packet.text)
+        except Exception as exc:
+            SLog.d(TAG, f"[{self.run_id}] expect briefing skipped: {exc}")
         mem = self._memory_block()
         if mem:
             parts.append("==== 短期记忆（当前截图是现在；下列是之前记下的事实）====\n" + mem)
@@ -1955,66 +2067,6 @@ class AgentExecutor:
 
     def _session_block_text(self) -> str:
         return (self._session_note or "").strip()
-
-    _SESSION_NAV_CAPS = {
-        "tap", "click", "double_tap", "long_press", "swipe", "scroll",
-        "back", "press_back", "input_text",
-    }
-    _SESSION_SKIP_CAPS = {
-        "close_app", "launch_app", "open_app", "skip_restart", "inspect_session",
-        "pick_account", "capture_screen", "wait_ms", "wait", "noop",
-    }
-
-    def _has_session_probe_nav(self) -> bool:
-        """开场重启/发号不算；真正点过页面之后才有资格看登录态。"""
-        for s in self.steps:
-            cap = str(s.capability_id or "").lower()
-            if not cap or cap in self._SESSION_SKIP_CAPS or cap.startswith("recovery_"):
-                continue
-            if cap in self._SESSION_NAV_CAPS or cap.startswith("tap") or cap.startswith("click"):
-                return True
-        return False
-
-    def _maybe_inspect_session(self, screen, *, knowledge: list[dict[str, Any]] | None = None) -> None:
-        """首页通常看不出登录态。等点过页面后再观察一次；看不清不要转人工。"""
-        if self._session_inspected:
-            return
-        if not self._has_session_probe_nav():
-            return
-        if screen is None or not screen.has_image():
-            return
-        required = (self.case_preconditions or "").strip() or (self.goal.goal or "")
-        knowledge_hint = self._knowledge_hint(knowledge or [])
-        row = planner.inspect_session(
-            required_session=required,
-            knowledge_hint=knowledge_hint,
-            accounts_brief=str(getattr(self.ctx, "accounts_brief", "") or ""),
-            image_base64=screen.image_base64,
-            image_mime=screen.image_mime,
-            provider_id=self.provider_id,
-            timeout_sec=self.opts.step_timeout_sec,
-        )
-        note = (
-            f"session={row.get('session')} identity={row.get('identity')} "
-            f"next={row.get('next')} probe={row.get('probe')} "
-            f"seen={row.get('seen') or '—'}；{row.get('reason') or ''}"
-        )
-        self._session_note = note.strip()
-        self._session_inspected = True
-        SLog.i(TAG, f"[{self.run_id}] inspect session {self._session_note[:180]!r}")
-        thumb = agent_stream.make_thumb(screen.image_base64)
-        shot_hash = _screen_hash(screen.image_base64)
-        shot_phash = _screen_phash(screen.image_base64)
-        self._record_synthetic(
-            len(self.results) + 1, EventStatus.PASS, "inspect_session",
-            self._session_note[:180], shot_hash, shot_phash,
-            thumb=thumb,
-        )
-        if self.results and knowledge:
-            try:
-                self.results[-1] = self.results[-1].model_copy(update={"knowledge": list(knowledge)})
-            except Exception:
-                pass
 
     def _maybe_bootstrap_restart(self) -> None:
         """开场看图：由模型决定是否 force-stop + launch。不计入决策预算。"""
@@ -2094,7 +2146,7 @@ class AgentExecutor:
                 result = result.model_copy(update={"thumb": thumb})
             except Exception:
                 pass
-        self.results.append(result)
+        self.results.append(self._adopt(result, cap))
         self.steps.append(_Step(
             idx=seq, thought=thought, capability_id=cap, params=dict(params),
             status="continue", result_status=str(result.status.value),
@@ -2109,8 +2161,469 @@ class AgentExecutor:
             knowledge=k,
         )
 
+    def _picked_phone(self) -> str:
+        picked = getattr(self.ctx, "picked_account", None) or {}
+        if not isinstance(picked, dict):
+            return ""
+        return re.sub(r"\s+", "", str(picked.get("phone") or ""))
+
+    def _task_session_same_account(self) -> bool:
+        sess = getattr(self.ctx, "task_session", None) or {}
+        if not sess.get("logged_in"):
+            return False
+        phone = self._picked_phone()
+        if phone and sess.get("phone") and str(sess.get("phone")) != phone:
+            return False
+        return True
+
+    def _knowledge_surface(self) -> str:
+        try:
+            from server.services.runtime.playwright_hub import is_web_slot
+
+            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                return "web"
+        except Exception:
+            pass
+        return "app"
+
+    def _account_env(self) -> str:
+        picked = getattr(self.ctx, "picked_account", None) or {}
+        if not isinstance(picked, dict):
+            return ""
+        return str(picked.get("env") or "").strip()
+
+    def _knowledge_scene(self, extra: Optional[dict] = None) -> dict[str, str]:
+        scene: dict[str, str] = {
+            "surface": self._knowledge_surface(),
+        }
+        if self._session_mode:
+            scene["lane"] = "prep"
+            scene["need"] = "howto"
+        elif self._seq_enabled and str(getattr(self, "_seq_phase", "") or "") == "check":
+            scene["lane"] = "expect"
+            scene["need"] = "judge_selected"
+            scene["facet"] = "chrome"
+            scene["screen_role"] = "chrome_nav"
+        else:
+            scene["lane"] = self._lane("")
+            if scene["lane"] == "expect":
+                scene["need"] = "judge_selected"
+                scene["facet"] = "chrome"
+                scene["screen_role"] = "chrome_nav"
+        if extra:
+            scene.update({k: str(v) for k, v in extra.items() if v})
+        return scene
+
+    def _compile_briefing(self, *, dump=None, extra: str = "", extra_scene: Optional[dict] = None, synthesize: bool = False):
+        from server.services.knowledge_briefing import briefing_cache_key, compile_briefing
+
+        scene = self._knowledge_scene(extra_scene)
+        query = self._knowledge_query(extra=extra, dump=dump)
+        intent = self._case_intent_for_knowledge()
+        key = briefing_cache_key(
+            str(getattr(self.ctx, "app_id", "") or ""),
+            scene,
+            query=query[:400],
+            extra=intent[:200],
+            app_version=str(getattr(self.ctx, "app_version", "") or ""),
+            env_profile=str(getattr(self.ctx, "env_profile", "") or ""),
+        )
+        hit = self._briefing_cache.get(key)
+        if hit is not None:
+            self._last_briefing = hit
+            return hit
+        packet = compile_briefing(
+            str(getattr(self.ctx, "app_id", "") or ""),
+            scene,
+            query=query,
+            case_intent=intent,
+            playbook=getattr(self.ctx, "playbook", None),
+            synthesize=synthesize,
+            app_version=str(getattr(self.ctx, "app_version", "") or ""),
+            env_profile=str(getattr(self.ctx, "env_profile", "") or ""),
+            env_label=str(getattr(self.ctx, "env_label", "") or ""),
+        )
+        self._briefing_cache[key] = packet
+        self._last_briefing = packet
+        return packet
+
+    def _value_for_field(self, field: str) -> str:
+        from server.services.resources.gateway import resolve_secret
+
+        return str(resolve_secret(self.ctx, field).value or "").strip()
+
+    def _session_knowledge_text(self) -> str:
+        """会话阶段注入编译简报（路径/绑定/壳层），不要求模型先点名。"""
+        if self._session_knowledge_cache is not None:
+            return self._session_knowledge_cache
+        try:
+            packet = self._compile_briefing(extra_scene={
+                "lane": "prep",
+                "need": "howto",
+            })
+            text = str(getattr(packet, "text", "") or "").strip()
+        except Exception as exc:
+            SLog.w(TAG, f"[{self.run_id}] session briefing failed: {exc}")
+            text = ""
+        if not text:
+            try:
+                from server.services.ai.playbook_service import session_howto_block
+                text = session_howto_block(getattr(self.ctx, "playbook", None)) or ""
+            except Exception:
+                text = ""
+        self._session_knowledge_cache = text.strip()
+        return self._session_knowledge_cache
+
+    def _inspect_session_row(self, screen, *, knowledge_hint: str = "") -> dict[str, Any]:
+        if screen is None or not screen.has_image():
+            return {
+                "session": "unknown", "identity": "unknown", "seen": "",
+                "probe": False, "next": "keep", "reason": "无截图", "ok": False,
+            }
+        knowledge_hint = (knowledge_hint or "").strip() or self._session_knowledge_text()
+        return planner.inspect_session(
+            required_session=self.case_preconditions or self.goal.goal,
+            knowledge_hint=knowledge_hint,
+            accounts_brief=str(getattr(self.ctx, "accounts_brief", "") or ""),
+            image_base64=screen.image_base64,
+            image_mime=screen.image_mime,
+            provider_id=self.provider_id,
+            timeout_sec=self.opts.step_timeout_sec,
+        )
+
+    def _record_inspect_row(self, screen, row: dict[str, Any]) -> None:
+        note = (
+            f"session={row.get('session')} identity={row.get('identity')} "
+            f"next={row.get('next')} probe={row.get('probe')} "
+            f"seen={row.get('seen') or '—'}；{row.get('reason') or ''}"
+        )
+        self._session_note = note.strip()
+        self._session_inspected = True
+        ok = bool(row.get("ok"))
+        SLog.i(TAG, f"[{self.run_id}] inspect session ok={ok} {self._session_note[:180]!r}")
+        status = EventStatus.PASS if ok else EventStatus.SKIPPED
+        summary = (
+            self._session_note[:180]
+            if ok
+            else f"看图会话观察失败（已重试），不作为已确认登录态：{(row.get('reason') or '')[:100]}"
+        )
+        self._record_synthetic(
+            len(self.results) + 1, status, "inspect_session",
+            summary,
+            _screen_hash(screen.image_base64) if screen and screen.has_image() else "",
+            _screen_phash(screen.image_base64) if screen and screen.has_image() else "",
+            thumb=agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else "",
+        )
+
+    def _commit_task_session(self, fact: dict[str, Any]) -> None:
+        observed = str(fact.get("observed") or "unknown")
+        self.ctx.task_session = {
+            "phone": self._picked_phone(),
+            "logged_in": observed == "logged_in",
+            "observed": observed,
+            "identity": str(fact.get("identity") or "unknown"),
+        }
+        self.ctx.session_fact = dict(fact)
+        self.ctx.session_dirty = False
+
+    def _fill_pool_input_params(self, params: dict, decision) -> dict:
+        text = str(params.get("text") or params.get("value") or "").strip()
+        field = str(params.get("field") or "").strip().lower()
+        blob = f"{getattr(decision, 'thought', '')} {params}"
+        if field not in {"sms_code", "phone"}:
+            if re.search(r"验证码|sms", blob, re.I):
+                field = "sms_code"
+            elif re.search(r"手机|phone", blob, re.I):
+                field = "phone"
+            else:
+                field = ""
+        if field:
+            pooled = self._value_for_field(field)
+        else:
+            pooled = self._value_for_field("phone") or self._value_for_field("sms_code")
+        placeholder = (not text) or text in {"验证码", "手机号", "请输入"}
+        if pooled and (placeholder or field or re.search(r"验证码|sms|手机|phone", blob, re.I)):
+            params["text"] = pooled
+            params["value"] = pooled
+            if field:
+                params["field"] = field
+        return params
+
+    def _run_session_actions(self, intent: str, *, max_steps: int = 12) -> bool:
+        fill_bit = (
+            "当屏在问手机号时 input_text，params.field=phone；"
+            "当屏在问一次性口令时 input_text，params.field=sms_code。"
+            "text 可写占位，值由资源网关填入。禁止问人，禁止自己编造。"
+        )
+        custom = "按【本应用自己的】登录/退出方式操作（说明书与知识），不要套用其它 App 的界面结构。"
+        if intent == "login":
+            self._session_goal = (
+                f"{custom}把当前应用登录到已租账号。{fill_bit}"
+                "若不在目标应用内，先打开目标应用。不要开始业务操作。"
+            )
+            self._session_success = "已登录到该账号，落在稳定主界面（不是登录页）"
+        elif intent == "switch":
+            self._session_goal = (
+                f"{custom}当前已登录但不是目标号。先按本应用方式退出，再登录已租账号。"
+                f"{fill_bit}不要做业务。"
+            )
+            self._session_success = "已切换到已租账号并落在主界面"
+        elif intent == "relogin":
+            self._session_goal = (
+                f"{custom}先退出当前登录（已在登录页则不必退出），再登录已租账号。"
+                f"{fill_bit}不要开始业务操作。"
+            )
+            self._session_success = "已登录到已租账号，落在稳定主界面（不是登录页）"
+        elif intent == "env":
+            want = str(getattr(self.ctx, "env_label", "") or getattr(self.ctx, "env_profile", "") or "目标环境")
+            self._session_kind = "env"
+            self._session_goal = (
+                f"按本应用自己的方式把客户端切到「{want}」。"
+                "只走设置/调试/关于里的环境切换。不要登录，不要注册，不要做业务。"
+                "若不在目标应用内，先打开目标应用。"
+            )
+            self._session_success = f"当前屏能看出已经是 {want}"
+        else:
+            self._session_kind = "session"
+            self._session_goal = (
+                f"{custom}退出当前登录，回到未登录/游客。不要注册，不要登录，不要做业务。"
+            )
+            self._session_success = "当前是登录页或游客态"
+        if intent != "env":
+            self._session_kind = "session"
+            phone = self._picked_phone()
+            self._record_synthetic(
+                len(self.results) + 1, EventStatus.PASS, "session_align",
+                f"本趟任务备会话：{intent} {phone or '—'}",
+            )
+        hint = self._session_knowledge_text()
+        self._session_mode = True
+        try:
+            for _ in range(max_steps):
+                if self._task_cancelled() or self._wall_exceeded():
+                    return False
+                screen = capture_screen(
+                    self.ctx, prefer=self.router.capture_prefer,
+                    timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
+                )
+                if not screen.has_image():
+                    time.sleep(1.0)
+                    continue
+                thumb = agent_stream.make_thumb(screen.image_base64)
+                shot_hash = _screen_hash(screen.image_base64)
+                shot_phash = _screen_phash(screen.image_base64)
+                step_idx = len(self.results) + 1
+                self._emit("think", step=step_idx, thumb=thumb, summary=f"备会话：{intent}")
+                decision = self._decide(screen, knowledge_hint=hint)
+                cap = decision.action.capability_id if decision.action else ""
+                if decision.status == "done":
+                    return True
+                if decision.status == "give_up":
+                    if intent == "env":
+                        return False
+                    self._record_synthetic(
+                        step_idx, EventStatus.FAIL, "session_align",
+                        (decision.thought or "会话对齐放弃")[:200],
+                        shot_hash, shot_phash, thumb=thumb,
+                    )
+                    return False
+                if decision.status == "ask_human":
+                    res = self._ask_human(decision, step_idx, shot_hash, shot_phash)
+                    if res == "answered":
+                        time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                        continue
+                    return False
+                if not cap:
+                    time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+                    continue
+                params = self._normalize_action_params(cap, dict(decision.action.params or {}))
+                if cap == "input_text":
+                    params = self._fill_pool_input_params(params, decision)
+                event = PlanEvent(
+                    seq=step_idx, capability_id=cap, event_kind=cap,
+                    params=params, needs_vlm=False, expected_executor="",
+                    ai_reasoning=(decision.thought or "")[:240] or "(session)",
+                    label=f"备会话 {intent}",
+                )
+                result = self.router.dispatch(
+                    event, run_id=self.run_id, case_id=self.case_id,
+                    case_brief=self.case_brief, shared=self.shared,
+                )
+                if thumb and not getattr(result, "thumb", None):
+                    try:
+                        result = result.model_copy(update={"thumb": thumb})
+                    except Exception:
+                        pass
+                self.results.append(self._adopt(result, cap))
+                self._push_step(
+                    step_idx, decision, result_status=str(result.status.value),
+                    summary=result.summary or result.error, screen_hash=shot_hash, phash=shot_phash,
+                )
+                self._emit(
+                    "result", step=step_idx,
+                    result_status=str(result.status.value),
+                    summary=result.summary or result.error,
+                    elapsed_ms=int(getattr(result, "elapsed_ms", 0) or 0),
+                    capability_id=cap, thumb=thumb,
+                )
+                time.sleep(self.opts.pause_ms_between_steps / 1000.0)
+            return False
+        finally:
+            self._session_mode = False
+            self._session_kind = ""
+
+    def run_env_switch(self, wanted: str = "", label: str = "") -> bool:
+        """开跑前把客户端切到本趟环境。不租号、不登录。"""
+        if wanted and hasattr(self.ctx, "env_profile") and not str(getattr(self.ctx, "env_profile", "") or ""):
+            self.ctx.env_profile = wanted
+        if label and hasattr(self.ctx, "env_label"):
+            self.ctx.env_label = label
+        return self._run_session_actions("env", max_steps=10)
+
+    def _record_env_step(self, cap: str, status: str, summary: str) -> None:
+        st = {
+            "pass": EventStatus.PASS,
+            "skipped": EventStatus.SKIPPED,
+            "fail": EventStatus.FAIL,
+        }.get(str(status or "").strip().lower(), EventStatus.PASS)
+        self._record_synthetic(len(self.results) + 1, st, cap, summary)
+
+    def _gate_env_before_loop(self) -> Optional[tuple[str, str, str]]:
+        """开业务循环前对齐客户端环境。unknown（登录页无角标）不是冲突。"""
+        from server.services.runtime.env_gate import align_device_env, public_env_snapshot
+
+        prev = dict(getattr(self.ctx, "env_fact", None) or {})
+        if prev.get("ok"):
+            label = str(prev.get("label") or getattr(self.ctx, "env_label", "") or "")
+            bit = "已确认" if prev.get("matched") else "当前屏未看出标识"
+            self._record_synthetic(
+                len(self.results) + 1, EventStatus.SKIPPED, "env_align",
+                f"沿用本趟环境：{label or prev.get('wanted') or '—'}（{bit}）",
+            )
+            return None
+        plat = str(getattr(self.ctx, "platform", "") or "")
+        report = align_device_env(
+            self.ctx, self.router,
+            package=str(getattr(self.ctx, "target_package", "") or ""),
+            platform=plat,
+            run_id=self.run_id,
+            case_id=self.case_id,
+            provider_id=self.provider_id or "",
+            capture_prefer=tuple(self.router.capture_prefer or ("adb", "remote")),
+            recorder=self._record_env_step,
+            switch_fn=lambda: self._run_session_actions("env", max_steps=10),
+        )
+        try:
+            from server.services.regression.case_runner import note_run_env_fact
+
+            note_run_env_fact(self.run_id, report, public_env_snapshot(self.ctx))
+        except Exception:
+            pass
+        if report.get("ok"):
+            return None
+        reason = str(report.get("reason") or "设备当前环境与本趟执行环境不一致")
+        return ("fail", reason, "prep_insufficient")
+
+    def _case_scene(self) -> dict:
+        from server.services.runtime.session_gate import clamp_case_scene
+
+        existing = getattr(self.ctx, "case_scene", None) or {}
+        if existing.get("session_prep"):
+            return clamp_case_scene(existing)
+        from server.services.ai.regression.planner import classify_case_scene
+
+        scene = classify_case_scene(
+            name=self.case_name,
+            steps=self.case_steps_text,
+            expected=self.case_expected,
+            precondition=self.case_preconditions,
+            provider_id=self.provider_id,
+            run_context=self.ctx,
+        )
+        self.ctx.case_scene = dict(scene)
+        return scene
+
+    def _reuse_task_session_without_inspect(self, required: str, *, reason: str) -> None:
+        sess = dict(getattr(self.ctx, "task_session", None) or {})
+        observed = str(sess.get("observed") or "")
+        if sess.get("logged_in") and observed != "logged_in":
+            observed = "logged_in"
+        fact = {
+            "required": required,
+            "observed": observed or "unknown",
+            "identity": str(sess.get("identity") or "unknown"),
+            "how": "task_memory",
+            "reason": reason,
+            "inspect_ok": True,
+        }
+        self.ctx.session_fact = dict(fact)
+        self._session_note = f"session={fact['observed']} reused from task_memory"
+        self._session_inspected = True
+        self._record_synthetic(
+            len(self.results) + 1, EventStatus.SKIPPED, "inspect_session",
+            "沿用本趟 RunContext 登录态，未重新看图",
+        )
+
+    def _commit_prep_session(
+        self, *, required: str, observed: str, how: str, reason: str,
+    ) -> None:
+        fact = {
+            "required": required,
+            "observed": observed,
+            "identity": "unknown",
+            "how": how,
+            "reason": reason,
+            "inspect_ok": True,
+            "phone": self._picked_phone(),
+        }
+        self._commit_task_session(fact)
+        self._session_note = f"session={observed} how={how}"
+        self._session_inspected = True
+        self._record_synthetic(
+            len(self.results) + 1, EventStatus.SKIPPED, "inspect_session",
+            "前置已对齐登录态并写入 RunContext，跳过观察态",
+        )
+
+    def _observe_current_session(self, *, sn: str, plat: str, required: str):
+        from server.services.runtime import session_gate
+
+        screen = capture_screen(
+            self.ctx, prefer=self.router.capture_prefer,
+            timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
+        )
+        inspect_row: dict[str, Any] = {}
+        if screen.has_image():
+            inspect_row = self._inspect_session_row(screen)
+            self._record_inspect_row(screen, inspect_row)
+        fact = session_gate.observe_session(
+            sn=sn,
+            platform=plat,
+            package=str(getattr(self.ctx, "target_package", "") or ""),
+            required=required,
+            screen_text=str(inspect_row.get("seen") or ""),
+            inspect_row=inspect_row,
+        )
+        self.ctx.session_fact = dict(fact)
+        return screen, inspect_row, fact
+
+    def _fail_session_gate(
+        self, required: str, fact: dict[str, Any], screen, *, status: str, reason: str, category: str,
+    ) -> tuple[str, str, str]:
+        self._record_synthetic(
+            len(self.results) + 1, EventStatus.FAIL, "session_gate", reason[:200],
+        )
+        self._learn_login_flow(
+            required, fact, screen, untestable=(status == "untestable"), reason=reason,
+        )
+        SLog.w(TAG, f"[{self.run_id}] session gate {status}: {reason[:160]}")
+        return status, reason, category
+
     def _gate_session_before_loop(self) -> Optional[tuple[str, str, str]]:
-        """开业务循环前对齐登录态。不对齐则 fail / untestable，并学习登录流程。"""
+        """开业务循环前对齐登录态。
+
+        业务用例：前置退出并重新登录，写入 RunContext，不再看图观察。
+        登录相关用例：不自动登录。
+        """
         from server.services.runtime import device_provision, session_gate
 
         keep = bool(getattr(self.ctx, "keep_permission_prompt", False))
@@ -2125,61 +2638,105 @@ class AgentExecutor:
         except Exception as exc:
             SLog.w(TAG, f"[{self.run_id}] post-launch alert failed: {exc}")
 
-        required = session_gate.required_session(self.case_preconditions)
-        if required == "any":
-            return None
-
-        screen = capture_screen(
-            self.ctx, prefer=self.router.capture_prefer,
-            timeout_sec=self.opts.capture_timeout_sec, force_fresh=True,
-        )
-        inspect_row: dict[str, Any] = {}
-        if screen.has_image():
-            inspect_row = planner.inspect_session(
-                required_session=self.case_preconditions or self.goal.goal,
-                knowledge_hint="",
-                accounts_brief=str(getattr(self.ctx, "accounts_brief", "") or ""),
-                image_base64=screen.image_base64,
-                image_mime=screen.image_mime,
-                provider_id=self.provider_id,
-                timeout_sec=self.opts.step_timeout_sec,
-            )
-            self._session_inspected = True
-            self._session_note = (
-                f"session={inspect_row.get('session')} identity={inspect_row.get('identity')} "
-                f"next={inspect_row.get('next')} seen={inspect_row.get('seen') or '—'}；"
-                f"{inspect_row.get('reason') or ''}"
-            ).strip()
-            self._record_synthetic(
-                len(self.results) + 1, EventStatus.PASS, "inspect_session",
-                self._session_note[:180],
-                _screen_hash(screen.image_base64) if screen.has_image() else "",
-                _screen_phash(screen.image_base64) if screen.has_image() else "",
-                thumb=agent_stream.make_thumb(screen.image_base64) if screen.has_image() else "",
-            )
-
-        fact = session_gate.observe_session(
-            sn=sn,
-            platform=plat,
-            package=str(getattr(self.ctx, "target_package", "") or ""),
-            required=required,
-            screen_text=str(inspect_row.get("seen") or ""),
-            inspect_row=inspect_row,
-        )
-        self.ctx.session_fact = dict(fact)
-        gate = session_gate.evaluate_gate(fact)
-        if gate.get("ok"):
-            return None
-
-        status = str(gate.get("status") or "fail")
-        reason = str(gate.get("reason") or "登录态不满足")
-        category = str(gate.get("category") or "goal_unreachable")
+        required = session_gate.required_session(self.case_preconditions, scene=self._case_scene())
+        prep = self._session_prep_intent()
+        scene = self._case_scene()
         self._record_synthetic(
-            len(self.results) + 1,
-            EventStatus.FAIL,
-            "session_gate",
-            reason[:200],
+            len(self.results) + 1, EventStatus.PASS, "case_scene",
+            (
+                f"session_prep={prep} required={required} how={scene.get('how') or '—'}"
+                f"；{str(scene.get('reason') or '')[:160]}"
+            ),
         )
+        dirty = bool(getattr(self.ctx, "session_dirty", False))
+        sess = getattr(self.ctx, "task_session", None) or {}
+        phone = self._picked_phone()
+        SLog.i(
+            TAG,
+            f"[{self.run_id}] session prep={prep} required={required} "
+            f"phone={phone or '—'} dirty={dirty}",
+        )
+
+        if prep == "skip":
+            self._record_synthetic(
+                len(self.results) + 1, EventStatus.SKIPPED, "session_align",
+                "登录相关用例，不自动登录或退出",
+            )
+            if session_gate.can_reuse_task_session(
+                required="any", task_session=sess, picked_phone=phone, dirty=dirty,
+            ):
+                self._reuse_task_session_without_inspect(
+                    required, reason="登录相关用例不自动登录，沿用本趟记录，未看图",
+                )
+                return None
+            self._observe_current_session(sn=sn, plat=plat, required=required)
+            return None
+
+        reuse_need = "guest" if prep == "logout" else "logged_in"
+        if session_gate.can_reuse_task_session(
+            required=reuse_need, task_session=sess, picked_phone=phone, dirty=dirty,
+        ):
+            self._reuse_task_session_without_inspect(
+                required, reason="沿用本趟任务已对齐的登录态",
+            )
+            return None
+
+        if prep == "logout":
+            if self._run_session_actions("logout"):
+                self._commit_prep_session(
+                    required=required, observed="guest", how="prep_logout",
+                    reason="前置已退出登录（登录相关用例不自动登录）",
+                )
+                return None
+            self.ctx.session_dirty = True
+            self.ctx.task_session = {}
+            screen, _, fact = self._observe_current_session(sn=sn, plat=plat, required=required)
+            if required != "guest":
+                return None
+            gate = session_gate.evaluate_gate(fact)
+            if gate.get("ok"):
+                return None
+            return self._fail_session_gate(
+                required, fact, screen,
+                status=str(gate.get("status") or "fail"),
+                reason=str(gate.get("reason") or "需要游客/未登录，前置退出未完成"),
+                category=str(gate.get("category") or "goal_unreachable"),
+            )
+
+        if not phone:
+            reason = "需要已登录，账号管理未租到手机号，无法自动登录"
+            self._record_synthetic(len(self.results) + 1, EventStatus.FAIL, "session_gate", reason)
+            self._learn_login_flow(required or "logged_in", {}, None, untestable=False, reason=reason)
+            return "fail", reason, "goal_unreachable"
+
+        if self._run_session_actions("relogin", max_steps=18):
+            self._commit_prep_session(
+                required=required or "logged_in", observed="logged_in", how="prep_login",
+                reason="前置已退出并重新登录已租账号，未再看图观察",
+            )
+            return None
+
+        screen, _, fact = self._observe_current_session(
+            sn=sn, plat=plat, required=required or "logged_in",
+        )
+        if fact.get("wechat_untestable"):
+            reason = "需要已登录，当前是微信登录页，无法自动化（untestable）"
+            return self._fail_session_gate(
+                required or "logged_in", fact, screen,
+                status="untestable", reason=reason, category="goal_unreachable",
+            )
+        gate = session_gate.evaluate_gate(fact)
+        if gate.get("ok") and str(fact.get("observed") or "") == "logged_in":
+            self._commit_task_session(fact)
+            return None
+        return self._fail_session_gate(
+            required or "logged_in", fact, screen,
+            status=str(gate.get("status") or "fail"),
+            reason=str(gate.get("reason") or "前置退出并重新登录未完成"),
+            category=str(gate.get("category") or "goal_unreachable"),
+        )
+
+    def _learn_login_flow(self, required: str, fact: dict, screen, *, untestable: bool, reason: str) -> None:
         try:
             from server.services.knowledge_capture_service import capture_login_flow
 
@@ -2192,15 +2749,13 @@ class AgentExecutor:
                 observed=str(fact.get("observed") or ""),
                 reason=reason,
                 screen_text=str(fact.get("screen_text") or fact.get("seen") or ""),
-                image_base64=screen.image_base64 if screen.has_image() else "",
-                image_mime=screen.image_mime if screen.has_image() else "image/png",
+                image_base64=screen.image_base64 if screen and screen.has_image() else "",
+                image_mime=screen.image_mime if screen and screen.has_image() else "image/png",
                 provider_id=str(self.provider_id or ""),
-                untestable=(status == "untestable"),
+                untestable=untestable,
             )
         except Exception as exc:
             SLog.w(TAG, f"[{self.run_id}] login learn failed: {exc}")
-        SLog.w(TAG, f"[{self.run_id}] session gate {status}: {reason[:160]}")
-        return status, reason, category
 
     # ---------- 子过程 ----------
 
@@ -2253,76 +2808,128 @@ class AgentExecutor:
         )
         return fresh if fresh and fresh.has_image() else screen
 
+    def _web_page(self):
+        try:
+            from server.services.runtime.playwright_hub import get_hub, is_web_slot
+
+            if not is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
+                return None
+            return get_hub().current_page(str(getattr(self.ctx, "sn", "") or ""))
+        except Exception as exc:
+            SLog.d(TAG, f"[{self.run_id}] playwright check skipped: {exc}")
+            return None
+
+    def _observe_claim(self, screen, claim, *, page) -> tuple[str, str]:
+        """看一句。返回 pass|fail|wait|skip 与原因。"""
+        from server.services.regression.expect_catalog import ExpectClass, gap_summary
+        from server.services.regression.playwright_check import check_expect
+
+        if claim.gap:
+            mini = ExpectClass(
+                kind=claim.kind, code=claim.code, label=claim.label, gap=True,
+                prompt_text="", skipped=[claim], claims=[claim],
+            )
+            self._record_synthetic(
+                len(self.results) + 1, EventStatus.SKIPPED, "assert_skip",
+                gap_summary(mini) or "无法验证",
+                _screen_hash(screen.image_base64) if screen and screen.has_image() else "",
+                _screen_phash(screen.image_base64) if screen and screen.has_image() else "",
+                thumb=agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else "",
+            )
+            return "skip", gap_summary(mini) or "无法验证"
+        mini = ExpectClass(
+            kind=claim.kind, code=claim.code, label=claim.label, gap=False,
+            prompt_text=claim.text, claims=[claim],
+        )
+        if page is not None:
+            try:
+                dom = check_expect(page, mini)
+            except Exception as exc:
+                SLog.d(TAG, f"[{self.run_id}] playwright claim skipped: {exc}")
+                dom = None
+            if dom is not None:
+                ok, reason = dom
+                self._record_synthetic(
+                    len(self.results) + 1,
+                    EventStatus.PASS if ok else EventStatus.FAIL,
+                    "assert_dom",
+                    reason,
+                    _screen_hash(screen.image_base64) if screen and screen.has_image() else "",
+                    _screen_phash(screen.image_base64) if screen and screen.has_image() else "",
+                    thumb=agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else "",
+                )
+                return ("pass" if ok else "fail"), reason
+        ok, reason = self._assert_expectation(
+            screen, len(self.results) + 1, claim.text, cap_id="assert_visual",
+        )
+        if ok:
+            return "pass", reason
+        loading = bool(_LOADING_HINT_RE.search(reason or ""))
+        if self._seq_on_check_fail(reason, loading=loading) == "continue":
+            return "wait", reason
+        return "fail", reason
+
     def _run_seq_check(self, screen, step_idx: int) -> tuple[str, str]:
-        """校验当前步骤预期。返回 pass|fail|advance|wait 与原因。"""
+        """按句校验当前步骤。一句红了就停，后面句子和步骤都不再验。"""
         from server.services.regression.expect_catalog import classify_expect_text, gap_summary
 
+        if self._seq_halted:
+            return "fail", "校验不通过"
         cur = self._seq_current()
         if not cur:
             return "pass", ""
         if not cur.expected:
             self._stamp_expect(cur.n, "EXPECT.SKIPPED.no_expect")
             nxt = self._seq_on_check_pass()
+            if nxt == "fail":
+                return "fail", "校验不通过"
+            if nxt == "pass" and self._all_steps_uncheckable():
+                return "unexecutable", "未写预期，无法执行校验"
             return ("pass", "") if nxt == "pass" else ("advance", "")
         row = classify_expect_text(cur.expected)
-        note = gap_summary(row)
-        dom = None
-        try:
-            from server.services.runtime.playwright_hub import get_hub, is_web_slot
-            from server.services.regression.playwright_check import check_expect
-
-            if is_web_slot(getattr(self.ctx, "sn", ""), getattr(self.ctx, "platform", "")):
-                page = get_hub().current_page(str(getattr(self.ctx, "sn", "") or ""))
-                if page is not None:
-                    dom = check_expect(page, row)
-        except Exception as exc:
-            SLog.d(TAG, f"[{self.run_id}] playwright check skipped: {exc}")
-            dom = None
-        if dom is not None:
-            ok, reason = dom
-            shot_hash = _screen_hash(screen.image_base64) if screen and screen.has_image() else ""
-            shot_phash = _screen_phash(screen.image_base64) if screen and screen.has_image() else ""
-            thumb = agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else ""
-            self._record_synthetic(
-                step_idx,
-                EventStatus.PASS if ok else EventStatus.FAIL,
-                "assert_dom",
-                reason,
-                shot_hash,
-                shot_phash,
-                thumb=thumb,
-            )
-            if ok:
-                self._stamp_check_row(cur.n, row, observed_ok=True)
-                nxt = self._seq_on_check_pass()
-                return ("pass", "") if nxt == "pass" else ("advance", "")
-            self._stamp_check_row(cur.n, row, observed_ok=False)
-            return "fail", reason
-        if row.skipped:
-            self._record_synthetic(
-                step_idx, EventStatus.SKIPPED, "assert_skip",
-                note or "无法验证",
-                _screen_hash(screen.image_base64) if screen and screen.has_image() else "",
-                _screen_phash(screen.image_base64) if screen and screen.has_image() else "",
-                thumb=agent_stream.make_thumb(screen.image_base64) if screen and screen.has_image() else "",
-            )
-        if row.gap:
+        claims = list(row.claims or [])
+        if not claims:
             self._stamp_check_row(cur.n, row)
             nxt = self._seq_on_check_pass()
-            return ("pass", "") if nxt == "pass" else ("advance", note or "无法验证")
-        screen = self._settle_screen(screen, kind=row.kind)
-        ok, reason = self._assert_expectation(
-            screen, len(self.results) + 1, row.prompt_text or cur.expected, cap_id="assert_visual",
-        )
-        if ok:
-            self._stamp_check_row(cur.n, row, observed_ok=True)
+            if nxt == "fail":
+                return "fail", "校验不通过"
+            return ("pass", "") if nxt == "pass" else ("advance", gap_summary(row) or "无法验证")
+        page = self._web_page()
+        if any(not c.gap for c in claims):
+            screen = self._settle_screen(screen, kind=row.kind)
+        saw_real = False
+        done = len([p for p in str(self._expect_codes.get(cur.n) or "").split("|") if p.strip()])
+        for i, claim in enumerate(claims):
+            if i < done:
+                if not claim.gap:
+                    saw_real = True
+                continue
+            outcome, reason = self._observe_claim(screen, claim, page=page)
+            if outcome == "wait":
+                return "wait", reason
+            if outcome == "skip":
+                self._stamp_expect(cur.n, claim.code)
+                continue
+            saw_real = True
+            if outcome == "pass":
+                self._stamp_expect(cur.n, f"EXPECT.PASS.{claim.kind}")
+                continue
+            self._stamp_expect(cur.n, f"EXPECT.FAIL.{claim.kind}")
+            self._stamp_remaining_unobserved(cur.n, claims, from_i=i + 1)
+            self._seq_halted = True
+            return "fail", reason
+        if not saw_real:
             nxt = self._seq_on_check_pass()
-            return ("pass", "") if nxt == "pass" else ("advance", "")
-        loading = bool(_LOADING_HINT_RE.search(reason or ""))
-        if self._seq_on_check_fail(reason, loading=loading) == "continue":
-            return "wait", reason
-        self._stamp_check_row(cur.n, row, observed_ok=False)
-        return "fail", reason
+            if nxt == "fail":
+                return "fail", "校验不通过"
+            note = gap_summary(row) or "无法验证"
+            if nxt == "pass" and self._all_steps_uncheckable():
+                return "unexecutable", "未写预期，无法执行校验"
+            return ("pass", "") if nxt == "pass" else ("advance", note)
+        nxt = self._seq_on_check_pass()
+        if nxt == "fail":
+            return "fail", "校验不通过"
+        return ("pass", "") if nxt == "pass" else ("advance", "")
 
     def _expect_has_gap(self) -> bool:
         blob = "|".join(str(v or "") for v in self._expect_codes.values())
@@ -2331,8 +2938,13 @@ class AgentExecutor:
     def _apply_check_outcome(self, outcome: str, reason: str) -> tuple[str, str, str]:
         """把校验结果变成 (overall, decline, failure_category)。空 overall 表示继续循环。"""
         if outcome == "fail":
+            self._seq_halted = True
             return "fail", (reason or "校验不通过")[:240], "expect_fail"
+        if outcome == "unexecutable":
+            return "fail", (reason or "测试步骤无法执行")[:240], "step_unexecutable"
         if outcome == "pass":
+            if self._all_steps_uncheckable():
+                return "fail", "未写预期，无法执行校验", "step_unexecutable"
             if self._expect_has_gap():
                 return "unverifiable", "无法验证", "expect_unverifiable"
             return "pass", "", "success"
@@ -2365,6 +2977,7 @@ class AgentExecutor:
         summary = res.evidence or res.ai_reasoning[:120]
         self.results.append(EventResult(
             seq=step_idx, capability_id=cap_id, event_kind="assert_visual",
+            lane="expect",
             status=status,
             executor_used="vlm", summary=summary,
             error="" if res.passed else res.ai_reasoning[:240],
@@ -2397,25 +3010,42 @@ class AgentExecutor:
             return str(picked.get("sms_code") or "").strip()
         return ""
 
+    def _seed_task_memory(self) -> None:
+        """上条用例记下的事实（发过的消息、刚登录的号）带到本条，不重验产品点。"""
+        for item in list(getattr(self.ctx, "task_memory", None) or [])[-8:]:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            kind = str(item.get("kind") or "fact").strip() or "fact"
+            self._remember(kind, text)
+
     def _note_issued_account(self) -> None:
         picked = getattr(self.ctx, "picked_account", None) or {}
         if not isinstance(picked, dict):
             picked = {}
         phone = re.sub(r"\s+", "", str(picked.get("phone") or ""))
-        sms = str(picked.get("sms_code") or "").strip()
         env = str(picked.get("env") or "").strip() or "-"
+        tail = phone[-4:] if len(phone) >= 4 else phone
+        from server.services.resources.gateway import resolve_secret
+
+        otp = resolve_secret(self.ctx, "sms_code")
         if phone:
             self._memory.append(
-                ("fact", f"号池已申请 {env} 环境手机号 {phone}")
+                ("fact", f"已租 {env} 账号尾号 {tail}，登录页 field=phone 由资源网关填写")
             )
-        if sms:
+        if otp.value or otp.source == "hitl":
+            src = otp.source if otp.value else "hitl"
             self._memory.append(
-                ("fact", f"该账号固定验证码 {sms}，验证码页直接填写，不要问人")
+                ("fact", f"口令来源 {src}，口令页 field=sms_code 由资源网关填写，不要问人、不要写出口令")
             )
         if phone:
-            summary = f"已申请 {env} {phone}"
-            if sms:
-                summary += f" 固定验证码 {sms}"
+            summary = f"已租 {env} 尾号 {tail}"
+            if otp.value:
+                summary += f" 口令来源 {otp.source}"
+            elif otp.source == "hitl":
+                summary += " 口令需问人"
             status = EventStatus.PASS
         elif str(getattr(self.ctx, "accounts_brief", "") or "").strip():
             summary = (self.ctx.accounts_brief or "").split("\n")[0][:180]
@@ -2435,22 +3065,27 @@ class AgentExecutor:
             return "give_up"
         cap, params = norm
         field = str(params.get("field") or "").strip().lower()
-        pooled = self._pool_value_for_field(field)
+        from server.services.resources.gateway import resolve_secret
+
+        hit = resolve_secret(self.ctx, field) if field else None
+        pooled = str(hit.value or "") if hit else ""
         if pooled:
+            source = str(hit.source or "resource")
             self.shared["hitl_last_answer"] = {
                 "request_id": "",
                 "kind": "input_text",
                 "answer": pooled,
-                "source": "account_pool",
+                "source": source,
                 "capability_id": cap,
                 "event_seq": step_idx,
             }
-            label = "手机号" if field == "phone" else ("验证码" if field == "sms_code" else "文本")
-            summary = f"号池已提供{label}，跳过人工输入"
+            label = "手机号" if field == "phone" else ("一次性口令" if field == "sms_code" else "文本")
+            cap_name = "get_phone" if field == "phone" else ("get_otp" if field == "sms_code" else "pick_account")
+            summary = f"资源网关已提供{label}（{source}），跳过人工输入"
             self._record_synthetic(
-                step_idx, EventStatus.PASS, "pick_account", summary, shot_hash, shot_phash,
+                step_idx, EventStatus.PASS, cap_name, summary, shot_hash, shot_phash,
             )
-            SLog.i(TAG, f"[{self.run_id}] skip HITL {field} from account pool")
+            SLog.i(TAG, f"[{self.run_id}] skip HITL {field} from {source}")
             return "answered"
         event = PlanEvent(
             seq=step_idx, capability_id=cap, event_kind=cap, params=params,
@@ -2458,30 +3093,41 @@ class AgentExecutor:
             ai_reasoning=decision.thought[:240] or "(agent ask_human)",
             label=params.get("question") or "请求人工提供信息",
         )
+        self._emit(
+            "step",
+            step=step_idx,
+            decision=decision,
+            capability_id=cap,
+            summary=str(params.get("question") or "请求人工提供信息"),
+        )
         result = self.router.dispatch(
             event, run_id=self.run_id, case_id=self.case_id,
             case_brief=self.case_brief, shared=self.shared,
         )
-        self.results.append(result)
+        self.results.append(self._adopt(result, cap))
         self._push_step(step_idx, decision, result_status=str(result.status.value),
                         summary=result.summary or result.error, screen_hash=shot_hash,
                         phash=shot_phash)
+        self._emit(
+            "result",
+            step=step_idx,
+            result_status=str(result.status.value),
+            summary=result.summary or result.error,
+            elapsed_ms=int(getattr(result, "elapsed_ms", 0) or 0),
+            capability_id=cap,
+        )
         if result.status in (EventStatus.BLOCKED,):
             return "blocked"
         return "answered"
 
     def _case_allows_account_reset(self) -> bool:
-        blob = " ".join([
-            self.goal.goal or "",
-            self.goal.success_criteria or "",
-            self.case_preconditions or "",
-            self.case_brief or "",
-        ])
-        return bool(re.search(r"退出登录|登出|切换账号|清除数据|清缓存", blob))
+        from server.services.runtime.session_gate import scene_allows_account_reset
+
+        return scene_allows_account_reset(self._case_scene())
 
     def _env_manufacture_reason(self, decision, cap: str) -> str:
-        """禁止用登出/清数据/删帖去凑另一种空态。"""
-        if self._case_allows_account_reset():
+        """禁止用登出/清数据/删帖去凑另一种空态。会话对齐阶段允许退出/切号。"""
+        if self._session_mode or self._case_allows_account_reset():
             return ""
         thought = f"{decision.thought or ''} {decision.expected_after or ''}"
         cap = (cap or "").lower()
@@ -2566,9 +3212,30 @@ class AgentExecutor:
             if params.get("package") != tgt:
                 SLog.i(TAG, f"[{self.run_id}] 覆盖启动包名 {params.get('package')!r} → 目标 {tgt!r}")
                 params["package"] = tgt
-        elif cap in ("close_app", "kill_app", "clear_app_cache") and not params.get("package"):
+        elif cap in ("close_app", "kill_app", "clear_app_cache", "get_app_version") and not params.get("package"):
             params["package"] = tgt
         return params
+
+    def _lane(self, cap: str = "") -> str:
+        from server.services.packs.exec_classes import lane_for_event
+
+        return lane_for_event(
+            cap=cap,
+            prep_done=bool(getattr(self, "_prep_done", False)),
+            session_mode=bool(getattr(self, "_session_mode", False)),
+            seq_phase=str(getattr(self, "_seq_phase", "") or "") if self._seq_enabled else "",
+        )
+
+    def _adopt(self, result: EventResult, cap: str = "") -> EventResult:
+        lane = self._lane(cap or str(getattr(result, "capability_id", "") or ""))
+        try:
+            return result.model_copy(update={"lane": lane})
+        except Exception:
+            try:
+                result.lane = lane
+            except Exception:
+                pass
+            return result
 
     def _record_synthetic(self, idx: int, status: EventStatus, cap: str, summary: str,
                           screen_hash: str = "", phash: str = "",
@@ -2582,7 +3249,7 @@ class AgentExecutor:
         if k:
             extra["knowledge"] = list(k)
         self.results.append(EventResult(
-            seq=idx, capability_id=cap, event_kind=cap, status=status,
+            seq=idx, capability_id=cap, event_kind=cap, lane=self._lane(cap), status=status,
             executor_used="agent", summary=summary[:200],
             error="" if status in (EventStatus.PASS, EventStatus.SKIPPED) else summary[:200],
             started_at=_now_iso(), finished_at=_now_iso(),
@@ -2688,6 +3355,10 @@ class AgentExecutor:
             overall = "unverifiable"
             failure_category = "expect_unverifiable"
             decline_reason = decline_reason or "无法验证"
+        if overall == "pass" and self._all_steps_uncheckable():
+            overall = "fail"
+            failure_category = "step_unexecutable"
+            decline_reason = decline_reason or "未写预期，无法执行校验"
         counts = {EventStatus.PASS: 0, EventStatus.FAIL: 0, EventStatus.SKIPPED: 0,
                   EventStatus.BLOCKED: 0, EventStatus.DECLINED: 0}
         for r in self.results:
@@ -2746,6 +3417,15 @@ def run_agent_case(
     SLog.i(TAG, f"[{run_id}] wall_limit={opts.max_case_wall_sec}s "
                 f"(case_steps={case_steps}, nested_publish={nested})")
 
+    scene = planner.classify_case_scene(
+        case_spec, provider_id=provider_id, run_context=run_context,
+    )
+    SLog.i(
+        TAG,
+        f"[{run_id}] case_scene prep={scene.get('session_prep')} "
+        f"required={scene.get('required_session')} how={scene.get('how')}",
+    )
+
     goal = planner.extract_goal(case_spec, run_context=run_context, provider_id=provider_id)
     if not nested:
         nested = case_needs_nested_publish(case_spec, extra=f"{goal.goal}\n{goal.success_criteria}")
@@ -2758,10 +3438,29 @@ def run_agent_case(
         case_preconditions=case_spec.preconditions,
         case_name=case_spec.name or "",
         case_steps_text=case_steps_text(case_spec),
+        case_expected=case_spec.expected or "",
         nested_publish=nested,
         seq_nodes=build_seq_nodes(case_spec, goal),
     )
     report = ex.run()
+
+    carry = []
+    for kind, text in getattr(ex, "_memory", []) or []:
+        if kind in ("published", "message", "fact") and text:
+            carry.append({"kind": kind, "text": text})
+    if carry:
+        prev = list(getattr(run_context, "task_memory", None) or [])
+        run_context.task_memory = (prev + carry)[-20:]
+    dirty_caps = {"kill_app", "clear_app_cache"}
+    if any(str(getattr(s, "capability_id", "") or "") in dirty_caps for s in ex.steps):
+        run_context.session_dirty = True
+        run_context.task_session = {}
+    from server.services.runtime.session_gate import is_login_related_case
+
+    if is_login_related_case(getattr(run_context, "case_scene", None)):
+        # 登录/退出/游客用例可能改掉登录态，下一条必须重新前置，不能沿用。
+        run_context.session_dirty = True
+        run_context.task_session = {}
 
     # 成功轨迹仍落盘，暂不注入 decide（上次路径占 token，且尚未作为产品能力使用）
     gap_outcomes = any(
@@ -2776,7 +3475,9 @@ def run_agent_case(
             {"capability_id": s.capability_id, "params": s.params, "thought": (s.thought or "")[:80]}
             for s in ex.steps if s.capability_id and s.capability_id not in (
                 "give_up", "noop", "capture_screen", "skip_restart", "inspect_session",
-                "pick_account",
+                "pick_account", "lease_account", "get_otp", "get_phone",
+                "session_align", "session_gate", "case_scene",
+                "inspect_env", "env_align",
             )
         ]
         agent_memory.save_trajectory(case_spec.case_id, device_sig, traj)

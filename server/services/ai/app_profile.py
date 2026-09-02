@@ -137,6 +137,10 @@ class UiProfile:
     # 覆盖 clip_query_plan.COMMON_LOGIN_CHAIN 里同 key 的通用项；缺字段沿用通用值。
     clip_plans: dict = field(default_factory=dict)
 
+    # ── 壳层（执行期喂给 decide/assert，不是登录结论）────────
+    center_action: str = ""                    # 底栏正中独立入口，如「绿色加号是创作，不是首页」
+    chrome_notes: tuple[str, ...] = ()         # 额外壳层说明（选中态、槽位顺序）
+
     # ── 生效值（通用 + 应用增量）────────────────────────────
     def login_markers(self) -> tuple[str, ...]:
         return _uniq(GENERIC_LOGIN_MARKERS + self.login_page_markers)
@@ -268,6 +272,29 @@ class UiProfile:
                 rows.append(f"- {term}{tag}：{means}" if means else f"- {term}{tag}")
             lines.append("\n".join(rows))
         return "\n\n".join(lines)
+
+    def chrome_prompt(self) -> str:
+        """执行期壳层：底栏 / 顶部分段 / 选中态。没有导航时返回空，不冒充某个应用。
+
+        和 facts_prompt 分开：写作用例走术语表；看图决策和校验走壳层。
+        内容必须逐字节稳定。
+        """
+        if not (self.bottom_tabs or self.segment_tabs or self.center_action or self.chrome_notes):
+            return ""
+        head = f"【本应用壳层 · {self.label}】" if self.label else "【本应用壳层】"
+        lines = [head]
+        if self.bottom_tabs:
+            lines.append("底栏导航目标（点某一项必须点带该文案的槽）：" + "、".join(self.bottom_tabs))
+        if self.segment_tabs:
+            lines.append("顶部内容分段（不是底栏）：" + "、".join(self.segment_tabs))
+        lines.append("选中态只看该槽自己的填色、下划线或加粗。独立入口是否算导航项，以本应用知识为准。")
+        if str(self.center_action or "").strip():
+            lines.append(str(self.center_action).strip())
+        for note in self.chrome_notes or ():
+            n = str(note).strip()
+            if n:
+                lines.append(n)
+        return "\n".join(lines)
 
     def has_facts(self) -> bool:
         """有没有值得喂给模型的应用事实。未接入的应用一律返回 False —— 宁可不说，
@@ -411,6 +438,8 @@ def _profile_from_mapping(row: dict[str, Any]) -> UiProfile:
         clip_plans={
             str(k): v for k, v in (row.get("clip_plans") or {}).items() if isinstance(v, dict)
         },
+        center_action=str(row.get("center_action") or "").strip(),
+        chrome_notes=tup("chrome_notes"),
     )
 
 
@@ -477,6 +506,8 @@ def merge_override(base: UiProfile, override: Optional[dict]) -> UiProfile:
         "surface_extra": dict(base.surface_extra or {}),
         "lexicon": dict(base.lexicon or {}),
         "clip_plans": dict(base.clip_plans or {}),
+        "center_action": base.center_action,
+        "chrome_notes": list(base.chrome_notes),
     }
     for key, val in override.items():
         if key not in row:

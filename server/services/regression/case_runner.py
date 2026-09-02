@@ -301,6 +301,58 @@ def _terminate_remaining_cases(
     return changed
 
 
+def note_run_env_fact(run_or_unit_id: str, report: dict[str, Any], snapshot: dict[str, Any] | None = None) -> None:
+    """把环境闸门结果写到任务快照，前端才能在用例步骤树里看到。"""
+    tid = str(run_or_unit_id or "").split("::", 1)[0].strip()
+    if not tid:
+        return
+    with _LOCK:
+        doc = _RUNS.get(tid)
+        if not doc:
+            return
+        fact = dict(report or {})
+        doc["env_align"] = fact
+        sn = str(doc.get("sn") or "")
+        by_sn = doc.setdefault("env_align_by_sn", {})
+        if isinstance(by_sn, dict) and sn:
+            by_sn[sn] = fact
+        if snapshot:
+            doc["env_snapshot"] = dict(snapshot)
+        _persist(doc)
+        _emit_task(doc, "env_align")
+
+
+def _fail_remaining_prep(run_doc: dict[str, Any], sn: str, reason: str) -> int:
+    """环境对齐 / 开跑前闸门失败：剩余用例记前置不足，不记成产品红。
+
+    `sn` 非空时只收该设备上的单元（全机覆盖一台切不了环境；once 未领取的
+    sn 为空，不会被误杀，机会留给其它设备）。
+    """
+    from server.services.regression.coverage_codes import bump_run_counters, COVERAGE_PREP
+
+    only_sn = str(sn or "").strip()
+    changed = 0
+    with _LOCK:
+        for row in run_doc.get("cases") or []:
+            if str(row.get("status") or "") not in ("pending", "running"):
+                continue
+            if only_sn and str(row.get("sn") or "") != only_sn:
+                continue
+            bump_run_counters(run_doc, COVERAGE_PREP)
+            row["status"] = "fail"
+            row["summary"] = reason
+            row["hitl"] = False
+            row["coverage_class"] = COVERAGE_PREP
+            row["coverage_label"] = "执行期-前置准备不足"
+            row["failure_category"] = "prep_insufficient"
+            row["failure_label"] = "执行期-前置准备不足"
+            changed += 1
+        _persist(run_doc)
+        _emit_task(run_doc, "env_align_failed")
+    SLog.w(TAG, f"[{run_doc.get('run_id')}] env/prep gate stopped remaining={changed} sn={sn} reason={reason}")
+    return changed
+
+
 # ---------- 取消（BE-P1-1） ----------
 
 
@@ -616,6 +668,8 @@ def _seed_unit(
         "expected_raw": str(raw.get("expected_raw") or "").strip(),
         "platform": str(raw.get("platform") or raw.get("client") or raw.get("terminal") or "").strip(),
         "device_platform": str(device_platform or "").strip(),
+        "point_ids": [str(x).strip() for x in (raw.get("point_ids") or []) if str(x).strip()],
+        "expected_by_step": dict(raw.get("expected_by_step") or {}) if isinstance(raw.get("expected_by_step"), dict) else {},
     }
 
 
@@ -660,19 +714,24 @@ def run_cases(
 
     coverage=once：每条用例只跑一次，设备抢队列。
     coverage=per_device：每台设备各跑完整用例列表。
-    单机或缺省覆盖方式都按 once。
+    单机或缺省覆盖方式都按 once。sns 为空时由「申请执行设备」技能按用例占用。
     """
     from server.services import app_automation_service as aas
     from server.services.ai.regression.llm_client import resolve_regression_provider
+    from server.services.regression.pick_device import (
+        exec_sns_of_plan,
+        manual_plan,
+        pick_devices_for_run,
+        sns_of_plan,
+    )
+    from server.services.runtime.device_catalog import list_device_catalog
+    from server.services.runtime.qa_process_lock import blocking_reservation
+    from server.services.regression import task_store
 
     device_sns = _normalize_sns(sn, sns)
-    if not device_sns:
-        raise ValueError("请选择执行设备")
     cov = str(coverage or "").strip().lower()
     if cov not in ("", "once", "per_device"):
         raise ValueError("coverage 必须是 once 或 per_device")
-    if not cov or len(device_sns) == 1:
-        cov = "once"
 
     all_cases = aas.list_app_cases(app)
     instruction = str(instruction or "").strip()
@@ -692,6 +751,44 @@ def run_cases(
         cases = cases[start_index:]
 
     env_profile = aas.resolve_env_profile(app)
+    provider_for_pick, _gate_pick = resolve_regression_provider(str(provider_id or "").strip() or None)
+    device_plan: dict[str, Any]
+    if device_sns:
+        device_plan = manual_plan(device_sns, platforms_by_sn)
+    else:
+        catalog = list_device_catalog(db, only_online=True)
+        device_plan = pick_devices_for_run(
+            cases=cases,
+            catalog=catalog,
+            env_profile=env_profile,
+            provider=provider_for_pick,
+            provider_id=str(provider_id or "").strip(),
+        )
+        device_sns = sns_of_plan(device_plan)
+        if not device_sns:
+            raise ValueError("没有符合用例需求的可用设备")
+        for dsn in device_sns:
+            busy_task_id = task_store.busy_task_for_sn(dsn)
+            if busy_task_id:
+                raise ValueError(f"设备占用中: {dsn}")
+        if db is not None:
+            reserved = blocking_reservation(
+                db,
+                device_sns,
+                slot_id=str(slot_id or ""),
+                requirement_id=str(requirement_id or ""),
+                release_id=str(release_id or ""),
+                run_type=str(run_type or ""),
+            )
+            if reserved:
+                raise ValueError(f"设备已被排期占用: {reserved.get('sn') or ''}")
+
+    if str(device_plan.get("mode") or "") in ("app_web", "ab_pair"):
+        cov = "once"
+    elif not cov or len(device_sns) == 1:
+        cov = "once"
+
+    exec_sns = exec_sns_of_plan(device_plan) or list(device_sns)
     packages_by_platform = {
         "android": aas.package_for_app(app, env_profile, platform="android") or "",
         "ios": aas.package_for_app(app, env_profile, platform="ios") or "",
@@ -700,7 +797,12 @@ def run_cases(
     resolved_platforms = _resolve_platforms_by_sn(
         device_sns, db=db, fallback=platform, given=platforms_by_sn,
     )
-    task_platform = _task_platform_of([resolved_platforms[s] for s in device_sns])
+    for slot in device_plan.get("slots") or []:
+        s = str((slot or {}).get("sn") or "")
+        plat = str((slot or {}).get("platform") or "")
+        if s and plat in ("android", "ios", "web"):
+            resolved_platforms[s] = plat
+    task_platform = _task_platform_of([resolved_platforms[s] for s in exec_sns or device_sns])
     package = packages_by_platform.get(
         task_platform if task_platform in ("android", "ios", "web") else "android",
         "",
@@ -717,13 +819,14 @@ def run_cases(
             pass
 
     run_id = f"cr-{uuid.uuid4().hex[:12]}"
+    seed_sns = exec_sns if cov == "per_device" else device_sns
     if cov == "per_device":
         seeded_cases = [
             _seed_unit(
                 run_id, c, i, sn=dsn, coverage=cov,
                 device_platform=resolved_platforms.get(dsn, ""),
             )
-            for dsn in device_sns
+            for dsn in seed_sns
             for i, c in enumerate(cases)
         ]
     else:
@@ -738,7 +841,7 @@ def run_cases(
         "run_type": run_type,
         "app_id": app_id,
         "app_name": app_name,
-        "sn": device_sns[0],
+        "sn": (exec_sns[0] if exec_sns else device_sns[0]),
         "sns": device_sns,
         "coverage": cov,
         "platform": task_platform,
@@ -753,6 +856,7 @@ def run_cases(
         "provider_id": "",
         "provider_name": "",
         "model_name": "",
+        "device_plan": device_plan,
         "total": len(seeded_cases),
         "completed": 0,
         "passed": 0,
@@ -771,7 +875,7 @@ def run_cases(
         "error": "",
         "connectivity": {},
         "connectivity_by_sn": {},
-        "_workers_alive": len(device_sns),
+        "_workers_alive": len(exec_sns),
     }
     with _LOCK:
         _RUNS[run_id] = run_doc
@@ -826,7 +930,7 @@ def run_cases(
 
     threads = [
         threading.Thread(target=_make_worker(dsn), name=f"case-runner-{run_id}-{dsn[:12]}", daemon=True)
-        for dsn in device_sns
+        for dsn in exec_sns
     ]
     for t in threads:
         t.start()
@@ -1069,6 +1173,23 @@ def _execute_on_device(
         prefer = ("adb", "remote")
     router = CapabilityRouter(ctx, capture_prefer=prefer)
 
+    from server.services.runtime.env_gate import attach_run_env, needs_env_align, public_env_snapshot
+
+    attach_run_env(ctx, app_id=app_id, env_profile=env_profile, platform=platform)
+    try:
+        if needs_env_align(platform, sn):
+            from server.services.runtime.device_provision import provision_device
+
+            ctx.provision_report = provision_device(
+                ctx, router, package=package, platform=platform,
+                keep_permission_prompt=False, run_id=run_id,
+            )
+    except Exception as exc:
+        SLog.e(TAG, f"[{run_id}] env provision failed sn={sn}: {exc}")
+    with _LOCK:
+        run_doc["env_profile"] = str(getattr(ctx, "env_profile", "") or env_profile)
+        run_doc["env_snapshot"] = public_env_snapshot(ctx)
+
     # 2) 领取并执行
     while True:
         if _cancelled(run_doc):
@@ -1085,7 +1206,7 @@ def _execute_on_device(
             spec = to_case_spec(
                 raw_case,
                 package=package,
-                env_profile=env_profile,
+                env_profile=str(getattr(ctx, "env_profile", "") or env_profile),
                 app_id=app_id,
                 app_name=app_name,
             )
@@ -1115,6 +1236,13 @@ def _execute_on_device(
             device_signature=ctx.device_signature, ai_provider_id=provider_id,
         )
 
+        try:
+            from server.services.ai.regression.planner import classify_case_scene
+
+            classify_case_scene(spec, provider_id=provider_id or None, run_context=ctx)
+        except Exception as exc:
+            SLog.w(TAG, f"[{run_id}] classify_case_scene failed case={spec.case_id}: {exc}")
+
         raw_pre = str(raw_case.get("precondition") or "").strip()
         app_cache_cleared = False
         prep_items: list = []
@@ -1124,7 +1252,10 @@ def _execute_on_device(
                 wants_keep_permission_prompt,
             )
 
-            keep = wants_keep_permission_prompt(raw_pre or str(getattr(spec, "preconditions", "") or ""))
+            keep = wants_keep_permission_prompt(
+                raw_pre or str(getattr(spec, "preconditions", "") or ""),
+                scene=getattr(ctx, "case_scene", None),
+            )
             ctx.keep_permission_prompt = keep
             ctx.provision_report = provision_device(
                 ctx, router, package=package, platform=platform,
@@ -1140,15 +1271,21 @@ def _execute_on_device(
                 run_preconditions,
             )
 
-            if has_precondition_phase(raw_pre, "before_launch"):
+            if has_precondition_phase(raw_pre, "before_launch", scene=getattr(ctx, "case_scene", None)):
                 before_res = run_preconditions(
                     raw_pre,
                     sn=sn,
                     platform=platform,
                     package=package,
                     phase="before_launch",
+                    scene=getattr(ctx, "case_scene", None),
                 )
                 prep_items = list(before_res.get("items") or [])
+                for it in prep_items:
+                    ver = str((it or {}).get("version_name") or "").strip()
+                    if ver:
+                        ctx.remember_app_version(ver)
+                        break
                 if not before_res.get("ok"):
                     from server.services.regression.coverage_codes import (
                         coverage_from_spec,
@@ -1192,10 +1329,12 @@ def _execute_on_device(
             bind_account_for_case(
                 ctx,
                 app_id=app_id,
-                env_profile=env_profile,
+                env_profile=str(getattr(ctx, "env_profile", "") or env_profile),
                 case_id=spec.case_id,
                 case_name=spec.name,
                 preconditions=str(getattr(spec, "preconditions", "") or raw_pre),
+                platform=platform,
+                target_id=package,
             )
         except Exception as exc:
             SLog.w(TAG, f"[{run_id}] pick_account failed case={spec.case_id}: {exc}")
@@ -1214,6 +1353,12 @@ def _execute_on_device(
                 get_hub().open_case(sn, base_url=package)
             except Exception as exc:
                 SLog.e(TAG, f"[{run_id}] playwright open_case failed case={spec.case_id}: {exc}")
+                try:
+                    from server.services.resources.lease import release_account
+
+                    release_account(ctx)
+                except Exception:
+                    pass
                 with _LOCK:
                     from server.services.regression.coverage_codes import bump_run_counters, COVERAGE_ENGINE
                     bump_run_counters(run_doc, COVERAGE_ENGINE)
@@ -1265,6 +1410,12 @@ def _execute_on_device(
                 })
             continue
         finally:
+            try:
+                from server.services.resources.lease import release_account
+
+                release_account(ctx)
+            except Exception:
+                pass
             if web_run:
                 try:
                     from server.services.runtime.playwright_hub import get_hub
@@ -1298,6 +1449,10 @@ def _execute_on_device(
                 # 统一失败分类（agent 引擎产出）：success|goal_unreachable|execution_error|budget_exhausted|needs_human
                 "failure_category": getattr(report, "failure_category", "") or "",
                 "failure_label": getattr(report, "failure_label", "") or "",
+                "session_fact": dict(getattr(report, "session_fact", None) or getattr(ctx, "session_fact", None) or {}),
+                "session_gate": str(getattr(report, "session_gate", "") or ""),
+                "case_scene": dict(getattr(ctx, "case_scene", None) or {}),
+                "app_version": str(getattr(ctx, "app_version", "") or ""),
             }
             from server.services.regression.coverage_codes import (
                 coverage_from_spec,
@@ -1305,21 +1460,28 @@ def _execute_on_device(
                 COVERAGE_PREP,
                 COVERAGE_EXPECT,
                 COVERAGE_PRODUCT_FAIL,
+                COVERAGE_STEP,
             )
 
             ostatus = str(report.overall_status)
             overall_for_cov = ostatus
             session_gate_failed = False
+            env_gate_failed = False
             for ev in getattr(report, "events", None) or []:
                 cap = str(getattr(ev, "capability_id", "") or "")
-                if cap != "session_gate":
-                    continue
+                if cap == "get_app_version":
+                    raw = getattr(ev, "raw_response", None) or {}
+                    if isinstance(raw, dict) and raw.get("version_name"):
+                        ctx.remember_app_version(str(raw.get("version_name") or ""))
                 st = getattr(ev, "status", "")
                 st = str(getattr(st, "value", st) or "").lower()
-                if st in ("fail", "failed"):
+                if cap == "session_gate" and st in ("fail", "failed"):
                     session_gate_failed = True
-                    break
-            if ostatus == "fail" and session_gate_failed:
+                if cap == "env_align" and st in ("fail", "failed"):
+                    env_gate_failed = True
+            entry["app_version"] = str(getattr(ctx, "app_version", "") or "")
+            fc = getattr(report, "failure_category", "") or ""
+            if ostatus == "fail" and (session_gate_failed or env_gate_failed or fc == "prep_insufficient"):
                 overall_for_cov = COVERAGE_PREP
             cov = coverage_from_spec(
                 spec,
@@ -1336,6 +1498,8 @@ def _execute_on_device(
                 entry["status"] = "fail"
             elif cov["coverage_class"] == COVERAGE_EXPECT:
                 entry["status"] = "unverifiable"
+            elif cov["coverage_class"] == COVERAGE_STEP:
+                entry["status"] = "unexecutable"
             if ostatus == "blocked":
                 run_doc["completed"] = int(run_doc.get("completed") or 0) + 1
                 run_doc["blocked"] = int(run_doc.get("blocked") or 0) + 1
@@ -1344,7 +1508,33 @@ def _execute_on_device(
                 run_doc["declined"] = int(run_doc.get("declined") or 0) + 1
             else:
                 bump_run_counters(run_doc, cov["coverage_class"])
+            run_doc["run_context"] = {
+                "session_fact": dict(entry.get("session_fact") or {}),
+                "session_gate": str(entry.get("session_gate") or ""),
+                "task_session": dict(getattr(ctx, "task_session", None) or {}),
+                "session_dirty": bool(getattr(ctx, "session_dirty", False)),
+                "case_scene": dict(entry.get("case_scene") or getattr(ctx, "case_scene", None) or {}),
+                "app_version": str(getattr(ctx, "app_version", "") or ""),
+            }
+            fact = dict(getattr(ctx, "env_fact", None) or {})
+            if fact:
+                run_doc["env_align"] = fact
+                by_sn = run_doc.setdefault("env_align_by_sn", {})
+                if isinstance(by_sn, dict) and sn:
+                    by_sn[sn] = fact
+                run_doc["env_snapshot"] = public_env_snapshot(ctx)
             _upsert_case(run_doc, entry)
+
+        env_fact = dict(getattr(ctx, "env_fact", None) or {})
+        if env_fact and not env_fact.get("ok"):
+            reason = str(env_fact.get("reason") or "设备当前环境与本趟执行环境不一致")
+            if coverage == "per_device":
+                _fail_remaining_prep(run_doc, sn, reason)
+            elif len(_sns_of(run_doc)) <= 1:
+                _fail_remaining_prep(run_doc, "", reason)
+            else:
+                SLog.w(TAG, f"[{run_id}] env mismatch sn={sn}; once 多机，留给其它设备")
+            return
 
         try:
             from server.services.knowledge_capture_service import capture_case_knowledge
@@ -1369,6 +1559,7 @@ def _execute_on_device(
                     summary=str(entry.get("summary") or ""),
                     events=events_raw,
                     provider_id=str(run_doc.get("provider_id") or ""),
+                    app_version=str(getattr(ctx, "app_version", "") or ""),
                 )
             if proposals:
                 with _LOCK:
@@ -1389,7 +1580,7 @@ def _execute_on_device(
             picked = getattr(ctx, "picked_account", None) or {}
             tag_account_after_case(
                 app_id=app_id,
-                env_profile=env_profile,
+                env_profile=str(getattr(ctx, "env_profile", "") or env_profile),
                 case_id=spec.case_id,
                 case_name=spec.name,
                 preconditions=str(getattr(spec, "preconditions", "") or ""),

@@ -1,0 +1,14 @@
+id: lease_account
+display_name: 租账号
+kind: resource
+caller: orchestrator
+description: |
+  开跑前按场景和环境从账号管理里租一个号。只产出句柄，不登录、不点屏幕。
+params:
+  - { name: env, required: true }
+  - { name: tags_prompt, required: false }
+returns:
+  - account_id
+  - phone_tail
+  - lock
+visible_to: []

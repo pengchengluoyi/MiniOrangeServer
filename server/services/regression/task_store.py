@@ -12,12 +12,14 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from server.services.regression.coverage_codes import signoff_from_cases
+
 from script.log import SLog
 
 TAG = "TaskStore"
 
 # 用例终态（用于算 completed）
-_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled", "untestable", "unverifiable"}
+_CASE_TERMINAL = {"pass", "fail", "blocked", "declined", "skipped", "cancelled", "untestable", "unverifiable", "unexecutable"}
 
 # 引擎内部状态 → PRD §0 用例枚举。禁止让 failed / partial 这类同义词漏到前端：
 #   - failed  : 旧数据别名
@@ -117,6 +119,8 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "platforms_by_sn": dict(doc.get("platforms_by_sn") or {}) if isinstance(doc.get("platforms_by_sn"), dict) else {},
         "packages_by_platform": dict(doc.get("packages_by_platform") or {}) if isinstance(doc.get("packages_by_platform"), dict) else {},
         "env_profile": doc.get("env_profile", "") or "",
+        "env_align": dict(doc.get("env_align") or {}) if isinstance(doc.get("env_align"), dict) else {},
+        "env_snapshot": dict(doc.get("env_snapshot") or {}) if isinstance(doc.get("env_snapshot"), dict) else {},
         "package": doc.get("package", "") or "",
         "requirement_id": doc.get("requirement_id", "") or "",
         "release_id": doc.get("release_id", "") or "",
@@ -148,7 +152,10 @@ def to_task_json(doc: dict[str, Any] | None, *, run_type: str = "manual",
         "kind": doc.get("kind") or "",
         "knowledge_ids": list(doc.get("knowledge_ids") or []),
         "knowledge_proposals": list(doc.get("knowledge_proposals") or []),
+        "device_plan": dict(doc.get("device_plan") or {}) if isinstance(doc.get("device_plan"), dict) else {},
+        "run_context": dict(doc.get("run_context") or {}) if isinstance(doc.get("run_context"), dict) else {},
     }
+    task["signoff"] = signoff_from_cases(cases, include_rows=include_cases)
     if include_cases:
         task["cases"] = cases
         if doc.get("atlas_patch"):
@@ -186,6 +193,10 @@ def task_event_payload(run_doc: dict[str, Any], event: str,
         "platforms_by_sn": dict(t.get("platforms_by_sn") or {}),
         "knowledge_ids": list(t.get("knowledge_ids") or []),
         "knowledge_proposals": list(t.get("knowledge_proposals") or []),
+        "signoff": t.get("signoff") or {},
+        "env_profile": t.get("env_profile") or "",
+        "env_align": dict(t.get("env_align") or {}),
+        "env_snapshot": dict(t.get("env_snapshot") or {}),
     }
     if case:
         data["case"] = {

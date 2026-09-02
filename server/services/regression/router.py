@@ -53,6 +53,7 @@ _VLM_LOCATE_NEEDED: set[str] = {
     "input_text",
     "swipe_element_to_element",
 }
+# multi_tap 的 x/y 已由 decide 给出；连点中间不能再 locate / 截图。
 
 
 class CapabilityRouter:

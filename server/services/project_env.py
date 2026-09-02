@@ -23,14 +23,28 @@ ENV_PROFILE_LABELS = {
     "prod": "正式",
 }
 
+CHANNEL_KINDS = ("app", "web", "server")
+CHANNEL_PLATFORMS = ("android", "ios", "web", "pc", "mac", "server")
+
 DEFAULT_CHANNELS = [
-    {"id": "android", "label": "安卓", "field": "package", "placeholder": "com.example.app"},
-    {"id": "ios", "label": "iOS", "field": "bundle", "placeholder": "com.example.app"},
-    {"id": "web", "label": "Web", "field": "base_url", "placeholder": "https://test.example.com"},
-    {"id": "pc", "label": "PC", "field": "path", "placeholder": "安装路径或启动命令"},
-    {"id": "mac", "label": "Mac", "field": "bundle", "placeholder": "com.example.desktop"},
-    {"id": "server", "label": "Server", "field": "base_url", "placeholder": "https://api.example.com"},
+    {"id": "android", "kind": "app", "platform": "android", "alias": "", "third_party": False, "label": "安卓", "field": "package", "placeholder": "com.example.app"},
+    {"id": "ios", "kind": "app", "platform": "ios", "alias": "", "third_party": False, "label": "iOS", "field": "bundle", "placeholder": "com.example.app"},
+    {"id": "web", "kind": "web", "platform": "web", "alias": "", "third_party": False, "label": "Web", "field": "base_url", "placeholder": "https://test.example.com"},
+    {"id": "pc", "kind": "app", "platform": "pc", "alias": "", "third_party": False, "label": "PC", "field": "path", "placeholder": "安装路径或启动命令"},
+    {"id": "mac", "kind": "app", "platform": "mac", "alias": "", "third_party": False, "label": "Mac", "field": "bundle", "placeholder": "com.example.desktop"},
+    {"id": "server", "kind": "server", "platform": "server", "alias": "", "third_party": False, "label": "Server", "field": "base_url", "placeholder": "https://api.example.com"},
 ]
+
+_PLATFORM_PRESET = {c["id"]: c for c in DEFAULT_CHANNELS}
+
+_KIND_PREFIX = (
+    ("android", "app", "android"),
+    ("ios", "app", "ios"),
+    ("pc", "app", "pc"),
+    ("mac", "app", "mac"),
+    ("server", "server", "server"),
+    ("web", "web", "web"),
+)
 
 DEFAULT_ENVIRONMENTS = [
     {"key": "test", "label": "测试"},
@@ -65,6 +79,8 @@ def empty_profile(channels: List[dict]) -> dict:
 def default_project_env() -> dict:
     channels = [copy.deepcopy(c) for c in DEFAULT_CHANNELS]
     environments = [copy.deepcopy(e) for e in DEFAULT_ENVIRONMENTS]
+    for e in environments:
+        e["secrets"] = default_env_secrets()
     profiles = {e["key"]: empty_profile(channels) for e in environments}
     return {
         "default_profile": "test",
@@ -75,36 +91,149 @@ def default_project_env() -> dict:
     }
 
 
+def _infer_kind_platform(cid: str, kind: str = "", platform: str = "") -> Tuple[str, str]:
+    k = str(kind or "").strip().lower()
+    p = str(platform or "").strip().lower()
+    if k in CHANNEL_KINDS and p in CHANNEL_PLATFORMS:
+        return k, p
+    if p in _PLATFORM_PRESET:
+        preset = _PLATFORM_PRESET[p]
+        return str(preset["kind"]), str(preset["platform"])
+    if cid in _PLATFORM_PRESET:
+        preset = _PLATFORM_PRESET[cid]
+        return str(preset["kind"]), str(preset["platform"])
+    for prefix, pk, pp in _KIND_PREFIX:
+        if cid == prefix or cid.startswith(prefix + "-"):
+            return pk, pp
+    if k in CHANNEL_KINDS:
+        fallback = {"app": "android", "web": "web", "server": "server"}[k]
+        return k, p if p in CHANNEL_PLATFORMS else fallback
+    return "web", "web"
+
+
+def _channel_title(ch: Optional[dict]) -> str:
+    row = ch if isinstance(ch, dict) else {}
+    alias = str(row.get("alias") or "").strip()
+    if alias:
+        return alias
+    return str(row.get("label") or row.get("id") or "").strip()
+
+
+def _channel_by_id(channels: Optional[List[dict]], cid: str) -> Optional[dict]:
+    want = str(cid or "").strip()
+    if not want:
+        return None
+    for ch in channels or []:
+        if isinstance(ch, dict) and str(ch.get("id") or "") == want:
+            return ch
+    return None
+
+
 def _norm_channel(raw: Any, seen: set) -> Optional[dict]:
     if not isinstance(raw, dict):
         return None
-    cid = _slug(raw.get("id") or raw.get("key") or "", "")
-    label_slug = _slug(raw.get("label") or "", "")
-    preset = next(
-        (
-            c
-            for c in DEFAULT_CHANNELS
-            if c["id"] == cid
-            or c["id"] == label_slug
-            or c["label"] == str(raw.get("label") or "").strip()
-        ),
-        None,
+    alias = str(raw.get("alias") or "").strip()[:24]
+    third_raw = raw.get("third_party")
+    third_party = bool(third_raw) if third_raw is not None else bool(alias)
+    cid_in = _slug(raw.get("id") or raw.get("key") or "", "")
+    kind, platform = _infer_kind_platform(
+        cid_in,
+        str(raw.get("kind") or ""),
+        str(raw.get("platform") or ""),
     )
-    if preset:
+    preset = _PLATFORM_PRESET.get(platform) or _PLATFORM_PRESET.get(cid_in)
+    # 旧数据：无简称的 android/ios/web 保持原 id，方便包名解析。有简称的不折回成唯一 web。
+    if cid_in and cid_in not in seen:
+        cid = cid_in
+    elif not cid_in and not alias and preset and preset["id"] not in seen:
         cid = preset["id"]
-    elif not cid:
-        cid = label_slug
+    else:
+        alias_slug = _slug(alias, "")
+        if alias_slug and alias_slug != platform:
+            cid = f"{platform}-{alias_slug}"
+        else:
+            cid = alias_slug or platform
+        stem = cid or platform
+        cid = stem
+        n = 2
+        while cid in seen:
+            cid = f"{stem}-{n}"
+            n += 1
     if not cid or cid in seen:
         return None
     field = _slug(raw.get("field") or (preset or {}).get("field") or "value", "value")
-    if field[0].isdigit() if field else True:
+    if not field or field[0].isdigit():
         field = (preset or {}).get("field") or "value"
-    label = str(raw.get("label") or (preset or {}).get("label") or cid).strip()[:20] or cid
-    if preset and label in {cid, preset["id"]}:
+    label = str(raw.get("label") or alias or (preset or {}).get("label") or cid).strip()[:24] or cid
+    if not alias and preset and label in {cid, preset["id"]}:
         label = preset["label"]
     placeholder = str(raw.get("placeholder") or (preset or {}).get("placeholder") or "").strip()[:80]
     seen.add(cid)
-    return {"id": cid, "label": label, "field": field, "placeholder": placeholder}
+    return {
+        "id": cid,
+        "kind": kind,
+        "platform": platform,
+        "alias": alias,
+        "third_party": bool(third_party),
+        "label": alias or label,
+        "field": field,
+        "placeholder": placeholder,
+    }
+
+
+OTP_MODES = ("auto", "fixed", "adapter", "hitl")
+PHONE_MODES = ("auto", "pool", "adapter", "hitl")
+
+
+def default_env_secrets() -> dict:
+    return {
+        "otp": {
+            "mode": "auto",
+            "fixed": "",
+            "adapter": "http",
+            "adapter_url": "",
+            "adapter_header": "",
+        },
+        "phone": {
+            "mode": "auto",
+            "adapter": "http",
+            "adapter_url": "",
+            "adapter_header": "",
+        },
+    }
+
+
+def _norm_secret_slot(raw: Any, *, slot: str) -> dict:
+    src = raw if isinstance(raw, dict) else {}
+    modes = OTP_MODES if slot == "otp" else PHONE_MODES
+    mode = str(src.get("mode") or "auto").strip().lower()
+    if mode not in modes:
+        mode = "auto"
+    out = {
+        "mode": mode,
+        "adapter": str(src.get("adapter") or "http").strip()[:40] or "http",
+        "adapter_url": str(src.get("adapter_url") or "").strip()[:400],
+        "adapter_header": str(src.get("adapter_header") or "").strip()[:240],
+    }
+    if slot == "otp":
+        out["fixed"] = str(src.get("fixed") or "").strip()[:32]
+    return out
+
+
+def _norm_env_secrets(raw: Any) -> dict:
+    src = raw if isinstance(raw, dict) else {}
+    return {
+        "otp": _norm_secret_slot(src.get("otp"), slot="otp"),
+        "phone": _norm_secret_slot(src.get("phone"), slot="phone"),
+    }
+
+
+def env_secrets(env_doc: dict | None, env_key: str = "") -> dict:
+    key = _slug(env_key, "")
+    for row in (env_doc or {}).get("environments") or []:
+        if isinstance(row, dict) and str(row.get("key") or "") == key:
+            return _norm_env_secrets(row.get("secrets"))
+    return default_env_secrets()
 
 
 def _norm_environment(raw: Any, seen: set) -> Optional[dict]:
@@ -115,7 +244,7 @@ def _norm_environment(raw: Any, seen: set) -> Optional[dict]:
         return None
     label = str(raw.get("label") or ENV_PROFILE_LABELS.get(key) or key).strip()[:20] or key
     seen.add(key)
-    return {"key": key, "label": label}
+    return {"key": key, "label": label, "secrets": _norm_env_secrets(raw.get("secrets"))}
 
 
 def _profile_value(block: Any, field: str) -> str:
@@ -219,7 +348,7 @@ def normalize_project_env(raw: Any) -> dict:
 
 
 def account_ident(row: dict | None) -> str:
-    """号池条目的对外标识：手机号优先，其次邮箱/用户名。不用自定义名称。"""
+    """账号条目的对外标识：手机号优先，其次邮箱/用户名。不用自定义名称。"""
     row = row if isinstance(row, dict) else {}
     phone = re.sub(r"\s+", "", str(row.get("phone") or ""))
     if phone:
@@ -230,10 +359,17 @@ def account_ident(row: dict | None) -> str:
     return str(row.get("username") or "").strip()
 
 
-def account_label(row: dict | None) -> str:
+def account_label(row: dict | None, channels: Optional[List[dict]] = None) -> str:
     row = row if isinstance(row, dict) else {}
     ident = account_ident(row) or "未填号码"
     env = str(row.get("env") or "").strip() or "-"
+    surf = str(row.get("surface_label") or "").strip()
+    if not surf:
+        sid = str(row.get("surface") or "").strip()
+        ch = _channel_by_id(channels, sid)
+        surf = _channel_title(ch) if ch else sid
+    if surf:
+        return f"{ident} · {env} · {surf}"
     return f"{ident} · {env}"
 
 
@@ -258,12 +394,22 @@ def _norm_test_accounts(raw: Any) -> List[dict]:
         email = str(item.get("email") or "").strip()[:80]
         username = str(item.get("username") or "").strip()[:80]
         ident = account_ident({"phone": phone, "email": email, "username": username})
+        lease_raw = item.get("lease") if isinstance(item.get("lease"), dict) else {}
+        lease = {}
+        rid = str(lease_raw.get("run_id") or "").strip()
+        if rid:
+            lease = {
+                "run_id": rid[:80],
+                "case_id": str(lease_raw.get("case_id") or "").strip()[:80],
+                "at": str(lease_raw.get("at") or "").strip()[:40],
+            }
         out.append(
             {
                 "id": aid,
                 "name": ident[:40],
                 "env": _slug(item.get("env") or "test", "test"),
                 "kind": str(item.get("kind") or "mixed").strip() or "mixed",
+                "surface": _slug(item.get("surface") or item.get("channel_id") or "", ""),
                 "phone": phone,
                 "email": email,
                 "username": username,
@@ -271,13 +417,14 @@ def _norm_test_accounts(raw: Any) -> List[dict]:
                 "tags": clean_tags[:24],
                 "note": str(item.get("note") or "").strip()[:200],
                 "locked": bool(item.get("locked")),
+                "lease": lease,
             }
         )
     return out
 
 
 def public_test_accounts(rows: List[dict], *, include_password: bool = False) -> List[dict]:
-    """列表给前端看。筛号 / 环境接口默认不带明文；号池管理页需要带上才能展示。"""
+    """列表给前端看。筛号 / 环境接口默认不带明文；账号管理页需要带上才能展示。"""
     out = []
     for row in rows or []:
         pwd = str(row.get("password") or "")
@@ -363,30 +510,152 @@ def _tag_fits_query(tag: str, q: str) -> bool:
     return True
 
 
-def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> List[dict]:
+def _account_surface(row: dict | None) -> str:
+    row = row if isinstance(row, dict) else {}
+    return _slug(row.get("surface") or row.get("channel_id") or "", "")
+
+
+def _surface_is_primary(ch: Optional[dict]) -> bool:
+    if not isinstance(ch, dict):
+        return False
+    return not bool(ch.get("third_party") or str(ch.get("alias") or "").strip())
+
+
+def account_fits_surface(row: dict | None, want: str, channels: Optional[List[dict]] = None) -> bool:
+    """账号必须能登录 want 这个应用/平台。三方号不能落到主 App。"""
+    sid = _account_surface(row)
+    need = _slug(want, "")
+    if not need:
+        ch = _channel_by_id(channels, sid)
+        if not sid:
+            return True
+        return _surface_is_primary(ch)
+    if sid == need:
+        return True
+    if sid:
+        return False
+    return _surface_is_primary(_channel_by_id(channels, need))
+
+
+def resolve_surface_id(
+    env_doc: dict | None,
+    *,
+    surface: str = "",
+    platform: str = "",
+    target_id: str = "",
+    prompt: str = "",
+    env_profile: str = "",
+) -> str:
+    """开跑/筛号时落到哪一条应用配置：显式 id > 启动标识匹配 > 设备端主应用 > 简称命中。"""
+    doc = env_doc if isinstance(env_doc, dict) else {}
+    channels = [c for c in (doc.get("channels") or []) if isinstance(c, dict) and c.get("id")]
+    want = _slug(surface, "")
+    if want and any(str(c.get("id")) == want for c in channels):
+        return want
+    tid = str(target_id or "").strip().rstrip("/")
+    if tid:
+        snap = profile_snapshot(doc, env_profile) if doc.get("profiles") or doc.get("environments") else {}
+        for ch in channels:
+            val = _profile_value(snap.get(ch["id"]) if isinstance(snap, dict) else {}, ch.get("field") or "value")
+            if val and val.rstrip("/") == tid:
+                return str(ch["id"])
+    plat = str(platform or "").lower()
+    kind = ""
+    if plat in ("web", "browser", "playwright"):
+        kind = "web"
+    elif plat == "server":
+        kind = "server"
+    elif plat in ("android", "ios", "pc", "mac"):
+        kind = "app"
+    if kind:
+        matching = [c for c in channels if str(c.get("kind") or "") == kind]
+        if plat in ("android", "ios", "pc", "mac"):
+            matching = [
+                c for c in matching
+                if str(c.get("platform") or "") == plat or str(c.get("id") or "") == plat
+            ] or matching
+        primaries = [c for c in matching if _surface_is_primary(c)]
+        pool = primaries or matching
+        if pool:
+            return str(pool[0]["id"])
+    q = str(prompt or "")
+    alias_hits = []
+    for ch in channels:
+        alias = str(ch.get("alias") or "").strip()
+        label = str(ch.get("label") or "").strip()
+        if alias and alias in q:
+            alias_hits.append(str(ch["id"]))
+        elif ch.get("third_party") and label and len(label) >= 2 and label in q:
+            alias_hits.append(str(ch["id"]))
+    if len(set(alias_hits)) == 1:
+        return alias_hits[0]
+    return want
+
+
+def pick_test_accounts(
+    rows: List[dict],
+    *,
+    prompt: str = "",
+    env: str = "",
+    surface: str = "",
+    channels: Optional[List[dict]] = None,
+    platform: str = "",
+    target_id: str = "",
+    env_doc: Optional[dict] = None,
+) -> List[dict]:
     raw = str(prompt or "").strip()
     q = raw.lower()
     env_key = _slug(env, "") or infer_env_from_prompt(raw)
+    ch_list = channels if isinstance(channels, list) else (
+        (env_doc or {}).get("channels") if isinstance(env_doc, dict) else []
+    )
+    want = _slug(surface, "") or resolve_surface_id(
+        env_doc if isinstance(env_doc, dict) else {"channels": ch_list or []},
+        surface=surface,
+        platform=platform,
+        target_id=target_id,
+        prompt=raw,
+    )
     grams = _prompt_grams(raw)
     scored = []
     for row in rows or []:
         row_env = str(row.get("env") or "")
         if env_key and row_env and row_env != env_key:
             continue
+        if not account_fits_surface(row, want, ch_list):
+            continue
         tags = [str(t or "").strip() for t in (row.get("tags") or []) if str(t or "").strip()]
         ident = account_ident(row)
         note = str(row.get("note") or "")
+        sid = _account_surface(row)
+        ch = _channel_by_id(ch_list, sid)
+        surface_label = _channel_title(ch) if ch else sid
         blob = " ".join(
-            [ident, note, str(row.get("email") or ""), str(row.get("username") or ""), " ".join(tags)]
+            [
+                ident,
+                note,
+                str(row.get("email") or ""),
+                str(row.get("username") or ""),
+                " ".join(tags),
+                surface_label,
+                sid,
+            ]
         ).lower()
         score = 0
         reasons = []
         if env_key and row_env == env_key:
             score += 6
             reasons.append("环境匹配")
+        if want and (sid == want or (not sid and _surface_is_primary(_channel_by_id(ch_list, want)))):
+            score += 8
+            reasons.append("平台匹配")
         if row.get("locked"):
             score -= 8
             reasons.append("占用中")
+        lease = row.get("lease") if isinstance(row.get("lease"), dict) else {}
+        if str(lease.get("run_id") or "").strip():
+            score -= 8
+            reasons.append("租用中")
         if q and q in blob:
             score += 16
             reasons.append("整句命中")
@@ -410,7 +679,12 @@ def pick_test_accounts(rows: List[dict], *, prompt: str = "", env: str = "") -> 
         ]
         if extra:
             score += 2 * min(4, len(extra))
-        scored.append({**row, "score": int(score), "reason": " · ".join(reasons) or "无明显匹配"})
+        scored.append({
+            **row,
+            "score": int(score),
+            "reason": " · ".join(reasons) or "无明显匹配",
+            "surface_label": surface_label,
+        })
     scored.sort(key=lambda x: (-int(x.get("score") or 0), account_ident(x), str(x.get("env") or "")))
     return scored[:12]
 
@@ -494,10 +768,20 @@ def _inherit_mobile_value(profiles: dict, order: List[str], env_key: str, channe
     return ""
 
 
-def target_id_from_snapshot(snap: dict, platform: str = "android") -> str:
+def target_id_from_snapshot(snap: dict, platform: str = "android", surface: str = "") -> str:
     """从某一环境 profile 快照取启动标识：Android 包名 / iOS Bundle / Web 网址。"""
     data = snap if isinstance(snap, dict) else {}
+    sid = str(surface or "").strip()
+    if sid:
+        block = data.get(sid)
+        return _profile_value(block, "value") if isinstance(block, dict) else ""
     plat = str(platform or "android").lower()
+    if plat in data and plat not in ("android", "ios", "web", "browser", "playwright", "iphone", "ipad"):
+        block = data.get(plat)
+        if isinstance(block, dict):
+            val = _profile_value(block, "value")
+            if val:
+                return val
     if plat in ("web", "browser", "playwright"):
         web = data.get("web") if isinstance(data.get("web"), dict) else {}
         return str(web.get("base_url") or web.get("url") or "").strip()

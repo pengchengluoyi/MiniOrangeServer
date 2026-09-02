@@ -30,9 +30,12 @@ _SUPPORTED_CAPS: set[str] = {
     "install_apk",
     "set_clipboard",
     "tap_element",
+    "multi_tap",
     "long_press_element",
     "input_text",
     "read_device_data",
+    "get_app_version",
+    "get_foreground_app",
     "exec_script",
 }
 
@@ -72,6 +75,8 @@ class RemoteExecutor:
                     return self._fail(event, started_at, t0, "tap_element 缺坐标（router 未注入 VLM locate 结果）")
                 return self._send(event, ctx, "tap", {"x": int(x), "y": int(y)}, started_at, t0,
                                   summary_ok=f"点击 ({x},{y})")
+            if cap == "multi_tap":
+                return self._multi_tap(event, ctx, started_at, t0)
             if cap == "long_press_element":
                 p = event.params or {}
                 x, y = p.get("x"), p.get("y")
@@ -105,6 +110,10 @@ class RemoteExecutor:
                 return self._input_text(event, ctx, started_at, t0)
             if cap == "read_device_data":
                 return self._read_device_data(event, ctx, started_at, t0)
+            if cap == "get_app_version":
+                return self._get_app_version(event, ctx, started_at, t0)
+            if cap == "get_foreground_app":
+                return self._get_foreground_app(event, ctx, started_at, t0)
             if cap == "exec_script":
                 return self._exec_script(event, ctx, started_at, t0)
             return self._decline(event, started_at, t0, f"RemoteExecutor 暂不处理 capability={cap}")
@@ -358,6 +367,58 @@ class RemoteExecutor:
             raw_response={"key": key, "value": value, "via": "RUN_SHELL"},
         )
 
+    def _shell_text(self, ctx: ExecutorContext, cmd: str) -> str:
+        engine = self._bootstrap_remote_engine(ctx)
+        return str(engine.shell(cmd) or "")
+
+    def _get_app_version(self, event: PlanEvent, ctx: ExecutorContext, started_at: str, t0: float) -> EventResult:
+        from server.services.runtime.app_query import parse_package_version, version_dump_shell
+
+        pkg = self._resolve_package(event, ctx)
+        if not pkg:
+            return self._fail(event, started_at, t0, "get_app_version 缺 params.package")
+        try:
+            out = self._shell_text(ctx, version_dump_shell(pkg))
+        except Exception as e:
+            return self._fail(event, started_at, t0, f"dumpsys package failed: {e}")
+        parsed = parse_package_version(out)
+        name = str(parsed.get("version_name") or "").strip()
+        elapsed = int((time.time() - t0) * 1000)
+        if not name:
+            return self._fail(event, started_at, t0, f"读不到 {pkg} 的版本")
+        from server.services.runtime.run_context import stamp_app_version
+
+        stamp_app_version(ctx, name)
+        code = parsed.get("version_code")
+        extra = f" ({code})" if code is not None else ""
+        return make_event_result(
+            event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary=f"{pkg} {name}{extra}",
+            raw_response={"package": pkg, **parsed, "via": "RUN_SHELL"},
+        )
+
+    def _get_foreground_app(self, event: PlanEvent, ctx: ExecutorContext, started_at: str, t0: float) -> EventResult:
+        from server.services.runtime.app_query import FOREGROUND_SHELL, parse_foreground
+
+        try:
+            out = self._shell_text(ctx, FOREGROUND_SHELL)
+        except Exception as e:
+            return self._fail(event, started_at, t0, f"dumpsys foreground failed: {e}")
+        parsed = parse_foreground(out)
+        pkg = str(parsed.get("package") or "").strip()
+        expect = self._resolve_package(event, ctx)
+        elapsed = int((time.time() - t0) * 1000)
+        if not pkg:
+            return self._fail(event, started_at, t0, "读不到前台应用")
+        summary = parsed.get("activity") or pkg
+        if expect:
+            summary = f"{summary}（目标 {expect}{'命中' if pkg == expect else '未命中'}）"
+        return make_event_result(
+            event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary=str(summary),
+            raw_response={**parsed, "expected_package": expect, "match": (pkg == expect) if expect else None, "via": "RUN_SHELL"},
+        )
+
     def _exec_script(self, event: PlanEvent, ctx: ExecutorContext, started_at: str, t0: float) -> EventResult:
         params = event.params or {}
         script = str(params.get("script") or "")
@@ -426,6 +487,30 @@ class RemoteExecutor:
         return make_event_result(
             event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
             elapsed_ms=int((time.time() - t0) * 1000), summary=f"等待 {ms}ms",
+        )
+
+    def _multi_tap(self, event: PlanEvent, ctx: ExecutorContext, started_at: str, t0: float) -> EventResult:
+        from server.services.regression.executors.multi_tap import parse_multi_tap
+
+        parsed, err = parse_multi_tap(event.params)
+        if err:
+            return self._fail(event, started_at, t0, err)
+        x, y, count, interval = parsed
+        last = None
+        for i in range(count):
+            last = self._send(
+                event, ctx, "tap", {"x": int(x), "y": int(y)}, started_at, t0,
+                summary_ok=f"连点 ({x},{y}) {i + 1}/{count}",
+            )
+            if last.status != EventStatus.PASS:
+                return last
+            if i + 1 < count:
+                time.sleep(interval / 1000.0)
+        elapsed = int((time.time() - t0) * 1000)
+        return make_event_result(
+            event, status=EventStatus.PASS, executor_used=self.id, started_at=started_at,
+            elapsed_ms=elapsed, summary=f"连点 ({x},{y}) ×{count} 间隔{interval}ms",
+            raw_response=(last.raw_response if last is not None else {}),
         )
 
     def _send(

@@ -12,7 +12,7 @@ from server.services.regression.expect_catalog import ExpectClass
 def check_expect(page, row: ExpectClass) -> Optional[tuple[bool, str]]:
     """能判则返回 (ok, reason)；看不了返回 None，交给无法验证或看图。
 
-    不点、不填、不 evaluate。混合句里只要有一句 DOM 能判红，整句就是校验不通过。
+    不点、不填、不 evaluate。混合句按句看：一句红了就停，后面的不再判。
     """
     if page is None:
         return None
@@ -20,8 +20,9 @@ def check_expect(page, row: ExpectClass) -> Optional[tuple[bool, str]]:
     if len(claims) > 1:
         reasons: list[str] = []
         any_hit = False
-        any_fail = False
         for claim in claims:
+            if getattr(claim, "gap", False):
+                continue
             mini = ExpectClass(
                 kind=claim.kind,
                 code=claim.code,
@@ -37,10 +38,10 @@ def check_expect(page, row: ExpectClass) -> Optional[tuple[bool, str]]:
             ok, reason = got
             reasons.append(reason)
             if not ok:
-                any_fail = True
+                return False, reason[:240]
         if not any_hit:
             return None
-        return (not any_fail, "；".join(reasons)[:240])
+        return True, "；".join(reasons)[:240]
     return _check_one(page, row)
 
 
@@ -54,7 +55,11 @@ def _check_one(page, row: ExpectClass) -> Optional[tuple[bool, str]]:
         )
     text = (text or "").strip()
     try:
-        if kind == "page_nav":
+        if re.search(r"选中态|已选中|高亮选中", text):
+            tab = _tab_selected(page, text)
+            if tab is not None:
+                return tab
+        if kind == "page_nav" or re.search(r"进入|切换到|到达|跳转", text):
             return _page_nav(page, text)
         if kind in {"text_present", "node", "meaning"}:
             return _visible(page, text, should_exist=True)

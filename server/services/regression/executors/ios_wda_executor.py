@@ -25,6 +25,7 @@ _SUPPORTED_CAPS: set[str] = {
     "swipe_direction",
     "swipe_element_to_element",
     "tap_element",
+    "multi_tap",
     "long_press_element",
     "input_text",
 }
@@ -56,6 +57,18 @@ class IosWdaExecutor:
                 x, y = self._xy(event)
                 engine.click(None, (x, y))
                 return self._ok(event, started_at, t0, f"tap ({x},{y})")
+            if cap == "multi_tap":
+                from server.services.regression.executors.multi_tap import parse_multi_tap
+
+                parsed, err = parse_multi_tap(event.params)
+                if err:
+                    return self._fail(event, started_at, t0, err)
+                x, y, count, interval = parsed
+                for i in range(count):
+                    engine.click(None, (x, y))
+                    if i + 1 < count:
+                        time.sleep(interval / 1000.0)
+                return self._ok(event, started_at, t0, f"连点 ({x},{y}) ×{count}")
             if cap == "long_press_element":
                 x, y = self._xy(event)
                 dur = float((event.params or {}).get("duration_ms") or 800) / 1000.0

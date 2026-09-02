@@ -1,6 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""用例跑完后给号池账号追加标签。不改发号、不切换登录。"""
+"""用例跑完后给账号管理里的账号追加标签。不改发号、不切换登录。"""
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -20,7 +20,7 @@ _TAG_SYSTEM = """你根据一条测试用例的执行结果，给「本次用到
 
 规则：
 - tags：本步要追加或确认的状态。每条最多 5 个字，最多 4 条。
-- 优先从【号池已有标签】里原样复用（旧标签即使超过 5 字也要照抄，不要改字）。
+- 优先从【账号已有标签】里原样复用（旧标签即使超过 5 字也要照抄，不要改字）。
 - 已有标签都不贴切时，自己生成新标签，仍不超过 5 字。
 - 不要只从「已注册 / 已登录 / 未注册」里选；领礼、付费、游客等业务状态都可以。
 - replaces：与本次新标签逻辑互斥、必须删掉的旧标签。必须用【当前号已有标签】里的原文。
@@ -146,7 +146,13 @@ def tag_account_after_case(
         if want:
             top = next((r for r in accounts if str(r.get("id") or "") == want), None)
         if top is None:
-            ranked = pick_test_accounts(accounts, prompt=prompt, env=env_profile or "")
+            ranked = pick_test_accounts(
+                accounts,
+                prompt=prompt,
+                env=env_profile or "",
+                channels=doc.get("channels") or [],
+                env_doc=doc,
+            )
             top = ranked[0] if ranked else None
             if top is not None and int(top.get("score") or 0) < 10:
                 SLog.i(TAG, f"skip tag case={case_id}: account match too weak score={top.get('score')}")

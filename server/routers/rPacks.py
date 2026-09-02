@@ -21,18 +21,34 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 
 from script.log import SLog
+from server.services.packs.exec_classes import (
+    EXEC_KINDS,
+    KIND_META as EXEC_KIND_META,
+    class_of_cap,
+    runtime_rows,
+)
 
 TAG = "rPacks"
 
 router = APIRouter(prefix="/packs", tags=["Packs"])
 
-# 四类 entry（kind）与前端 Tab 一一对应
-KINDS = ("capability", "recovery", "knowledge", "oracle")
+# 列表/详情可查询的 kind。Tab 以 /packs/kinds 为准（四类执行能力 + 恢复/知识/判定）。
+# capability 仍可 ?kind=capability 拉全部 YAML 能力（旧客户端 / 验收脚本）。
+PACK_KINDS = ("recovery", "knowledge", "oracle")
+KINDS = EXEC_KINDS + PACK_KINDS + ("capability",)
 
 # 尚未落地的 kind：接口先返回空列表 + 明确原因，前端可照常渲染空态
 _NOT_READY = {
     "oracle": "判定类目 kind 还未落地（见方案 §2.4）",
 }
+
+_TAB_LABELS = {
+    **EXEC_KIND_META,
+    "recovery": {"label": "恢复", "desc": "系统/设备异常怎么处置"},
+    "knowledge": {"label": "知识", "desc": "这个应用的业务判据"},
+    "oracle": {"label": "判定", "desc": "能不能测、怎么判、多严"},
+}
+_TAB_ORDER = EXEC_KINDS + PACK_KINDS
 
 
 # ---------- 序列化 ----------
@@ -91,6 +107,8 @@ def _cap_row(cap) -> dict[str, Any]:
             # 纯声明式 = 无需 Python 分支即可执行（§3.1 的通用 low_level 契约）
             "pure_declarative": pure,
             "has_python_branch": has_python,
+            "origin": "yaml",
+            "exec_class": class_of_cap(cap.id),
         },
     }
 
@@ -149,6 +167,16 @@ def _recovery_row(rule, entry=None) -> dict[str, Any]:
 def _collect(kind: str) -> list[dict[str, Any]]:
     from server.services.plugins import registry
 
+    if kind in EXEC_KINDS:
+        yaml_rows = []
+        for c in registry.list_capabilities():
+            row = _cap_row(c)
+            if class_of_cap(c.id) != kind:
+                continue
+            row = dict(row)
+            row["kind"] = kind
+            yaml_rows.append(row)
+        return runtime_rows(kind) + yaml_rows
     if kind == "capability":
         return [_cap_row(c) for c in registry.list_capabilities()]
     if kind == "recovery":
@@ -230,6 +258,61 @@ def _health() -> dict[str, Any]:
 def _fixture() -> dict[str, Any]:
     rows = [
         {
+            "uid": "runtime/prep/pick_device", "kind": "prep",
+            "id": "pick_device", "title": "申请执行设备", "enabled": True,
+            "lifecycle": "active", "provider": "platform", "owner": "@platform",
+            "root": "builtin",
+            "scope": {"platforms": ["android", "ios", "web"], "app_ids": [], "visible_to": ["case"]},
+            "when": "", "summary": "按用例占用当前环境设备",
+            "stats": {"hit_count": 0, "refuted_count": 0, "last_hit_at": ""},
+            "source_path": "",
+            "detail": {"origin": "runtime", "exec_class": "prep"},
+        },
+        {
+            "uid": "runtime/prep/pick_account", "kind": "prep",
+            "id": "pick_account", "title": "租账号", "enabled": True,
+            "lifecycle": "active", "provider": "platform", "owner": "@platform",
+            "root": "builtin",
+            "scope": {"platforms": ["android", "ios"], "app_ids": [], "visible_to": ["case"]},
+            "when": "", "summary": "按场景从账号管理租号",
+            "stats": {"hit_count": 0, "refuted_count": 0, "last_hit_at": ""},
+            "source_path": "",
+            "detail": {"origin": "runtime", "exec_class": "prep"},
+        },
+        {
+            "uid": "runtime/step/agent-decide", "kind": "step",
+            "id": "agent-decide", "title": "看图决策", "enabled": True,
+            "lifecycle": "active", "provider": "platform", "owner": "@platform",
+            "root": "builtin",
+            "scope": {"platforms": ["android", "ios"], "app_ids": [], "visible_to": ["case"]},
+            "when": "", "summary": "看截图决定下一个动作",
+            "stats": {"hit_count": 0, "refuted_count": 0, "last_hit_at": ""},
+            "source_path": "",
+            "detail": {"origin": "runtime", "exec_class": "step"},
+        },
+        {
+            "uid": "runtime/expect/assert-vision", "kind": "expect",
+            "id": "assert-vision", "title": "视觉校验", "enabled": True,
+            "lifecycle": "active", "provider": "platform", "owner": "@platform",
+            "root": "builtin",
+            "scope": {"platforms": ["android", "ios", "web"], "app_ids": [], "visible_to": ["case"]},
+            "when": "", "summary": "看操作后的新图判断预期是否成立",
+            "stats": {"hit_count": 0, "refuted_count": 0, "last_hit_at": ""},
+            "source_path": "",
+            "detail": {"origin": "runtime", "exec_class": "expect"},
+        },
+        {
+            "uid": "builtin/generic/tap_element", "kind": "generic",
+            "id": "tap_element", "title": "点击元素", "enabled": True,
+            "lifecycle": "active", "provider": "platform", "owner": "@platform",
+            "root": "builtin",
+            "scope": {"platforms": ["android", "ios", "web"], "app_ids": [], "visible_to": ["case"]},
+            "when": "", "summary": "点击屏幕上的目标",
+            "stats": {"hit_count": 0, "refuted_count": 0, "last_hit_at": ""},
+            "source_path": "plugins/capabilities/tap_element.yaml",
+            "detail": {"origin": "yaml", "exec_class": "generic"},
+        },
+        {
             "uid": "apps/b5431352/zaowu-camera/gen-timing", "kind": "knowledge",
             "id": "gen-timing", "title": "生成链路耗时基线", "enabled": True,
             "lifecycle": "active", "provider": "app_qa", "owner": "@changpengcheng",
@@ -285,7 +368,10 @@ def _fixture() -> dict[str, Any]:
         },
     ]
     return {"items": rows, "total": len(rows), "health": {"error_count": 0, "by_kind": {}, "errors": []},
-            "counts": {"capability": 0, "recovery": 0, "knowledge": 2, "oracle": 2},
+            "counts": {
+                "prep": 1, "step": 1, "expect": 1, "generic": 1,
+                "capability": 0, "recovery": 0, "knowledge": 2, "oracle": 2,
+            },
             "fixture": True}
 
 
@@ -294,7 +380,7 @@ def _fixture() -> dict[str, Any]:
 
 @router.get("")
 def list_packs(
-    kind: str = Query("", description="capability|recovery|knowledge|oracle，留空=全部"),
+    kind: str = Query("", description="prep|step|expect|generic|recovery|knowledge|oracle|capability，留空=Tab 上的全部"),
     q: str = Query("", description="关键词，匹配 id/标题/触发条件/owner"),
     provider: str = Query("", description="platform|device_team|app_qa|learned|doc|third_party"),
     lifecycle: str = Query("", description="draft|review|active|deprecated"),
@@ -305,7 +391,7 @@ def list_packs(
     if fixture:
         return {"code": 200, "data": _fixture()}
 
-    kinds = [kind] if kind else list(KINDS)
+    kinds = [kind] if kind else list(_TAB_ORDER)
     bad = [k for k in kinds if k not in KINDS]
     if bad:
         raise HTTPException(status_code=400, detail=f"未知 kind: {bad}，可用 {list(KINDS)}")
@@ -351,18 +437,13 @@ def list_packs(
 
 @router.get("/kinds")
 def list_kinds() -> dict[str, Any]:
-    """前端 Tab 元数据：每类的中文名、是否就绪、当前条目数。"""
-    labels = {
-        "capability": {"label": "能力", "desc": "能做什么动作"},
-        "recovery": {"label": "恢复", "desc": "系统/设备异常怎么处置"},
-        "knowledge": {"label": "知识", "desc": "这个应用的业务判据"},
-        "oracle": {"label": "判定", "desc": "能不能测、怎么判、多严"},
-    }
+    """前端 Tab：由服务端下发，不要在页面写死分类。"""
     out = []
-    for k in KINDS:
+    for k in _TAB_ORDER:
+        meta = _TAB_LABELS[k]
         rows = _collect(k)
         out.append({
-            "kind": k, **labels[k],
+            "kind": k, **meta,
             "count": len(rows),
             "ready": k not in _NOT_READY,
             "not_ready_reason": _NOT_READY.get(k, ""),

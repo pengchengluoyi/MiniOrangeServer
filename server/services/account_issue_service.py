@@ -1,6 +1,6 @@
 # !/usr/bin/env python
 # -*-coding:utf-8 -*-
-"""开跑前从号池申请本条用例要用的测试账号。不锁号、不切会话。"""
+"""开跑前从账号管理申请本条用例要用的测试账号。不切会话。租约在 resources.lease。"""
 from __future__ import annotations
 
 import re
@@ -10,7 +10,7 @@ from script.log import SLog
 
 TAG = "AccountIssue"
 
-EMPTY_BRIEF = "（号池无可用账号；登录所需手机号只能问人）"
+EMPTY_BRIEF = "（账号管理里没有可用账号；登录所需手机号只能问人）"
 
 _SMS_IN_NOTE = re.compile(
     r"(?:验证码|sms(?:_?code)?)\s*(?:为|是|=|:|：)\s*(\d{4,8})",
@@ -29,20 +29,34 @@ def _phone_ok(phone: str) -> bool:
     return bool(re.fullmatch(r"\d{8,13}", p))
 
 
+def _phone_tail(phone: str) -> str:
+    p = re.sub(r"\s+", "", str(phone or ""))
+    if len(p) >= 4:
+        return p[-4:]
+    return p
+
+
 def format_accounts_brief(ranked: list[dict], *, picked: Optional[dict] = None) -> str:
-    from server.services.project_env import account_ident, account_label
+    """给模型看的公开 brief：不写口令明文，值由资源网关填。"""
+    from server.services.project_env import account_ident
 
     rows = [r for r in (ranked or []) if isinstance(r, dict)]
     top = picked if isinstance(picked, dict) and picked else (rows[0] if rows else None)
     if not top:
         return EMPTY_BRIEF
-    lines = ["登录页优先用【首选】的手机号 input_text，禁止再问人要号。"]
-    sms = str(top.get("sms_code") or extract_account_sms(str(top.get("note") or "")))
+    lines = [
+        "已租测试资源账号。登录页 input_text 并带 field=phone；"
+        "口令页 input_text 并带 field=sms_code。"
+        "值由资源网关填写，禁止 ask_human 要号或码，禁止自己编造。"
+    ]
     phone = str(top.get("phone") or "").strip()
     tags = [str(t).strip() for t in (top.get("tags") or []) if str(t).strip()]
-    head = f"首选：{account_label(top)}"
-    if phone and phone != account_ident(top):
-        head += f" 手机号 {phone}"
+    ident = account_ident(top)
+    shown = f"尾号 {_phone_tail(ident)}" if _phone_ok(ident) else (ident or "未填号码")
+    head = f"首选：{shown} · {str(top.get('env') or '-')}"
+    surf = str(top.get("surface_label") or top.get("surface") or "").strip()
+    if surf:
+        head += f" · {surf}"
     if tags:
         head += " 标签：" + "、".join(tags[:6])
     lines.append(head)
@@ -53,20 +67,21 @@ def format_accounts_brief(ranked: list[dict], *, picked: Optional[dict] = None) 
         if score is not None:
             extra = f"{extra}（{score} 分）" if extra else f"{score} 分"
         lines.append(f"匹配：{extra}")
-    if sms:
-        lines.append(f"固定验证码：{sms}（来自号池备注，验证码页直接填，不要问人）")
-    elif str(top.get("note") or "").strip():
-        lines.append(f"备注：{str(top.get('note')).strip()[:120]}")
     rest = [r for r in rows[1:6] if str(r.get("id") or "") != str(top.get("id") or "")]
     if rest:
         lines.append("其它候选：")
         for row in rest:
-            bit = f"- {account_label(row)}"
+            ident = account_ident(row)
+            shown = f"尾号 {_phone_tail(ident)}" if _phone_ok(ident) else (ident or "未填号码")
+            bit = f"- {shown} · {str(row.get('env') or '-')}"
+            extra_s = str(row.get("surface_label") or row.get("surface") or "").strip()
+            if extra_s:
+                bit += f" · {extra_s}"
             if row.get("reason"):
                 bit += f" · {row.get('reason')}"
             lines.append(bit)
     if not phone:
-        lines.append("首选没有手机号，登录页才允许 ask_human 要号码。")
+        lines.append("首选没有手机号，仅当资源网关也没有时才允许 ask_human。")
     return "\n".join(lines)
 
 
@@ -100,8 +115,11 @@ def issue_account_for_case(
     case_id: str = "",
     case_name: str = "",
     preconditions: str = "",
+    surface: str = "",
+    platform: str = "",
+    target_id: str = "",
 ) -> dict[str, Any]:
-    """按用例前置+名称从项目号池挑匹配最高的号。失败返回空 brief，不抛给执行链。"""
+    """按用例前置+名称从账号管理挑匹配最高的号。失败返回空 brief，不抛给执行链。"""
     from server.services.project_env import account_ident, list_test_accounts, pick_test_accounts
 
     empty = {"picked": {}, "ranked": [], "brief": EMPTY_BRIEF, "phone": "", "sms_code": ""}
@@ -111,7 +129,14 @@ def issue_account_for_case(
     try:
         doc = _env_doc_for_app(app_id)
         ranked = pick_test_accounts(
-            list_test_accounts(doc), prompt=prompt, env=env_profile or "",
+            list_test_accounts(doc),
+            prompt=prompt,
+            env=env_profile or "",
+            surface=surface,
+            platform=platform,
+            target_id=target_id,
+            env_doc=doc,
+            channels=doc.get("channels") if isinstance(doc, dict) else [],
         )
     except Exception as exc:
         SLog.w(TAG, f"pick failed case={case_id}: {exc}")
@@ -149,19 +174,24 @@ def bind_account_for_case(
     case_id: str = "",
     case_name: str = "",
     preconditions: str = "",
+    surface: str = "",
+    platform: str = "",
+    target_id: str = "",
 ) -> dict[str, Any]:
-    issued = issue_account_for_case(
+    from server.services.resources.lease import lease_account
+
+    return lease_account(
+        ctx,
         app_id=app_id,
         env_profile=env_profile,
         case_id=case_id,
         case_name=case_name,
         preconditions=preconditions,
+        surface=surface,
+        platform=platform,
+        target_id=target_id,
+        run_id=str(getattr(ctx, "run_id", "") or getattr(ctx, "batch_id", "") or "") if ctx is not None else "",
     )
-    if ctx is None:
-        return issued
-    ctx.accounts_brief = str(issued.get("brief") or EMPTY_BRIEF)
-    ctx.picked_account = dict(issued.get("picked") or {})
-    return issued
 
 
 def _record_pick(case_id: str, prompt: str, env: str, ranked: list, top: dict) -> None:
@@ -185,7 +215,7 @@ def _record_pick(case_id: str, prompt: str, env: str, ranked: list, top: dict) -
             role="test-engineer",
             skill="pick_account",
             source="case_run",
-            detail="筛测试账号",
+            detail="租账号",
             input_data={"case_id": case_id, "env": env, "prompt": (prompt or "")[:400]},
             output_data={
                 "picked": public[0] if public else {},

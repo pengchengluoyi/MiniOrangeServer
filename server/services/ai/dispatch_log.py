@@ -63,6 +63,8 @@ _JOB_TO_SKILL = {
     "edit_atlas": "propose_atlas",
     "agent-restart": "agent-decide",
     "inspect-session": "inspect-session",
+    "case-scene": "case-scene",
+    "pick_device": "pick_device",
     "pick_account": "pick_account",
     "role_chat": "",
     "qa_tick": "",
@@ -120,6 +122,8 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
         return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "restart" in parsed and parsed.get("thought"):
         return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
+    if parsed.get("session_prep") in ("relogin", "logout", "skip") and parsed.get("required_session"):
+        return {"trigger": "case_run", "job": "case-scene", "role": "test-engineer", "skill": "case-scene", "source": "case_run"}
     if parsed.get("session") in ("logged_out", "logged_in", "unknown") and parsed.get("identity"):
         return {"trigger": "case_run", "job": "inspect-session", "role": "test-engineer", "skill": "inspect-session", "source": "case_run"}
     if parsed.get("thought") and any(k in parsed for k in ("action", "tool", "capability_id", "done", "x", "y")):
@@ -135,6 +139,7 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
     if (
         (isinstance(parsed.get("tags"), list) and "replaces" in parsed and "reason" in parsed)
         or ("测试账号" in sys_l and "标签" in sys_l)
+        or ("账号管理" in sys_l and "标签" in sys_l)
     ):
         return {
             "trigger": "case_run",
@@ -163,6 +168,8 @@ def infer_call_meta(row: dict | None = None, *, output: Any = None, system_promp
         return {"trigger": "case_run", "job": "goal-extract", "role": "test-engineer", "skill": "goal-extract", "source": "case_run"}
     if "是否先重开" in sys_l or "agent-restart" in sys_l:
         return {"trigger": "case_run", "job": "agent-restart", "role": "test-engineer", "skill": "agent-decide", "source": "case_run"}
+    if "场景理解" in sys_l or "session_prep" in sys_l or "case-scene" in sys_l:
+        return {"trigger": "case_run", "job": "case-scene", "role": "test-engineer", "skill": "case-scene", "source": "case_run"}
     if "登录会话" in sys_l or "inspect-session" in sys_l:
         return {"trigger": "case_run", "job": "inspect-session", "role": "test-engineer", "skill": "inspect-session", "source": "case_run"}
     if "下一个动作" in sys_l or "agent-decide" in sys_l:
